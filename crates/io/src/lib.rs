@@ -2,3 +2,16 @@
 //! 坏扇区读取策略，能识别坏区的镜像。
 //!
 //! 允许 `unsafe`，仅用于平台系统调用，每处都要写 `// SAFETY:` 说明。
+
+mod device;
+mod error;
+mod raw;
+mod read;
+#[cfg(windows)]
+mod windows_disk;
+
+pub use device::BlockDevice;
+pub use error::IoError;
+pub use raw::RawImage;
+#[cfg(windows)]
+pub use windows_disk::WindowsDisk;
