@@ -22,7 +22,7 @@
 |---|---|
 | `#![forbid(unsafe_code)]` | 除 `io`、`broker` 外的全部 crate |
 | 每处 `unsafe` 写 `// SAFETY:` 说明为什么成立 | `io`、`broker` |
-| 禁止 `unwrap`、`expect`、直接下标访问（clippy `unwrap_used`、`expect_used`、`indexing_slicing`） | 解析磁盘数据的 crate：`part`、`fs`、`formats`、`carve`、`repair` |
+| 禁止 `unwrap`、`expect`、直接下标访问（clippy `unwrap_used`、`expect_used`、`indexing_slicing`） | 解析磁盘数据的 crate：`part`、`fs`、`formats`、`carve`、`repair`；测试代码除外（`clippy.toml`） |
 | 来自磁盘的数值做运算时一律用 `checked_*` / `saturating_*` | 同上 |
 | release 构建也开启 `overflow-checks`，作为兜底 | 同上 |
 | 引擎侧的块设备类型不提供写方法；写盘只能通过写入计划 | 全部 |
@@ -39,6 +39,7 @@ cargo test --workspace
 
 ## 3. 界面（Vue 3 + TypeScript）
 
+- 界面只运行在 Tauri 桌面窗口中，不考虑浏览器与移动端；窗口最小 960×640。开发服务器只绑定 `127.0.0.1`。
 - TypeScript `strict`；组件一律 `<script setup lang="ts">` 加组合式 API。
 - 与宿主的通信集中在一个服务层，组件不直接调用 Tauri 命令。
 - 用户可见文案全部走国际化资源，不在组件里硬编码。

@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "app/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1.0.104"
+serde = { version = "1.0.229", features = ["derive"] }
+tauri = "2.12.4"
+tauri-build = "2.7.3"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+
+# 解析磁盘数据的 crate 在 release 构建中也检查整数溢出，作为带检查运算之外的兜底
+[profile.release.package.yisi-part]
+overflow-checks = true
+
+[profile.release.package.yisi-fs]
+overflow-checks = true
+
+[profile.release.package.yisi-formats]
+overflow-checks = true
+
+[profile.release.package.yisi-carve]
+overflow-checks = true
+
+[profile.release.package.yisi-repair]
+overflow-checks = true

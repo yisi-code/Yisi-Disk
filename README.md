@@ -32,7 +32,7 @@ Yisi-Disk/
 └─ docs/            设计文档
 ```
 
-目录会随开发逐步建立。
+`tests/` 随开发建立。
 
 ## 文档
 
@@ -47,3 +47,22 @@ Yisi-Disk/
 | Windows | Visual Studio 生成工具（C++ 桌面开发组件与 Windows SDK）、WebView2（Windows 11 自带） |
 | macOS | Xcode 命令行工具 |
 | Linux | WebKitGTK 4.1 及 Tauri 所需的系统库 |
+
+## 常用命令
+
+Rust（在仓库根目录）：
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+界面与桌面宿主（在 `app/ui` 下；`pnpm tauri` 会切到 `app/` 再运行 Tauri CLI）：
+
+```bash
+pnpm install
+pnpm typecheck
+pnpm tauri dev
+pnpm tauri build
+```
