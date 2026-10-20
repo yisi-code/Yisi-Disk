@@ -3,7 +3,8 @@ import type { UnlistenFn } from '@tauri-apps/api/event'
 import {
   cancelJob,
   onJobEvent,
-  startReadScan,
+  startDiskScan,
+  startImageScan,
   toHostError,
   type HostError,
   type JobEvent,
@@ -19,9 +20,13 @@ export type ReadScanStatus =
   | 'failed'
   | 'cancelled'
 
+/** 扫描对象：镜像文件，或按编号指定的物理磁盘 */
+export type ScanTarget = { kind: 'image'; path: string } | { kind: 'disk'; diskNumber: number }
+
 /** 一次读取扫描的状态：发起、取消，以及按任务事件更新进度和结果 */
 export function useReadScan() {
   const status = ref<ReadScanStatus>('idle')
+  const targetKind = ref<ScanTarget['kind']>('image')
   const done = ref(0)
   const total = ref(0)
   const bytesPerSecond = ref<number | null>(null)
@@ -56,13 +61,14 @@ export function useReadScan() {
     unlisten?.()
   })
 
-  async function start(path: string) {
+  async function start(target: ScanTarget) {
     if (isBusy.value) {
       return
     }
     const id = crypto.randomUUID()
     jobId = id
     startedAt = performance.now()
+    targetKind.value = target.kind
     status.value = 'starting'
     done.value = 0
     total.value = 0
@@ -71,7 +77,11 @@ export function useReadScan() {
     failure.value = null
     isUnresponsive.value = false
     try {
-      await startReadScan(id, path)
+      if (target.kind === 'image') {
+        await startImageScan(id, target.path)
+      } else {
+        await startDiskScan(id, target.diskNumber)
+      }
       if (jobId === id && status.value === 'starting') {
         status.value = 'running'
       }
@@ -84,7 +94,8 @@ export function useReadScan() {
   }
 
   async function cancel() {
-    if (jobId === null || (status.value !== 'starting' && status.value !== 'running')) {
+    // 启动阶段（可能正在等 UAC）引擎还没接下任务，只能在运行中取消
+    if (jobId === null || status.value !== 'running') {
       return
     }
     status.value = 'cancelling'
@@ -104,6 +115,10 @@ export function useReadScan() {
     }
     switch (event.kind) {
       case 'progress': {
+        // 物理磁盘可能先等了一段 UAC，速度从第一次进度算起
+        if (event.data.done === 0) {
+          startedAt = performance.now()
+        }
         const seconds = (performance.now() - startedAt) / 1000
         done.value = event.data.done
         total.value = event.data.total
@@ -145,6 +160,7 @@ export function useReadScan() {
 
   return {
     status,
+    targetKind,
     done,
     total,
     percent,

@@ -3,9 +3,9 @@
   "productName": "Yisi-Disk",
   "identifier": "io.github.yisi-code.yisi-disk",
   "build": {
-    "beforeDevCommand": "cargo build -p yisi-engine && pnpm dev",
+    "beforeDevCommand": "cargo build -p yisi-engine -p yisi-broker && pnpm dev",
     "devUrl": "http://127.0.0.1:1420",
-    "beforeBuildCommand": "cargo build -p yisi-engine --release && pnpm build",
+    "beforeBuildCommand": "cargo build -p yisi-engine -p yisi-broker --release && pnpm build",
     "frontendDist": "../ui/dist"
   },
   "app": {

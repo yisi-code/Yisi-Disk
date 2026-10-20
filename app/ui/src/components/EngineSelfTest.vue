@@ -1,19 +1,24 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useReadScan } from '../composables/useReadScan'
+import DiskPicker from './DiskPicker.vue'
+import { useHostErrorText } from '../composables/useHostErrorText'
+import { useReadScan, type ScanTarget } from '../composables/useReadScan'
 import {
   getEngineCapabilities,
   toHostError,
   type EngineCapabilities,
   type HostError,
 } from '../services/host'
+import { formatBytes } from '../utils/format'
 
-const BYTE_UNITS = ['B', 'KiB', 'MiB', 'GiB', 'TiB'] as const
+const LIST_DISKS_METHOD = 'disk.list'
 
-const { t, te } = useI18n()
+const { t } = useI18n()
+const { formatHostError } = useHostErrorText()
 const {
   status,
+  targetKind,
   done,
   total,
   percent,
@@ -28,10 +33,24 @@ const {
 
 const capabilities = ref<EngineCapabilities | null>(null)
 const capabilitiesError = ref<HostError | null>(null)
+const sourceKind = ref<ScanTarget['kind']>('image')
 const imagePath = ref('')
+const selectedDisk = ref<number | null>(null)
+
+const canScanDisks = computed(
+  () => capabilities.value?.methods.includes(LIST_DISKS_METHOD) ?? false,
+)
+
+const scanTarget = computed<ScanTarget | null>(() => {
+  if (sourceKind.value === 'image') {
+    const path = imagePath.value.trim()
+    return path === '' ? null : { kind: 'image', path }
+  }
+  return selectedDisk.value === null ? null : { kind: 'disk', diskNumber: selectedDisk.value }
+})
 
 const canStart = computed(
-  () => capabilities.value !== null && imagePath.value.trim() !== '' && !isBusy.value,
+  () => capabilities.value !== null && scanTarget.value !== null && !isBusy.value,
 )
 
 const statusText = computed(() => {
@@ -39,7 +58,9 @@ const statusText = computed(() => {
     case 'idle':
       return ''
     case 'starting':
-      return t('selfTest.status.starting')
+      return targetKind.value === 'disk'
+        ? t('selfTest.status.startingDisk')
+        : t('selfTest.status.starting')
     case 'running':
     case 'cancelling':
       return t('selfTest.status.running', {
@@ -67,29 +88,13 @@ onMounted(async () => {
 })
 
 function handleSubmit() {
-  if (canStart.value) {
-    void start(imagePath.value.trim())
+  if (canStart.value && scanTarget.value !== null) {
+    void start(scanTarget.value)
   }
 }
 
 function handleCancel() {
   void cancel()
-}
-
-function formatBytes(bytes: number): string {
-  let value = bytes
-  let unitIndex = 0
-  while (value >= 1024 && unitIndex < BYTE_UNITS.length - 1) {
-    value /= 1024
-    unitIndex += 1
-  }
-  return `${value.toFixed(unitIndex === 0 ? 0 : 1)} ${BYTE_UNITS[unitIndex]}`
-}
-
-function formatError(error: HostError): string {
-  const key = `errors.${error.code}`
-  const message = te(key) ? t(key) : t('errors.unknown')
-  return error.detail === '' ? message : t('errors.withDetail', { message, detail: error.detail })
 }
 </script>
 
@@ -107,35 +112,62 @@ function formatError(error: HostError): string {
         }}
       </template>
       <span v-else-if="capabilitiesError" class="self-test__error" role="alert">
-        {{ formatError(capabilitiesError) }}
+        {{ formatHostError(capabilitiesError) }}
       </span>
       <template v-else>{{ t('selfTest.engineChecking') }}</template>
     </p>
 
     <form class="self-test__form" @submit.prevent="handleSubmit">
-      <label class="self-test__label" for="self-test-path">{{ t('selfTest.imagePath') }}</label>
-      <input
-        id="self-test-path"
-        v-model="imagePath"
-        class="self-test__input"
-        type="text"
-        spellcheck="false"
-        autocomplete="off"
-        :placeholder="t('selfTest.imagePathPlaceholder')"
-        :disabled="isBusy"
-      />
-      <button v-if="!isBusy" class="self-test__button" type="submit" :disabled="!canStart">
-        {{ t('selfTest.start') }}
-      </button>
-      <button
-        v-else
-        class="self-test__button self-test__button--secondary"
-        type="button"
-        :disabled="status === 'cancelling'"
-        @click="handleCancel"
-      >
-        {{ status === 'cancelling' ? t('selfTest.cancelling') : t('selfTest.cancel') }}
-      </button>
+      <fieldset class="self-test__source" :disabled="isBusy">
+        <legend class="self-test__source-legend">{{ t('selfTest.source.legend') }}</legend>
+        <label class="self-test__source-option">
+          <input v-model="sourceKind" type="radio" name="self-test-source" value="image" />
+          {{ t('selfTest.source.image') }}
+        </label>
+        <label class="self-test__source-option">
+          <input
+            v-model="sourceKind"
+            type="radio"
+            name="self-test-source"
+            value="disk"
+            :disabled="!canScanDisks"
+          />
+          {{ t('selfTest.source.disk') }}
+        </label>
+      </fieldset>
+
+      <div v-if="sourceKind === 'image'" class="self-test__image">
+        <label class="self-test__label" for="self-test-path">{{ t('selfTest.imagePath') }}</label>
+        <input
+          id="self-test-path"
+          v-model="imagePath"
+          class="self-test__input"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          :placeholder="t('selfTest.imagePathPlaceholder')"
+          :disabled="isBusy"
+        />
+      </div>
+      <template v-else>
+        <DiskPicker v-model="selectedDisk" :disabled="isBusy" />
+        <p class="self-test__hint">{{ t('selfTest.disk.hint') }}</p>
+      </template>
+
+      <div class="self-test__actions">
+        <button v-if="!isBusy" class="self-test__button" type="submit" :disabled="!canStart">
+          {{ t('selfTest.start') }}
+        </button>
+        <button
+          v-else
+          class="self-test__button self-test__button--secondary"
+          type="button"
+          :disabled="status !== 'running'"
+          @click="handleCancel"
+        >
+          {{ status === 'cancelling' ? t('selfTest.cancelling') : t('selfTest.cancel') }}
+        </button>
+      </div>
     </form>
 
     <div v-if="status !== 'idle'" class="self-test__job" aria-live="polite">
@@ -144,7 +176,7 @@ function formatError(error: HostError): string {
       <p v-if="isUnresponsive" class="self-test__error" role="alert">
         {{ t('selfTest.unresponsive') }}
       </p>
-      <p v-if="failure" class="self-test__error" role="alert">{{ formatError(failure) }}</p>
+      <p v-if="failure" class="self-test__error" role="alert">{{ formatHostError(failure) }}</p>
       <dl v-if="report && status === 'completed'" class="self-test__report">
         <dt>{{ t('selfTest.result.bytesRead') }}</dt>
         <dd>{{ formatBytes(report.bytesRead) }} / {{ formatBytes(report.size) }}</dd>
@@ -158,7 +190,9 @@ function formatError(error: HostError): string {
           }}
         </dd>
         <dt>{{ t('selfTest.result.elapsed') }}</dt>
-        <dd>{{ t('selfTest.result.elapsedValue', { seconds: (report.elapsedMs / 1000).toFixed(1) }) }}</dd>
+        <dd>
+          {{ t('selfTest.result.elapsedValue', { seconds: (report.elapsedMs / 1000).toFixed(1) }) }}
+        </dd>
       </dl>
     </div>
   </section>
@@ -188,6 +222,33 @@ function formatError(error: HostError): string {
 
 .self-test__form {
   display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.self-test__source {
+  display: flex;
+  gap: var(--space-md);
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.self-test__source-legend {
+  float: left;
+  margin-right: var(--space-sm);
+  padding: 0;
+}
+
+.self-test__source-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  cursor: pointer;
+}
+
+.self-test__image {
+  display: flex;
   align-items: center;
   gap: var(--space-sm);
 }
@@ -201,14 +262,28 @@ function formatError(error: HostError): string {
   min-width: 0;
   padding: var(--space-xs) var(--space-sm);
   color: var(--color-text);
-  background: var(--color-bg);
+  background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--space-xs);
   font: inherit;
 }
 
+.self-test__input:disabled {
+  background: var(--color-bg);
+}
+
+.self-test__hint {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-small);
+}
+
+.self-test__actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .self-test__button {
-  flex: none;
   padding: var(--space-xs) var(--space-md);
   color: var(--color-on-accent);
   background: var(--color-accent);

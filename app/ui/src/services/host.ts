@@ -17,6 +17,30 @@ export interface HostError {
   detail: string
 }
 
+export type DiskBus =
+  | 'ata'
+  | 'sata'
+  | 'scsi'
+  | 'sas'
+  | 'nvme'
+  | 'usb'
+  | 'sd'
+  | 'mmc'
+  | 'virtual'
+  | 'other'
+
+export interface DiskSummary {
+  number: number
+  path: string
+  size: number
+  sectorSize: number
+  vendor: string
+  model: string
+  serial: string
+  bus: DiskBus
+  removable: boolean
+}
+
 export interface ByteRange {
   offset: number
   length: number
@@ -54,9 +78,20 @@ export function getEngineCapabilities(): Promise<EngineCapabilities> {
   return invoke<EngineCapabilities>('engine_capabilities')
 }
 
+/** 列出物理磁盘：只查询设备属性，不需要管理员权限 */
+export async function listDisks(): Promise<DiskSummary[]> {
+  const list = await invoke<{ disks: DiskSummary[] }>('disk_list')
+  return list.disks
+}
+
 /** 任务 ID 由调用方生成：事件可能先于这个调用返回到达，调用前就要记下它 */
-export function startReadScan(jobId: string, path: string): Promise<void> {
-  return invoke<void>('job_start_read_scan', { jobId, path })
+export function startImageScan(jobId: string, path: string): Promise<void> {
+  return invoke<void>('job_start_image_scan', { jobId, path })
+}
+
+/** 第一次扫描物理磁盘时会弹出 UAC，这个调用一直等到用户作答、磁盘打开为止 */
+export function startDiskScan(jobId: string, diskNumber: number): Promise<void> {
+  return invoke<void>('job_start_disk_scan', { jobId, diskNumber })
 }
 
 export function cancelJob(jobId: string): Promise<void> {

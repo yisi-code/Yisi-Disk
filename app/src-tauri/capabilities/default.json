@@ -6,7 +6,9 @@
   "permissions": [
     "allow-app-info",
     "allow-engine-capabilities",
-    "allow-job-start-read-scan",
+    "allow-disk-list",
+    "allow-job-start-image-scan",
+    "allow-job-start-disk-scan",
     "allow-job-cancel",
     "core:event:allow-listen",
     "core:event:allow-unlisten"

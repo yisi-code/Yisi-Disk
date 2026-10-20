@@ -11,6 +11,8 @@ pub const CAPABILITIES: &str = "engine.capabilities";
 pub const READ_SCAN: &str = "disk.readScan";
 /// 取消任务：参数 [`JobRef`]。
 pub const CANCEL: &str = "job.cancel";
+/// 列出物理磁盘：没有参数，结果是 [`DiskList`]。只查询设备属性、不读磁盘内容，不需要管理员权限；目前只在 Windows 上提供。
+pub const LIST_DISKS: &str = "disk.list";
 
 /// 引擎每隔 [`HEARTBEAT_INTERVAL`] 发一次，没有参数。
 pub const HEARTBEAT: &str = "engine.heartbeat";
@@ -58,6 +60,31 @@ pub struct ReadScanParams {
 pub enum Source {
     #[serde(rename_all = "camelCase")]
     Image { path: String, sector_size: u32 },
+    /// 物理磁盘。Windows 上 `handle` 是磁盘代理复制进引擎进程的只读句柄。
+    #[serde(rename_all = "camelCase")]
+    Disk { handle: u64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskList {
+    pub disks: Vec<DiskSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskSummary {
+    pub number: u32,
+    pub path: String,
+    pub size: u64,
+    /// 逻辑扇区大小。
+    pub sector_size: u32,
+    pub vendor: String,
+    pub model: String,
+    pub serial: String,
+    /// ata、sata、scsi、sas、nvme、usb、sd、mmc、virtual、other 之一。
+    pub bus: String,
+    pub removable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

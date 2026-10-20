@@ -14,6 +14,7 @@ serde_json.workspace = true
 tauri.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+yisi-broker.workspace = true
 yisi-engine.workspace = true
 yisi-rpc.workspace = true
 

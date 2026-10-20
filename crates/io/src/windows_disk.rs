@@ -9,13 +9,13 @@ use std::{io, ptr};
 
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
-use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::Ioctl::{
     DISK_GEOMETRY, GET_LENGTH_INFORMATION, IOCTL_DISK_GET_DRIVE_GEOMETRY,
     IOCTL_DISK_GET_LENGTH_INFO,
 };
 
 use crate::device::validate_sector_size;
+use crate::ioctl::{field, invalid_data, ioctl_read};
 use crate::read::{read_aligned, read_file_at};
 use crate::{BlockDevice, IoError};
 
@@ -130,48 +130,4 @@ fn query_sector_size(handle: HANDLE) -> io::Result<u32> {
         &out,
         offset_of!(DISK_GEOMETRY, BytesPerSector),
     )?))
-}
-
-/// 只有输出缓冲区的同步 `DeviceIoControl`，要求驱动把 `out` 写满。
-///
-/// 输出按字节接收、再按字段偏移取值，不把驱动写入的内容直接当成结构体。
-fn ioctl_read(handle: HANDLE, code: u32, out: &mut [u8]) -> io::Result<()> {
-    let out_len = u32::try_from(out.len()).map_err(|_| io::Error::other("IOCTL 输出缓冲区过大"))?;
-    let mut returned = 0u32;
-    // SAFETY: 句柄无效时内核直接返回错误，不会访问本进程的其他内存；输出指针和长度都来自独占借用的 `out`，
-    // 字节缓冲区可以接受驱动写入的任何内容；没有输入缓冲区；
-    // 不传 OVERLAPPED，调用同步完成，返回后不再访问这些指针。
-    let succeeded = unsafe {
-        DeviceIoControl(
-            handle,
-            code,
-            ptr::null(),
-            0,
-            out.as_mut_ptr().cast(),
-            out_len,
-            &mut returned,
-            ptr::null_mut(),
-        )
-    };
-    if succeeded == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if returned != out_len {
-        return Err(invalid_data(format!(
-            "IOCTL 只返回了 {returned} 字节，应为 {out_len} 字节"
-        )));
-    }
-    Ok(())
-}
-
-/// 取出从 `offset` 起 `N` 个字节，供 `from_ne_bytes` 还原字段值。
-fn field<const N: usize>(bytes: &[u8], offset: usize) -> io::Result<[u8; N]> {
-    bytes
-        .get(offset..offset + N)
-        .and_then(|slice| slice.try_into().ok())
-        .ok_or_else(|| invalid_data("IOCTL 输出比结构体短".to_owned()))
-}
-
-fn invalid_data(message: String) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
 }
