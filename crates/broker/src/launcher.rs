@@ -37,8 +37,10 @@ use windows_sys::Win32::UI::Shell::{
     SHELLEXECUTEINFOW_0, ShellExecuteExW,
 };
 
-use crate::frame::{FrameError, read_frame, write_frame};
-use crate::protocol::{Request, Response};
+use serde_json::{Value, json};
+use yisi_rpc::{ErrorObject, FrameError, Id, Message, Request, read_message, write_message};
+
+use crate::protocol::{DiskOpened, OPEN_DISK, OpenDiskParams, SHUTDOWN};
 
 /// 管道只允许管理员组和 SYSTEM 连接：提权后的代理属于管理员组；
 /// 未提权的进程即使与宿主是同一个用户，管理员组在它的令牌里也只用于拒绝，连不上。
@@ -69,6 +71,18 @@ pub enum LaunchError {
     UnexpectedClient { expected: u32, actual: u32 },
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum CallError {
+    #[error("与磁盘代理通信失败")]
+    Frame(#[from] FrameError),
+
+    #[error("磁盘代理拒绝了请求：{0}")]
+    Remote(ErrorObject),
+
+    #[error("磁盘代理的答复不是预期内容：{0}")]
+    Unexpected(String),
+}
+
 /// 与一个已提权、已核对身份的磁盘代理之间的连接。
 ///
 /// 连接关闭时代理读到管道结束后自行退出；宿主进程退出时代理也随之退出。
@@ -77,6 +91,7 @@ pub struct BrokerConnection {
     pipe: File,
     _process: OwnedHandle,
     pid: u32,
+    next_id: u64,
 }
 
 impl BrokerConnection {
@@ -104,6 +119,7 @@ impl BrokerConnection {
             pipe,
             _process: process,
             pid,
+            next_id: 0,
         })
     }
 
@@ -111,10 +127,37 @@ impl BrokerConnection {
         self.pid
     }
 
-    /// 发一条请求并等待答复。
-    pub fn request(&mut self, request: &Request) -> Result<Response, FrameError> {
-        write_frame(&mut self.pipe, request)?;
-        read_frame(&mut self.pipe)
+    /// 请代理以只读方式打开 `path`，把句柄复制进 `target_pid` 进程。
+    pub fn open_disk(&mut self, path: &str, target_pid: u32) -> Result<DiskOpened, CallError> {
+        let params = OpenDiskParams {
+            path: path.to_owned(),
+            target_pid,
+        };
+        let params = serde_json::to_value(params).map_err(FrameError::Json)?;
+        let result = self.call(OPEN_DISK, params)?;
+        serde_json::from_value(result).map_err(|error| CallError::Unexpected(error.to_string()))
+    }
+
+    /// 请代理结束。
+    pub fn shutdown(&mut self) -> Result<(), CallError> {
+        self.call(SHUTDOWN, json!({})).map(|_| ())
+    }
+
+    /// 发一条请求并等待对应 id 的答复；代理发来的通知忽略。
+    fn call(&mut self, method: &str, params: Value) -> Result<Value, CallError> {
+        self.next_id += 1;
+        let id = Id::Number(self.next_id);
+        let request = Message::Request(Request::new(id.clone(), method, params));
+        write_message(&mut self.pipe, &request)?;
+        loop {
+            match read_message(&mut self.pipe)? {
+                Message::Response(response) if response.id == id => {
+                    return response.outcome.map_err(CallError::Remote);
+                }
+                Message::Notification(_) => {}
+                other => return Err(CallError::Unexpected(format!("{other:?}"))),
+            }
+        }
     }
 }
 

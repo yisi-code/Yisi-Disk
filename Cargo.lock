@@ -4299,8 +4299,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
+ "tracing",
+ "tracing-subscriber",
+ "yisi-engine",
+ "yisi-rpc",
 ]
 
 [[package]]
@@ -4315,6 +4320,7 @@ dependencies = [
  "tracing-subscriber",
  "windows-sys 0.61.2",
  "yisi-io",
+ "yisi-rpc",
 ]
 
 [[package]]
@@ -4325,9 +4331,12 @@ version = "0.1.0"
 name = "yisi-engine"
 version = "0.1.0"
 dependencies = [
- "anyhow",
+ "serde",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
+ "yisi-io",
+ "yisi-rpc",
 ]
 
 [[package]]
@@ -4353,6 +4362,15 @@ version = "0.1.0"
 [[package]]
 name = "yisi-repair"
 version = "0.1.0"
+
+[[package]]
+name = "yisi-rpc"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "yoke"

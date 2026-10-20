@@ -67,10 +67,11 @@
 
 ### 3.1 协议
 
-- JSON-RPC 2.0，每条消息前加 4 字节小端长度成帧，单条消息不超过 1 MiB。
-- 宿主 → 引擎：请求（启动任务、回答决策、取消）。
-- 引擎 → 宿主：响应和事件（`progress`、`found`、`decision`、`log`、`completed`、`failed`）。
-- `progress` 事件在引擎侧节流，每秒最多 10 次；`found` 事件批量合并后发出。
+- JSON-RPC 2.0，每条消息前加 4 字节小端长度成帧，单条消息不超过 1 MiB。成帧与消息类型在 `yisi-rpc`，宿主、引擎、代理共用。
+- 宿主 → 引擎：请求（启动任务、回答决策、取消）。启动任务的请求带上任务 ID（由界面生成），引擎立即答复空对象，之后的进展都以通知送达。
+- 引擎 → 宿主：答复，以及不带 id 的通知：`engine.heartbeat`、`job.progress`、`job.log`、`job.completed`、`job.failed`、`job.cancelled`，以及之后的 `job.found`、`job.decision`。每条任务通知都带 `jobId`。
+- `job.progress` 在引擎侧节流，每秒最多 10 次，完成那一次总会发出；`found` 事件批量合并后发出。
+- 方法名、参数与结果的类型定义在 `yisi-engine` 的库部分（`protocol`），宿主直接引用，不另写一份。
 
 ### 3.2 任务生命周期
 
@@ -80,9 +81,10 @@ created → running ⇄ waiting_decision → completed
                  ↘ failed
 ```
 
-- 每个任务一个引擎进程，任务结束后进程退出。
-- 取消：先发 `job.cancel`，引擎在下一个检查点退出；超时未退出时，宿主结束进程。
-- 心跳：引擎每 2 秒发一次心跳；超过阈值没有心跳，标记为无响应，由用户决定等待还是结束。
+- 每个任务一个引擎进程，任务结束后进程退出。宿主断开（引擎的 stdin 结束）时，引擎取消正在运行的任务后退出。
+- 取消：先发 `job.cancel`，引擎在下一个检查点结束任务并发出 `job.cancelled`；5 秒内未退出时，宿主结束进程，仍按取消处理。
+- 任务里的 panic 在任务边界捕获，转成 `job.failed`；引擎没有发出终结通知就退出时，宿主按失败处理并带上退出码。
+- 心跳：引擎每 2 秒发一次心跳；超过 10 秒没有心跳，标记为无响应，由用户决定等待还是结束；心跳恢复后撤销标记。
 - 资源上限：引擎进程设置内存上限（Windows 用作业对象，Linux/macOS 用 rlimit）。
 
 ### 3.3 决策事件
@@ -116,6 +118,7 @@ created → running ⇄ waiting_decision → completed
 | `carve.listFileTypes` | 列出全部格式和分组 |
 | `carve.start` / `carve.resume` | 启动或续传深度恢复（任务） |
 | `image.create` / `image.resume` | 制作或续做能识别坏区的镜像（任务）；产出镜像文件和坏区图 |
+| `disk.readScan` | 从头到尾顺序读一遍设备或镜像，记下读不出的区段（任务，只读）；整盘坏区扫描的基础 |
 | `job.cancel` / `job.status` | 取消任务；查询状态 |
 
 ---
@@ -181,6 +184,7 @@ io ← part ← fs ← repair ─┐
           ↖ formats ← carve ├─ engine
                           ┘
 io ← broker
+rpc ← engine、broker、宿主（宿主另外引用 engine、broker 的库部分）
 ```
 
 | 目录 | 包名 | 职责 |
@@ -191,8 +195,9 @@ io ← broker
 | `crates/formats` | `yisi-formats` | 文件格式插件与注册表 |
 | `crates/carve` | `yisi-carve` | 深度恢复：搜索空间、块大小探测、识别分派、数据检查、暴力恢复、断点续传、恢复报告 |
 | `crates/repair` | `yisi-repair` | 分区分析与搜索、结构检查、反删除；生成写入计划（分区表、引导扇区、FAT/MFT 修复、文件系统修复） |
-| `crates/engine` | `yisi-engine` | 引擎进程入口：任务运行时、决策事件、进度节流、取消、JSON-RPC |
-| `crates/broker` | `yisi-broker` | 磁盘代理。库部分供宿主使用：消息格式与成帧、Windows 上建管道和提权启动；程序部分是以管理员身份运行的代理本身 |
+| `crates/engine` | `yisi-engine` | 引擎进程入口：任务运行时、决策事件、进度节流、取消。库部分只有宿主与引擎之间的方法与参数（`protocol`），供宿主引用 |
+| `crates/broker` | `yisi-broker` | 磁盘代理。库部分供宿主使用：方法与参数、Windows 上建管道和提权启动；程序部分是以管理员身份运行的代理本身 |
+| `crates/rpc` | `yisi-rpc` | 成帧与 JSON-RPC 2.0 消息，宿主、引擎、代理共用 |
 
 **unsafe 边界**：只有 `io` 和 `broker` 允许 `unsafe`，用于平台系统调用，每处都要写清安全性论证；其余模块一律 `#![forbid(unsafe_code)]`。
 
@@ -331,8 +336,10 @@ pub trait Recovering: Send {
 
 ## 7. 宿主
 
-- 管理引擎进程与代理进程的启动、心跳、退出。
-- 把引擎事件合并后转给界面，界面侧不直接面对高频事件。
+- 管理引擎进程与代理进程的启动、心跳、退出。引擎程序与宿主程序放在同一目录；Windows 上以 `CREATE_NO_WINDOW` 启动，不弹出控制台窗口。
+- 把引擎事件合并后转给界面，界面侧不直接面对高频事件。界面只收一个事件 `job-event`，载荷是 `{jobId, kind, data}`，`kind` 为 progress、log、completed、failed、cancelled、unresponsive、responsive。
+- 任务 ID 由界面生成（UUID），在调用启动命令之前就记下，避免事件先于命令返回到达时被丢掉；宿主只接受字母、数字和连字符。
+- 返回给界面的错误是 `{code, detail}`：`code` 由界面翻译成当前语言，`detail` 是技术细节。
 - 本地保存任务记录，界面重启后可以看到历史任务并续传。
 - Tauri 安全配置：严格 CSP；禁止加载远程内容；只开放白名单中的命令。
 

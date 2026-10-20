@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import EngineSelfTest from './components/EngineSelfTest.vue'
 import { SUPPORTED_LOCALES } from './i18n'
 import { getAppInfo } from './services/host'
 
@@ -60,6 +61,7 @@ onMounted(async () => {
           <span class="scenario-card__status">{{ t('scenarios.unavailable') }}</span>
         </li>
       </ul>
+      <EngineSelfTest />
     </main>
 
     <footer class="app-footer">

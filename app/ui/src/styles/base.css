@@ -5,6 +5,8 @@
   --color-text: #1d2129;
   --color-text-muted: #5c6370;
   --color-accent: #2f6fde;
+  --color-on-accent: #ffffff;
+  --color-danger: #c62828;
 
   --font-family-base: system-ui, 'Segoe UI', 'Microsoft YaHei UI', 'PingFang SC', sans-serif;
   --font-size-body: 14px;
@@ -29,6 +31,8 @@
     --color-text: #e6e8eb;
     --color-text-muted: #9aa1ab;
     --color-accent: #6c9cf0;
+    --color-on-accent: #0f1115;
+    --color-danger: #ef6b6b;
   }
 }
 
