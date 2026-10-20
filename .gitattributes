@@ -1,0 +1,21 @@
+# 统一以 LF 存储和检出，覆盖各机器的 core.autocrlf 设置
+* text=auto eol=lf
+
+# 只在 Windows 上执行的脚本保留 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制文件
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+*.img binary
+*.dd binary
+*.E01 binary
+*.e01 binary
