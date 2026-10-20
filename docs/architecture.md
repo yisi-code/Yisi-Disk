@@ -189,9 +189,15 @@ pub trait BlockDevice: Send + Sync {
     fn size(&self) -> u64;
     fn sector_size(&self) -> u32;
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, IoError>;
+    fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), IoError>; // 有默认实现
 }
 ```
 
+- `read_at` 的偏移和长度不要求按扇区对齐；读到设备末尾时截断，偏移不小于容量时返回 0。`read_exact_at` 读不满时返回带偏移的错误，供解析器使用。
+- 物理盘只接受起点、长度、缓冲区地址都按扇区对齐的读请求。后端在内部处理：请求本身已经对齐时直接读进调用方的缓冲区，否则经对齐的中转缓冲区（每次最多 1 MiB）读取再拷贝。
+- Windows 后端以只读、共享读写的方式打开 `\\.\PhysicalDriveN`，不加锁、不独占；容量和逻辑扇区大小用 IOCTL 查询。
+- 镜像文件不记录扇区大小，打开时由调用方给出（取来源磁盘的逻辑扇区大小）。扇区大小只接受 512 到 64 KiB 之间的 2 的幂。
+- 读错误带上偏移和系统错误码，供坏区策略识别介质错误。
 - 读错误按策略处理：重试次数、超时、跳过并记入坏区表，都可以配置。
 - 读缓存按扇区对齐；镜像文件优先用内存映射。
 
