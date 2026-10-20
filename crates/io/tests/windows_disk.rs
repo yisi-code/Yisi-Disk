@@ -1,6 +1,45 @@
 #![cfg(windows)]
 
-use yisi_io::{BlockDevice, WindowsDisk};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::windows::io::AsRawHandle;
+use std::path::Path;
+
+use yisi_io::{BlockDevice, IoError, WindowsDisk};
+
+#[test]
+fn adopt_rejects_values_that_are_not_handles() {
+    for value in [0u64, 0x7fff_fff0, u64::MAX] {
+        assert!(
+            matches!(WindowsDisk::adopt_handle(value), Err(IoError::Adopt { handle, .. }) if handle == value),
+            "value={value:#x}"
+        );
+    }
+}
+
+#[test]
+fn adopt_rejects_regular_file_and_leaves_it_open() {
+    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("adopt-regular-file.bin");
+    let mut file = std::fs::File::options()
+        .create(true)
+        .truncate(true)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(b"not a disk").unwrap();
+
+    let value = file.as_raw_handle().addr() as u64;
+    assert!(matches!(
+        WindowsDisk::adopt_handle(value),
+        Err(IoError::Adopt { .. })
+    ));
+
+    // 认领失败时不得关闭句柄：文件仍然可以照常读写
+    let mut content = String::new();
+    file.seek(SeekFrom::Start(0)).unwrap();
+    file.read_to_string(&mut content).unwrap();
+    assert_eq!(content, "not a disk");
+}
 
 /// 只读真盘测试：需要管理员权限，设备路径由环境变量 `YISI_IO_TEST_DEVICE` 指定。
 ///
