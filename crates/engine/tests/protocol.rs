@@ -136,6 +136,43 @@ fn capabilities_and_errors_keep_the_engine_alive() {
     assert!(engine.wait_exit().success());
 }
 
+/// 只查询设备属性，不读磁盘内容，普通权限即可。
+#[cfg(windows)]
+#[test]
+fn disk_list_reports_sizes_without_privilege() {
+    let mut engine = Engine::start();
+    let list = engine.call("disk.list", Value::Null).unwrap();
+    let disks = list["disks"].as_array().unwrap();
+    assert!(!disks.is_empty(), "至少应有系统盘");
+    for disk in disks {
+        assert!(disk["size"].as_u64().unwrap() > 0, "{disk}");
+        assert!(disk["sectorSize"].as_u64().unwrap() >= 512, "{disk}");
+        assert!(
+            disk["path"]
+                .as_str()
+                .unwrap()
+                .starts_with(r"\\.\PhysicalDrive"),
+            "{disk}"
+        );
+    }
+    engine.close_input();
+    assert!(engine.wait_exit().success());
+}
+
+#[test]
+fn disk_source_rejects_bogus_handle() {
+    let mut engine = Engine::start();
+    let error = engine
+        .call(
+            READ_SCAN,
+            json!({"jobId": "j", "source": {"type": "disk", "handle": 0x7fff_fff0u64}}),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, error_code::SOURCE_UNAVAILABLE);
+    engine.close_input();
+    assert!(engine.wait_exit().success());
+}
+
 #[test]
 fn read_scan_reports_progress_then_completes_and_exits() {
     let size = 5 * 1024 * 1024 + 100;

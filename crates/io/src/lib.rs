@@ -4,13 +4,19 @@
 //! 允许 `unsafe`，仅用于平台系统调用，每处都要写 `// SAFETY:` 说明。
 
 mod device;
+#[cfg(windows)]
+mod disk_list;
 mod error;
+#[cfg(windows)]
+mod ioctl;
 mod raw;
 mod read;
 #[cfg(windows)]
 mod windows_disk;
 
 pub use device::BlockDevice;
+#[cfg(windows)]
+pub use disk_list::{BusType, DiskInfo, list_disks};
 pub use error::IoError;
 pub use raw::RawImage;
 #[cfg(windows)]

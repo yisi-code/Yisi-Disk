@@ -3,7 +3,9 @@ fn main() {
     let manifest = tauri_build::AppManifest::new().commands(&[
         "app_info",
         "engine_capabilities",
-        "job_start_read_scan",
+        "disk_list",
+        "job_start_image_scan",
+        "job_start_disk_scan",
         "job_cancel",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))

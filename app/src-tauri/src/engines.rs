@@ -10,12 +10,15 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter};
 use yisi_engine::protocol::{
-    CANCEL, CANCELLED, CAPABILITIES, COMPLETED, Capabilities, FAILED, HEARTBEAT, JobRef, LOG,
-    PROGRESS, READ_SCAN, ReadScanParams, Source,
+    CANCEL, CANCELLED, CAPABILITIES, COMPLETED, Capabilities, DiskList, FAILED, HEARTBEAT, JobRef,
+    LIST_DISKS, LOG, PROGRESS, READ_SCAN, ReadScanParams, Source,
 };
+
+use crate::broker::BrokerSession;
 use yisi_rpc::{ErrorObject, FrameError, Id, Message, Request, read_message, write_message};
 
 /// 发给界面的事件名，载荷是 [`JobEvent`]。
@@ -27,6 +30,8 @@ const UNRESPONSIVE_AFTER: Duration = Duration::from_secs(10);
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
 /// 镜像文件不记录扇区大小，按最常见的 512 字节处理。
 const IMAGE_SECTOR_SIZE: u32 = 512;
+/// 磁盘代理只接受 1 到 3 位数字的磁盘编号。
+const MAX_DISK_NUMBER: u32 = 999;
 /// Windows 的 `CREATE_NO_WINDOW`：引擎是控制台程序，不弹出控制台窗口。
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -40,7 +45,7 @@ pub struct HostError {
 }
 
 impl HostError {
-    fn new(code: &'static str, detail: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, detail: impl Into<String>) -> Self {
         Self {
             code,
             detail: detail.into(),
@@ -64,20 +69,53 @@ pub struct Engines {
 }
 
 impl Engines {
-    /// 临时启动一个引擎查询能力，查完关闭它的输入，引擎随即退出。
     pub fn capabilities(&self) -> Result<Capabilities, HostError> {
-        let process = EngineProcess::spawn(None, || {})?;
-        let result = process.request(CAPABILITIES, Value::Null);
-        process.abandon();
-        serde_json::from_value(result?)
-            .map_err(|error| HostError::new("engineProtocol", error.to_string()))
+        query(CAPABILITIES)
     }
 
-    pub fn start_read_scan(
+    /// 列出物理磁盘：引擎只查询设备属性、不读磁盘内容，不需要管理员权限。
+    pub fn list_disks(&self) -> Result<DiskList, HostError> {
+        query(LIST_DISKS)
+    }
+
+    pub fn start_image_scan(
         &self,
         app: AppHandle,
         job_id: String,
         path: String,
+    ) -> Result<(), HostError> {
+        self.start_read_scan(app, job_id, |_| {
+            Ok(Source::Image {
+                path,
+                sector_size: IMAGE_SECTOR_SIZE,
+            })
+        })
+    }
+
+    /// 扫描物理磁盘：先启动引擎，再请磁盘代理（必要时弹出 UAC）把只读句柄复制进这个引擎。
+    pub fn start_disk_scan(
+        &self,
+        app: AppHandle,
+        broker: &BrokerSession,
+        job_id: String,
+        disk_number: u32,
+    ) -> Result<(), HostError> {
+        if disk_number > MAX_DISK_NUMBER {
+            return Err(HostError::new("invalidDisk", disk_number.to_string()));
+        }
+        let path = format!(r"\\.\PhysicalDrive{disk_number}");
+        self.start_read_scan(app, job_id, |engine_pid| {
+            let handle = broker.open_disk(&path, engine_pid)?;
+            Ok(Source::Disk { handle })
+        })
+    }
+
+    /// 启动引擎并交给它一个读取扫描任务。`source` 拿到引擎的进程 ID，返回要扫描的对象。
+    fn start_read_scan(
+        &self,
+        app: AppHandle,
+        job_id: String,
+        source: impl FnOnce(u32) -> Result<Source, HostError>,
     ) -> Result<(), HostError> {
         validate_job_id(&job_id)?;
         if lock(&self.jobs).contains_key(&job_id) {
@@ -90,16 +128,16 @@ impl Engines {
         })?;
         lock(&self.jobs).insert(job_id.clone(), Arc::clone(&process));
 
-        let params = ReadScanParams {
-            job_id: job_id.clone(),
-            source: Source::Image {
-                path,
-                sector_size: IMAGE_SECTOR_SIZE,
-            },
-        };
-        let params = serde_json::to_value(params)
-            .map_err(|error| HostError::new("engineProtocol", error.to_string()))?;
-        if let Err(error) = process.request(READ_SCAN, params) {
+        let started = source(process.pid).and_then(|source| {
+            let params = ReadScanParams {
+                job_id: job_id.clone(),
+                source,
+            };
+            let params = serde_json::to_value(params)
+                .map_err(|error| HostError::new("engineProtocol", error.to_string()))?;
+            process.request(READ_SCAN, params)
+        });
+        if let Err(error) = started {
             // 引擎没接下任务：关闭输入让它退出，并且不再为这个任务发事件
             process.abandon();
             lock(&self.jobs).remove(&job_id);
@@ -135,6 +173,7 @@ impl Engines {
 }
 
 struct EngineProcess {
+    pid: u32,
     child: Mutex<Child>,
     stdin: Mutex<Option<ChildStdin>>,
     pending: Mutex<HashMap<Id, Sender<Result<Value, ErrorObject>>>>,
@@ -151,7 +190,7 @@ impl EngineProcess {
         job: Option<(AppHandle, String)>,
         on_exit: impl FnOnce() + Send + 'static,
     ) -> Result<Arc<Self>, HostError> {
-        let path = engine_path()?;
+        let path = sibling_program("yisi-engine", "engineNotFound")?;
         let mut command = Command::new(&path);
         command
             .stdin(Stdio::piped())
@@ -165,6 +204,7 @@ impl EngineProcess {
         let mut child = command.spawn().map_err(|error| {
             HostError::new("engineStart", format!("{}：{error}", path.display()))
         })?;
+        let pid = child.id();
         let stdin = child.stdin.take();
         let stdout = child
             .stdout
@@ -172,6 +212,7 @@ impl EngineProcess {
             .ok_or_else(|| HostError::new("engineStart", "拿不到引擎的标准输出"))?;
 
         let process = Arc::new(Self {
+            pid,
             child: Mutex::new(child),
             stdin: Mutex::new(stdin),
             pending: Mutex::new(HashMap::new()),
@@ -358,15 +399,27 @@ fn emit(app: &AppHandle, job_id: &str, kind: &'static str, data: Value) {
     }
 }
 
-/// 引擎程序与宿主程序放在同一目录。
-fn engine_path() -> Result<PathBuf, HostError> {
-    let host = std::env::current_exe()
-        .map_err(|error| HostError::new("engineNotFound", error.to_string()))?;
-    let path = host.with_file_name(format!("yisi-engine{}", std::env::consts::EXE_SUFFIX));
+/// 临时启动一个引擎发一次查询，查完关闭它的输入，引擎随即退出。
+fn query<T: DeserializeOwned>(method: &str) -> Result<T, HostError> {
+    let process = EngineProcess::spawn(None, || {})?;
+    let result = process.request(method, Value::Null);
+    process.abandon();
+    serde_json::from_value(result?)
+        .map_err(|error| HostError::new("engineProtocol", error.to_string()))
+}
+
+/// 引擎、代理与宿主程序放在同一目录；找不到时返回错误码 `missing_code`。
+pub(crate) fn sibling_program(
+    stem: &str,
+    missing_code: &'static str,
+) -> Result<PathBuf, HostError> {
+    let host =
+        std::env::current_exe().map_err(|error| HostError::new(missing_code, error.to_string()))?;
+    let path = host.with_file_name(format!("{stem}{}", std::env::consts::EXE_SUFFIX));
     if path.is_file() {
         Ok(path)
     } else {
-        Err(HostError::new("engineNotFound", path.display().to_string()))
+        Err(HostError::new(missing_code, path.display().to_string()))
     }
 }
 
@@ -383,7 +436,7 @@ fn validate_job_id(job_id: &str) -> Result<(), HostError> {
     }
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 

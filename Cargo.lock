@@ -4304,6 +4304,7 @@ dependencies = [
  "tauri-build",
  "tracing",
  "tracing-subscriber",
+ "yisi-broker",
  "yisi-engine",
  "yisi-rpc",
 ]

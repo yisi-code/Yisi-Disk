@@ -9,9 +9,11 @@ use std::thread;
 use serde::Serialize;
 use serde_json::{Value, json};
 use yisi_engine::protocol::{
-    self, CANCEL, CAPABILITIES, Capabilities, HEARTBEAT, HEARTBEAT_INTERVAL, JobRef, READ_SCAN,
-    ReadScanParams, Source,
+    self, CANCEL, CAPABILITIES, Capabilities, HEARTBEAT, HEARTBEAT_INTERVAL, JobRef, LIST_DISKS,
+    READ_SCAN, ReadScanParams, Source,
 };
+#[cfg(windows)]
+use yisi_engine::protocol::{DiskList, DiskSummary};
 use yisi_io::{BlockDevice, RawImage};
 use yisi_rpc::{
     ErrorObject, FrameError, Message, Notification, Request, Response, error_code, read_message,
@@ -90,10 +92,18 @@ fn dispatch(
     events: &Sender<Event>,
 ) -> Result<Value, ErrorObject> {
     match request.method.as_str() {
-        CAPABILITIES => to_result(&Capabilities {
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-            methods: vec![READ_SCAN.to_owned(), CANCEL.to_owned()],
-        }),
+        CAPABILITIES => {
+            let mut methods = vec![READ_SCAN.to_owned(), CANCEL.to_owned()];
+            if cfg!(windows) {
+                methods.push(LIST_DISKS.to_owned());
+            }
+            to_result(&Capabilities {
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+                methods,
+            })
+        }
+        #[cfg(windows)]
+        LIST_DISKS => to_result(&disk_list()),
         READ_SCAN => {
             if job.is_some() {
                 return Err(ErrorObject::new(
@@ -144,7 +154,53 @@ fn open_source(source: &Source) -> Result<Box<dyn BlockDevice>, ErrorObject> {
                     error_chain(&error),
                 )
             }),
+        #[cfg(windows)]
+        Source::Disk { handle } => yisi_io::WindowsDisk::adopt_handle(*handle)
+            .map(|disk| Box::new(disk) as Box<dyn BlockDevice>)
+            .map_err(|error| {
+                ErrorObject::new(
+                    protocol::error_code::SOURCE_UNAVAILABLE,
+                    error_chain(&error),
+                )
+            }),
+        #[cfg(not(windows))]
+        Source::Disk { .. } => Err(ErrorObject::new(
+            protocol::error_code::SOURCE_UNAVAILABLE,
+            "当前平台还不支持扫描物理磁盘",
+        )),
     }
+}
+
+#[cfg(windows)]
+fn disk_list() -> DiskList {
+    use yisi_io::BusType;
+    let disks = yisi_io::list_disks()
+        .into_iter()
+        .map(|disk| DiskSummary {
+            number: disk.number,
+            path: disk.path,
+            size: disk.size,
+            sector_size: disk.sector_size,
+            vendor: disk.vendor,
+            model: disk.model,
+            serial: disk.serial,
+            bus: match disk.bus {
+                BusType::Ata => "ata",
+                BusType::Sata => "sata",
+                BusType::Scsi => "scsi",
+                BusType::Sas => "sas",
+                BusType::Nvme => "nvme",
+                BusType::Usb => "usb",
+                BusType::Sd => "sd",
+                BusType::Mmc => "mmc",
+                BusType::Virtual => "virtual",
+                BusType::Other => "other",
+            }
+            .to_owned(),
+            removable: disk.removable,
+        })
+        .collect();
+    DiskList { disks }
 }
 
 fn to_result(value: &impl Serialize) -> Result<Value, ErrorObject> {

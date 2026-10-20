@@ -58,7 +58,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-界面与桌面宿主（在 `app/ui` 下；`pnpm tauri` 会切到 `app/` 再运行 Tauri CLI；`tauri dev` / `tauri build` 会先编出引擎程序，放在宿主程序旁边）：
+界面与桌面宿主（在 `app/ui` 下；`pnpm tauri` 会切到 `app/` 再运行 Tauri CLI；`tauri dev` / `tauri build` 会先编出引擎和磁盘代理程序，放在宿主程序旁边）：
 
 ```bash
 pnpm install
