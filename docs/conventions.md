@@ -52,6 +52,7 @@ cargo test --workspace
 - **测试数据不得包含真实用户数据。**
 - 写盘相关测试只在镜像副本上进行，不碰真实磁盘。
 - 读真实磁盘的测试标 `#[ignore]`，只读，设备路径由环境变量给出（如 `YISI_IO_TEST_DEVICE`），在管理员终端手动运行：`cargo test -p yisi-io --test windows_disk -- --ignored --nocapture`。在 PowerShell 里设置环境变量；Git Bash 会吞掉 `\\.\` 开头的一个反斜杠。不对报过读错误的盘运行。
+- 句柄传递演示（会弹一次 UAC）：`cargo build -p yisi-broker --bins --examples` 之后，在**未提权**的 PowerShell 里运行 `target\debug\examples\handoff.exe target\debug\yisi-broker.exe \\.\PhysicalDrive0`，应看到授予的权限不含写类权限、读盘成功、重复认领与非磁盘路径都被拒绝。
 
 ## 5. 提交信息
 

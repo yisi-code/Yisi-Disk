@@ -39,7 +39,7 @@
 │  Tauri 2 宿主（Rust）  ⇄  界面（Vue 3 + TypeScript）         │
 │  任务管理 · 进程守护 · 事件节流 · 本地任务记录               │
 └──────────────┬──────────────────────────────┬──────────────┘
-               │ JSON-RPC（stdio 管道）        │ JSON-RPC（stdio 管道）
+               │ JSON-RPC（stdio 管道）        │ JSON-RPC（管道，见 4.1）
 ┌──────────────▼──────────────────┐  ┌────────▼──────────────────────┐
 │ 引擎进程（每个任务一个，普通权限）│  │ 磁盘代理（特权，代码最少）      │
 │  engine   任务 / 决策 / 进度 / 取消│◄─┤  枚举磁盘                       │
@@ -59,7 +59,7 @@
 3. **特权代码最少、可审查。** 只有磁盘代理持有特权，它只做三件事：枚举、打开、执行写入计划。
 4. **桌面环境限制。** 不少 Linux 桌面（Wayland）默认不允许 root 进程直接开窗口，界面本来就不能以特权身份运行。
 
-通信一律走父子进程之间的 stdio 管道，不监听任何网络端口。
+宿主与引擎之间走父子进程的 stdio 管道。宿主与磁盘代理之间：Linux 同样走 stdio；Windows 上提权进程接管不了 stdio，改走命名管道（第 4.1 节）。都不监听任何网络端口。
 
 ---
 
@@ -67,7 +67,7 @@
 
 ### 3.1 协议
 
-- JSON-RPC 2.0，每条消息加 4 字节长度前缀成帧。
+- JSON-RPC 2.0，每条消息前加 4 字节小端长度成帧，单条消息不超过 1 MiB。
 - 宿主 → 引擎：请求（启动任务、回答决策、取消）。
 - 引擎 → 宿主：响应和事件（`progress`、`found`、`decision`、`log`、`completed`、`failed`）。
 - `progress` 事件在引擎侧节流，每秒最多 10 次；`found` 事件批量合并后发出。
@@ -110,7 +110,9 @@ created → running ⇄ waiting_decision → completed
 | `repair.planPartitionWrite` / `repair.planBootSector` / `repair.planFatRepair` / `repair.planMftRepair` | 只生成写入计划，不写盘 |
 | `fs.check` | 文件系统一致性检查（任务，只读）；逐阶段推送进度，边查边推送发现的问题 |
 | `repair.planFsFix` | 按用户勾选的问题生成修复用的写入计划 |
+| `broker.openDisk` | 磁盘代理以只读方式打开物理磁盘，把句柄复制进指定的引擎进程（第 4.1 节） |
 | `broker.executeWrite` | 由磁盘代理执行一份已确认的写入计划 |
+| `broker.shutdown` | 结束磁盘代理 |
 | `carve.listFileTypes` | 列出全部格式和分组 |
 | `carve.start` / `carve.resume` | 启动或续传深度恢复（任务） |
 | `image.create` / `image.resume` | 制作或续做能识别坏区的镜像（任务）；产出镜像文件和坏区图 |
@@ -131,6 +133,18 @@ created → running ⇄ waiting_decision → completed
 | Windows | 代理以管理员身份运行（UAC） | `DuplicateHandle` 复制到引擎进程 |
 
 引擎侧的块设备类型**不提供写方法**，写盘能力在类型层面就不存在于引擎中。
+
+**Windows 的做法。** 普通权限的宿主只能用 `ShellExecuteEx("runas")` 启动提权进程，接管不了它的 stdio，所以宿主与代理之间走命名管道：
+
+- 管道由宿主创建，名字带 128 位随机数；`FILE_FLAG_FIRST_PIPE_INSTANCE` 让抢先占用同名管道的情况直接失败，`PIPE_REJECT_REMOTE_CLIENTS` 拒绝远程连接。
+- 管道的 ACL 只允许管理员组和 SYSTEM。提权后的代理属于管理员组；未提权的进程，即使与宿主是同一用户，也连不上。
+- 双向核对身份：宿主核对连进来的客户端进程就是刚启动的代理；代理核对管道的服务端进程就是命令行给出的宿主。
+- 宿主退出时代理随之退出，管道关闭时代理读到结束后退出，不留下以管理员身份运行的孤儿进程。
+- 代理只接受 `\\.\PhysicalDriveN` 形式的路径，不替宿主打开任意文件。
+- 代理只读打开设备，用 `DuplicateHandle(…, DUPLICATE_SAME_ACCESS)` 复制进引擎进程，复制出的句柄与原句柄一样只有读权限（实测授予的权限为 `FILE_GENERIC_READ`）。
+- 引擎用 `WindowsDisk::adopt_handle` 认领句柄：只接受能回答磁盘 IOCTL 的句柄，同一个值只能认领一次。引擎自己没有权限打开磁盘，这类句柄只能来自代理。
+
+macOS 的特权辅助程序同样没有 stdio，通道在实现 macOS 版时确定（XPC）。
 
 ### 4.2 写入计划
 
@@ -178,7 +192,7 @@ io ← broker
 | `crates/carve` | `yisi-carve` | 深度恢复：搜索空间、块大小探测、识别分派、数据检查、暴力恢复、断点续传、恢复报告 |
 | `crates/repair` | `yisi-repair` | 分区分析与搜索、结构检查、反删除；生成写入计划（分区表、引导扇区、FAT/MFT 修复、文件系统修复） |
 | `crates/engine` | `yisi-engine` | 引擎进程入口：任务运行时、决策事件、进度节流、取消、JSON-RPC |
-| `crates/broker` | `yisi-broker` | 磁盘代理进程入口 |
+| `crates/broker` | `yisi-broker` | 磁盘代理。库部分供宿主使用：消息格式与成帧、Windows 上建管道和提权启动；程序部分是以管理员身份运行的代理本身 |
 
 **unsafe 边界**：只有 `io` 和 `broker` 允许 `unsafe`，用于平台系统调用，每处都要写清安全性论证；其余模块一律 `#![forbid(unsafe_code)]`。
 
