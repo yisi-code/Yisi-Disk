@@ -21,11 +21,11 @@ mod windows_demo {
     use std::time::Duration;
     use std::{mem, ptr};
 
-    use anyhow::{Context, bail, ensure};
+    use anyhow::{Context, ensure};
     use windows_sys::Wdk::Foundation::{NtQueryObject, ObjectBasicInformation};
     use windows_sys::Win32::System::WindowsProgramming::PUBLIC_OBJECT_BASIC_INFORMATION;
-    use yisi_broker::launcher::BrokerConnection;
-    use yisi_broker::protocol::{Request, Response};
+    use yisi_broker::launcher::{BrokerConnection, CallError};
+    use yisi_broker::protocol::DiskOpened;
     use yisi_io::{BlockDevice, WindowsDisk};
 
     /// 任何一项都意味着句柄可以改动磁盘或它的安全设置：
@@ -50,18 +50,11 @@ mod windows_demo {
         let mut connection = BrokerConnection::launch(&broker, Duration::from_secs(120))?;
         println!("代理已连上并核对身份：pid={}", connection.broker_pid());
 
-        let response = connection.request(&Request::OpenDisk {
-            path: device.clone(),
-            target_pid: std::process::id(),
-        })?;
-        let Response::DiskOpened {
+        let DiskOpened {
             handle,
             size,
             sector_size,
-        } = response
-        else {
-            bail!("代理没有打开磁盘：{response:?}");
-        };
+        } = connection.open_disk(&device, std::process::id())?;
         println!("收到句柄 {handle:#x}：size={size} sector_size={sector_size}");
 
         let access = granted_access(handle)?;
@@ -89,18 +82,15 @@ mod windows_demo {
         );
         println!("重复认领同一个句柄被拒绝");
 
-        let rejected = connection.request(&Request::OpenDisk {
-            path: r"C:\Windows\System32\config\SAM".to_owned(),
-            target_pid: std::process::id(),
-        })?;
+        let rejected = connection.open_disk(r"C:\Windows\System32\config\SAM", std::process::id());
         ensure!(
-            matches!(rejected, Response::Failed { .. }),
+            matches!(rejected, Err(CallError::Remote(_))),
             "代理替宿主打开了普通文件：{rejected:?}"
         );
         println!("非物理磁盘路径被代理拒绝：{rejected:?}");
 
-        let reply = connection.request(&Request::Shutdown)?;
-        println!("结束代理：{reply:?}");
+        connection.shutdown()?;
+        println!("代理已确认结束");
         Ok(())
     }
 

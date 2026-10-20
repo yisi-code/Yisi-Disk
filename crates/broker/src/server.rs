@@ -5,15 +5,18 @@ use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle,
 use std::{io, ptr, thread};
 
 use anyhow::{Context, ensure};
+use serde_json::{Value, json};
 use windows_sys::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE};
 use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, INFINITE, OpenProcess, PROCESS_DUP_HANDLE, PROCESS_SYNCHRONIZE,
     WaitForSingleObject,
 };
-use yisi_broker::frame::{FrameError, read_frame, write_frame};
-use yisi_broker::protocol::{Request, Response};
+use yisi_broker::protocol::{DiskOpened, FailureData, OPEN_DISK, OpenDiskParams, SHUTDOWN};
 use yisi_io::{BlockDevice, IoError, WindowsDisk};
+use yisi_rpc::{
+    ErrorObject, FrameError, Message, Response, error_code, read_message, write_message,
+};
 
 pub fn run(pipe_name: &str, parent_pid: u32) -> anyhow::Result<()> {
     exit_with_parent(parent_pid).context("无法监视宿主进程")?;
@@ -30,44 +33,60 @@ pub fn run(pipe_name: &str, parent_pid: u32) -> anyhow::Result<()> {
     tracing::info!(parent_pid, "已连上宿主");
 
     loop {
-        let request = match read_frame::<_, Request>(&mut pipe) {
-            Ok(request) => request,
+        let message = match read_message(&mut pipe) {
+            Ok(message) => message,
             Err(FrameError::Closed) => return Ok(()),
             Err(error) => return Err(error).context("读取请求失败"),
         };
-        let response = match request {
-            Request::OpenDisk { path, target_pid } => open_disk(&path, target_pid),
-            Request::Shutdown => {
-                write_frame(&mut pipe, &Response::ShuttingDown)?;
-                return Ok(());
-            }
+        // 代理只处理请求；宿主不会发通知，也不该发响应
+        let Message::Request(request) = message else {
+            continue;
         };
-        write_frame(&mut pipe, &response)?;
+        let stop = request.method == SHUTDOWN;
+        let outcome = match request.method.as_str() {
+            OPEN_DISK => request
+                .params::<OpenDiskParams>()
+                .and_then(|params| open_disk(&params.path, params.target_pid)),
+            SHUTDOWN => Ok(json!({})),
+            other => Err(ErrorObject::new(
+                error_code::METHOD_NOT_FOUND,
+                format!("磁盘代理没有方法 {other}"),
+            )),
+        };
+        let response = Response {
+            id: request.id,
+            outcome,
+        };
+        write_message(&mut pipe, &Message::Response(response))?;
+        if stop {
+            return Ok(());
+        }
     }
 }
 
-fn open_disk(path: &str, target_pid: u32) -> Response {
+fn open_disk(path: &str, target_pid: u32) -> Result<Value, ErrorObject> {
     if !is_physical_drive_path(path) {
-        return failed(
+        return Err(failed(
             format!("只接受 \\\\.\\PhysicalDriveN 形式的路径，收到 {path}"),
             None,
-        );
+        ));
     }
-    let disk = match WindowsDisk::open(path) {
-        Ok(disk) => disk,
-        Err(error) => return failed(error_chain(&error), os_error(&error)),
-    };
-    match duplicate_into(disk.as_handle(), target_pid) {
-        Ok(handle) => Response::DiskOpened {
-            handle,
-            size: disk.size(),
-            sector_size: disk.sector_size(),
-        },
-        Err(error) => failed(
+    let disk =
+        WindowsDisk::open(path).map_err(|error| failed(error_chain(&error), os_error(&error)))?;
+    let handle = duplicate_into(disk.as_handle(), target_pid).map_err(|error| {
+        failed(
             format!("无法把句柄交给进程 {target_pid}：{error}"),
             error.raw_os_error(),
-        ),
-    }
+        )
+    })?;
+    let opened = DiskOpened {
+        handle,
+        size: disk.size(),
+        sector_size: disk.sector_size(),
+    };
+    serde_json::to_value(opened).map_err(|error| {
+        ErrorObject::new(error_code::INTERNAL_ERROR, format!("无法编码答复：{error}"))
+    })
 }
 
 /// 管理员权限下任何文件都能打开，所以只接受物理磁盘路径，不替宿主打开任意文件。
@@ -134,9 +153,10 @@ fn pipe_server_pid(pipe: &File) -> io::Result<u32> {
     Ok(pid)
 }
 
-fn failed(message: String, os_error: Option<i32>) -> Response {
+fn failed(message: String, os_error: Option<i32>) -> ErrorObject {
     tracing::warn!(%message, ?os_error, "请求失败");
-    Response::Failed { message, os_error }
+    let data = serde_json::to_value(FailureData { os_error }).unwrap_or(Value::Null);
+    ErrorObject::new(error_code::SERVER_ERROR, message).with_data(data)
 }
 
 fn os_error(error: &IoError) -> Option<i32> {

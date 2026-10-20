@@ -1,0 +1,172 @@
+//! 启动真实的引擎进程，按宿主的方式收发 JSON-RPC。
+
+use std::path::Path;
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
+use yisi_engine::protocol::{
+    CANCEL, CAPABILITIES, COMPLETED, HEARTBEAT, PROGRESS, READ_SCAN, ReadScanReport, error_code,
+};
+use yisi_rpc::{Id, Message, Request, error_code as rpc_error, read_message, write_message};
+
+const TIMEOUT: Duration = Duration::from_secs(20);
+
+struct Engine {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    incoming: Receiver<Message>,
+    next_id: u64,
+}
+
+impl Engine {
+    fn start() -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_yisi-engine"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take();
+        let mut stdout = child.stdout.take().unwrap();
+        let (sender, incoming) = mpsc::channel();
+        thread::spawn(move || {
+            while let Ok(message) = read_message(&mut stdout) {
+                if sender.send(message).is_err() {
+                    return;
+                }
+            }
+        });
+        Self {
+            child,
+            stdin,
+            incoming,
+            next_id: 0,
+        }
+    }
+
+    fn call(&mut self, method: &str, params: Value) -> Result<Value, yisi_rpc::ErrorObject> {
+        self.next_id += 1;
+        let id = Id::Number(self.next_id);
+        let request = Message::Request(Request::new(id.clone(), method, params));
+        write_message(self.stdin.as_mut().unwrap(), &request).unwrap();
+        loop {
+            match self.incoming.recv_timeout(TIMEOUT).unwrap() {
+                Message::Response(response) if response.id == id => return response.outcome,
+                Message::Notification(_) => {}
+                other => panic!("意外的消息：{other:?}"),
+            }
+        }
+    }
+
+    /// 收通知直到出现 `method`，返回途中收到的全部通知（不含心跳）。
+    fn notifications_until(&self, method: &str) -> Vec<(String, Value)> {
+        let mut seen = Vec::new();
+        loop {
+            match self.incoming.recv_timeout(TIMEOUT).unwrap() {
+                Message::Notification(notification) if notification.method == HEARTBEAT => {}
+                Message::Notification(notification) => {
+                    let done = notification.method == method;
+                    seen.push((notification.method, notification.params));
+                    if done {
+                        return seen;
+                    }
+                }
+                other => panic!("意外的消息：{other:?}"),
+            }
+        }
+    }
+
+    fn close_input(&mut self) {
+        self.stdin = None;
+    }
+
+    fn wait_exit(&mut self) -> ExitStatus {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            assert!(Instant::now() < deadline, "引擎没有按时退出");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+fn make_image(name: &str, len: usize) -> String {
+    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    std::fs::write(&path, vec![0x5a; len]).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn capabilities_and_errors_keep_the_engine_alive() {
+    let mut engine = Engine::start();
+
+    let capabilities = engine.call(CAPABILITIES, Value::Null).unwrap();
+    assert_eq!(capabilities["version"], env!("CARGO_PKG_VERSION"));
+    assert!(
+        capabilities["methods"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::from(READ_SCAN))
+    );
+
+    let unknown = engine.call("disk.format", json!({})).unwrap_err();
+    assert_eq!(unknown.code, rpc_error::METHOD_NOT_FOUND);
+
+    let invalid = engine.call(READ_SCAN, json!({"jobId": 1})).unwrap_err();
+    assert_eq!(invalid.code, rpc_error::INVALID_PARAMS);
+
+    let missing = engine
+        .call(
+            READ_SCAN,
+            json!({"jobId": "j", "source": {"type": "image", "path": "Z:/no/such.img", "sectorSize": 512}}),
+        )
+        .unwrap_err();
+    assert_eq!(missing.code, error_code::SOURCE_UNAVAILABLE);
+
+    let not_running = engine.call(CANCEL, json!({"jobId": "j"})).unwrap_err();
+    assert_eq!(not_running.code, error_code::JOB_NOT_FOUND);
+
+    // 宿主断开、没有任务时，引擎直接退出
+    engine.close_input();
+    assert!(engine.wait_exit().success());
+}
+
+#[test]
+fn read_scan_reports_progress_then_completes_and_exits() {
+    let size = 5 * 1024 * 1024 + 100;
+    let path = make_image("engine-read-scan.img", size);
+    let mut engine = Engine::start();
+
+    let accepted = engine
+        .call(
+            READ_SCAN,
+            json!({"jobId": "scan-1", "source": {"type": "image", "path": path, "sectorSize": 512}}),
+        )
+        .unwrap();
+    assert_eq!(accepted, json!({}));
+
+    let notifications = engine.notifications_until(COMPLETED);
+    let (_, last_progress) = notifications
+        .iter()
+        .rev()
+        .find(|(method, _)| method == PROGRESS)
+        .unwrap();
+    assert_eq!(last_progress["jobId"], "scan-1");
+    assert_eq!(last_progress["done"], size as u64);
+    assert_eq!(last_progress["total"], size as u64);
+
+    let (_, completed) = notifications.last().unwrap();
+    assert_eq!(completed["jobId"], "scan-1");
+    let report: ReadScanReport = serde_json::from_value(completed["result"].clone()).unwrap();
+    assert_eq!(report.size, size as u64);
+    assert_eq!(report.bytes_read, size as u64);
+    assert!(report.unreadable.is_empty());
+
+    // 任务结束后引擎自行退出
+    assert!(engine.wait_exit().success());
+}

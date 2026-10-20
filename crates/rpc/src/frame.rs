@@ -21,6 +21,9 @@ pub enum FrameError {
 
     #[error("消息不是预期格式的 JSON")]
     Json(#[from] serde_json::Error),
+
+    #[error("不是合法的 JSON-RPC 2.0 消息：{0}")]
+    Invalid(String),
 }
 
 pub fn write_frame<W: Write, T: Serialize>(writer: &mut W, message: &T) -> Result<(), FrameError> {
@@ -61,27 +64,23 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(reader: &mut R) -> Result<T, Fra
 mod tests {
     use std::io::Cursor;
 
+    use serde_json::{Value, json};
+
     use super::*;
-    use crate::protocol::{Request, Response};
 
     #[test]
     fn frames_round_trip_in_sequence() {
+        let first = json!({"path": r"\\.\PhysicalDrive1", "targetPid": 4242});
+        let second = json!(["中文", 1, null]);
         let mut wire = Vec::new();
-        let open = Request::OpenDisk {
-            path: r"\\.\PhysicalDrive1".to_owned(),
-            target_pid: 4242,
-        };
-        write_frame(&mut wire, &open).unwrap();
-        write_frame(&mut wire, &Request::Shutdown).unwrap();
+        write_frame(&mut wire, &first).unwrap();
+        write_frame(&mut wire, &second).unwrap();
 
         let mut reader = Cursor::new(wire);
-        assert_eq!(read_frame::<_, Request>(&mut reader).unwrap(), open);
-        assert_eq!(
-            read_frame::<_, Request>(&mut reader).unwrap(),
-            Request::Shutdown
-        );
+        assert_eq!(read_frame::<_, Value>(&mut reader).unwrap(), first);
+        assert_eq!(read_frame::<_, Value>(&mut reader).unwrap(), second);
         assert!(matches!(
-            read_frame::<_, Request>(&mut reader),
+            read_frame::<_, Value>(&mut reader),
             Err(FrameError::Closed)
         ));
     }
@@ -89,9 +88,9 @@ mod tests {
     #[test]
     fn truncated_frames_are_errors_not_clean_close() {
         let mut wire = Vec::new();
-        write_frame(&mut wire, &Response::ShuttingDown).unwrap();
+        write_frame(&mut wire, &json!({"result": "ok"})).unwrap();
         for cut in 1..wire.len() {
-            let result = read_frame::<_, Response>(&mut Cursor::new(&wire[..cut]));
+            let result = read_frame::<_, Value>(&mut Cursor::new(&wire[..cut]));
             assert!(
                 matches!(&result, Err(FrameError::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof),
                 "cut={cut} result={result:?}"
@@ -103,18 +102,18 @@ mod tests {
     fn oversized_length_is_rejected_before_allocating() {
         let wire = u32::MAX.to_le_bytes();
         assert!(matches!(
-            read_frame::<_, Response>(&mut Cursor::new(wire)),
+            read_frame::<_, Value>(&mut Cursor::new(wire)),
             Err(FrameError::TooLarge(len)) if len == u64::from(u32::MAX)
         ));
     }
 
     #[test]
     fn malformed_json_is_rejected() {
-        let body = br#"{"method":"broker.formatDisk"}"#;
+        let body = b"{not json";
         let mut wire = (body.len() as u32).to_le_bytes().to_vec();
         wire.extend_from_slice(body);
         assert!(matches!(
-            read_frame::<_, Request>(&mut Cursor::new(wire)),
+            read_frame::<_, Value>(&mut Cursor::new(wire)),
             Err(FrameError::Json(_))
         ));
     }
