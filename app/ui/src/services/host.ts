@@ -1,6 +1,7 @@
 // 与宿主通信的唯一入口：组件不直接调用 Tauri 命令
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { open } from '@tauri-apps/plugin-dialog'
 
 export interface AppInfo {
   version: string
@@ -41,6 +42,35 @@ export interface DiskSummary {
   removable: boolean
 }
 
+/** 任务的源：镜像文件，或按编号指定的物理磁盘 */
+export type JobTarget = { kind: 'image'; path: string } | { kind: 'disk'; diskNumber: number }
+
+/** 深度恢复支持的一种格式；扩展名同时是格式的标识 */
+export interface FileType {
+  extension: string
+  /** 英文简述：界面按扩展名取本地化文案，取不到时显示它 */
+  description: string
+  maxSize: number
+  enabledByDefault: boolean
+}
+
+export interface TypeTotal {
+  count: number
+  bytes: number
+}
+
+/** 深度恢复的结果 */
+export interface CarveSummary {
+  /** 实际存放结果的目录 */
+  outputDir: string
+  files: number
+  bytes: number
+  /** 按扩展名统计 */
+  byType: Record<string, TypeTotal>
+  unreadableBytes: number
+  elapsedMs: number
+}
+
 /** 深度恢复找到的一个文件 */
 export interface FoundFile {
   name: string
@@ -63,11 +93,12 @@ export interface ReadScanReport {
   elapsedMs: number
 }
 
-export type JobEvent =
+/** 宿主转发的任务事件；`completed` 的结果随任务种类而定（读取扫描为 ReadScanReport，深度恢复为 CarveSummary） */
+export type JobEvent<TResult = unknown> =
   | { jobId: string; kind: 'progress'; data: { done: number; total: number } }
   | { jobId: string; kind: 'found'; data: { files: FoundFile[] } }
   | { jobId: string; kind: 'log'; data: { level: string; message: string } }
-  | { jobId: string; kind: 'completed'; data: { result: ReadScanReport } }
+  | { jobId: string; kind: 'completed'; data: { result: TResult } }
   | {
       jobId: string
       kind: 'failed'
@@ -93,6 +124,11 @@ export async function listDisks(): Promise<DiskSummary[]> {
   return list.disks
 }
 
+export async function listFileTypes(): Promise<FileType[]> {
+  const list = await invoke<{ types: FileType[] }>('carve_file_types')
+  return list.types
+}
+
 /** 任务 ID 由调用方生成：事件可能先于这个调用返回到达，调用前就要记下它 */
 export function startImageScan(jobId: string, path: string): Promise<void> {
   return invoke<void>('job_start_image_scan', { jobId, path })
@@ -103,12 +139,38 @@ export function startDiskScan(jobId: string, diskNumber: number): Promise<void> 
   return invoke<void>('job_start_disk_scan', { jobId, diskNumber })
 }
 
+/**
+ * 深度恢复：结果放在 outputDir 下新建的子目录里。物理磁盘与读取扫描一样可能先等提权；
+ * 输出目录在被扫描的盘上（或无法确认不在）时宿主返回 outputOnSource
+ */
+export function startCarve(
+  jobId: string,
+  target: JobTarget,
+  outputDir: string,
+  extensions: string[],
+): Promise<void> {
+  return invoke<void>('job_start_carve', { jobId, target, outputDir, extensions })
+}
+
 export function cancelJob(jobId: string): Promise<void> {
   return invoke<void>('job_cancel', { jobId })
 }
 
-export function onJobEvent(handler: (event: JobEvent) => void): Promise<UnlistenFn> {
-  return listen<JobEvent>(JOB_EVENT, (event) => handler(event.payload))
+/** 调用方按自己发起的任务种类给出 TResult：宿主不在事件里标注结果的类型 */
+export function onJobEvent<TResult>(
+  handler: (event: JobEvent<TResult>) => void,
+): Promise<UnlistenFn> {
+  return listen<JobEvent<TResult>>(JOB_EVENT, (event) => handler(event.payload))
+}
+
+/** 系统的选择文件夹对话框；用户取消时返回 null */
+export function pickDirectory(title: string): Promise<string | null> {
+  return open({ title, directory: true, multiple: false })
+}
+
+/** 系统的选择文件对话框；用户取消时返回 null */
+export function pickFile(title: string): Promise<string | null> {
+  return open({ title, directory: false, multiple: false })
 }
 
 /** 命令失败时，宿主抛出的是 HostError；其他情况（例如命令不存在）是字符串 */

@@ -17,6 +17,7 @@ pub const LIST_DISKS: &str = "disk.list";
 /// 列出深度恢复支持的格式：没有参数，结果是 [`FileTypeList`]。
 pub const LIST_FILE_TYPES: &str = "carve.listFileTypes";
 /// 深度恢复（任务）：参数 [`CarveParams`]，立即返回空对象；找到的文件经 [`FOUND`] 通知分批送达，结果是 [`CarveSummary`]。
+/// 源为物理磁盘时，输出目录必须在另一块盘上，否则答复 [`error_code::OUTPUT_ON_SOURCE`]。
 pub const CARVE_START: &str = "carve.start";
 
 /// 引擎每隔 [`HEARTBEAT_INTERVAL`] 发一次，没有参数。
@@ -46,6 +47,8 @@ pub mod error_code {
     pub const JOB_NOT_FOUND: i64 = -32003;
     /// 输出目录无法创建或写入。
     pub const OUTPUT_UNAVAILABLE: i64 = -32004;
+    /// 输出目录在被扫描的物理磁盘上，或者无法确认它不在：恢复出的文件会覆盖还没找回的数据。
+    pub const OUTPUT_ON_SOURCE: i64 = -32005;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

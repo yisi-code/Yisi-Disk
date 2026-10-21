@@ -8,10 +8,10 @@ mod engines;
 
 use serde::Serialize;
 use tauri::{AppHandle, State};
-use yisi_engine::protocol::{Capabilities, DiskList};
+use yisi_engine::protocol::{Capabilities, DiskList, FileTypeList};
 
 use crate::broker::BrokerSession;
-use crate::engines::{Engines, HostError};
+use crate::engines::{Engines, HostError, Target};
 
 #[derive(Serialize)]
 struct AppInfo {
@@ -37,6 +37,11 @@ fn disk_list(engines: State<'_, Engines>) -> Result<DiskList, HostError> {
 }
 
 #[tauri::command(async)]
+fn carve_file_types(engines: State<'_, Engines>) -> Result<FileTypeList, HostError> {
+    engines.file_types()
+}
+
+#[tauri::command(async)]
 fn job_start_image_scan(
     app: AppHandle,
     engines: State<'_, Engines>,
@@ -58,6 +63,20 @@ fn job_start_disk_scan(
     engines.start_disk_scan(app, &broker, job_id, disk_number)
 }
 
+/// 深度恢复。源为物理磁盘时与读取扫描一样，第一次需要时提权启动磁盘代理。
+#[tauri::command(async)]
+fn job_start_carve(
+    app: AppHandle,
+    engines: State<'_, Engines>,
+    broker: State<'_, BrokerSession>,
+    job_id: String,
+    target: Target,
+    output_dir: String,
+    extensions: Vec<String>,
+) -> Result<(), HostError> {
+    engines.start_carve(app, &broker, job_id, target, output_dir, extensions)
+}
+
 #[tauri::command(async)]
 fn job_cancel(engines: State<'_, Engines>, job_id: String) -> Result<(), HostError> {
     engines.cancel(&job_id)
@@ -68,14 +87,17 @@ fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(Engines::default())
         .manage(BrokerSession::default())
         .invoke_handler(tauri::generate_handler![
             app_info,
             engine_capabilities,
             disk_list,
+            carve_file_types,
             job_start_image_scan,
             job_start_disk_scan,
+            job_start_carve,
             job_cancel
         ])
         .run(tauri::generate_context!())?;

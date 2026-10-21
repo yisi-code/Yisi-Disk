@@ -141,13 +141,6 @@ fn dispatch(
                 ));
             }
             let params: CarveParams = request.params()?;
-            // 输出不能写回被扫描的盘：物理盘的这项检查随界面入口一起做，目前只接受镜像文件
-            if matches!(params.source, Source::Disk { .. }) {
-                return Err(ErrorObject::new(
-                    protocol::error_code::SOURCE_UNAVAILABLE,
-                    "深度恢复暂时只支持镜像文件",
-                ));
-            }
             let registry = Registry::builtin();
             let enabled = carve_job::enabled_formats(&registry, params.extensions.as_deref())
                 .map_err(|extension| {
@@ -156,9 +149,9 @@ fn dispatch(
                         format!("不认识的格式 {extension}"),
                     )
                 })?;
-            let device = open_source(&params.source)?;
             let output_dir = Path::new(&params.output_dir)
                 .join(format!("recovered-{}", short_id(&params.job_id)));
+            let device = open_carve_source(&params.source, &output_dir)?;
             let sink = DirectorySink::new(&output_dir).map_err(|error| {
                 ErrorObject::new(
                     protocol::error_code::OUTPUT_UNAVAILABLE,
@@ -216,20 +209,69 @@ fn open_source(source: &Source) -> Result<Box<dyn BlockDevice>, ErrorObject> {
                 )
             }),
         #[cfg(windows)]
-        Source::Disk { handle } => yisi_io::WindowsDisk::adopt_handle(*handle)
-            .map(|disk| Box::new(disk) as Box<dyn BlockDevice>)
-            .map_err(|error| {
-                ErrorObject::new(
-                    protocol::error_code::SOURCE_UNAVAILABLE,
-                    error_chain(&error),
-                )
-            }),
+        Source::Disk { handle } => {
+            adopt_disk(*handle).map(|disk| Box::new(disk) as Box<dyn BlockDevice>)
+        }
         #[cfg(not(windows))]
         Source::Disk { .. } => Err(ErrorObject::new(
             protocol::error_code::SOURCE_UNAVAILABLE,
             "当前平台还不支持扫描物理磁盘",
         )),
     }
+}
+
+/// 打开深度恢复的源。物理盘要先确认输出目录不在这块盘上，而且必须在创建任何输出目录之前确认：
+/// 单是建目录，就已经写到了这块盘上。
+#[cfg_attr(not(windows), expect(unused_variables))]
+fn open_carve_source(
+    source: &Source,
+    output_dir: &Path,
+) -> Result<Box<dyn BlockDevice>, ErrorObject> {
+    match source {
+        #[cfg(windows)]
+        Source::Disk { handle } => {
+            let disk = adopt_disk(*handle)?;
+            ensure_output_elsewhere(
+                disk.device_number(),
+                yisi_io::volume_disk_numbers(output_dir),
+            )?;
+            Ok(Box::new(disk))
+        }
+        // 其他平台还打不开物理盘，open_source 直接拒绝，走不到写输出那一步
+        _ => open_source(source),
+    }
+}
+
+#[cfg(windows)]
+fn adopt_disk(handle: u64) -> Result<yisi_io::WindowsDisk, ErrorObject> {
+    yisi_io::WindowsDisk::adopt_handle(handle).map_err(|error| {
+        ErrorObject::new(
+            protocol::error_code::SOURCE_UNAVAILABLE,
+            error_chain(&error),
+        )
+    })
+}
+
+/// 核对输出目录所在的磁盘里没有源盘。任何一项查不到都拒绝：宁可不开始，也不冒险写回源盘。
+#[cfg(windows)]
+fn ensure_output_elsewhere(
+    source_disk: Result<u32, yisi_io::IoError>,
+    output_disks: Result<Vec<u32>, yisi_io::IoError>,
+) -> Result<(), ErrorObject> {
+    let reject =
+        |message: String| ErrorObject::new(protocol::error_code::OUTPUT_ON_SOURCE, message);
+    let source_disk = source_disk
+        .map_err(|error| reject(format!("无法确认源盘的编号：{}", error_chain(&error))))?;
+    let output_disks = output_disks.map_err(|error| {
+        reject(format!(
+            "无法确认输出目录所在的磁盘：{}",
+            error_chain(&error)
+        ))
+    })?;
+    if output_disks.contains(&source_disk) {
+        return Err(reject(format!("输出目录在被扫描的磁盘 {source_disk} 上")));
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -324,4 +366,45 @@ pub(crate) fn error_chain(error: &dyn std::error::Error) -> String {
         source = cause.source();
     }
     message
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use std::io;
+
+    use yisi_io::IoError;
+
+    use super::*;
+
+    fn query_failed() -> IoError {
+        IoError::Query {
+            what: "测试",
+            source: io::Error::other("查不到"),
+        }
+    }
+
+    #[test]
+    fn output_on_another_disk_is_accepted() {
+        assert!(ensure_output_elsewhere(Ok(1), Ok(vec![0])).is_ok());
+        assert!(ensure_output_elsewhere(Ok(0), Ok(vec![1, 2])).is_ok());
+    }
+
+    #[test]
+    fn output_on_the_source_disk_is_rejected() {
+        let error = ensure_output_elsewhere(Ok(0), Ok(vec![0])).unwrap_err();
+        assert_eq!(error.code, protocol::error_code::OUTPUT_ON_SOURCE);
+        assert!(error.message.contains("磁盘 0"), "{}", error.message);
+        // 跨盘的卷只要有一段在源盘上就不行
+        let spanned = ensure_output_elsewhere(Ok(2), Ok(vec![1, 2, 3])).unwrap_err();
+        assert_eq!(spanned.code, protocol::error_code::OUTPUT_ON_SOURCE);
+    }
+
+    #[test]
+    fn unknown_locations_are_rejected() {
+        let source = ensure_output_elsewhere(Err(query_failed()), Ok(vec![1])).unwrap_err();
+        assert_eq!(source.code, protocol::error_code::OUTPUT_ON_SOURCE);
+        let output = ensure_output_elsewhere(Ok(0), Err(query_failed())).unwrap_err();
+        assert_eq!(output.code, protocol::error_code::OUTPUT_ON_SOURCE);
+        assert!(output.message.contains("查不到"), "{}", output.message);
+    }
 }

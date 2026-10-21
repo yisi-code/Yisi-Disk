@@ -1,0 +1,218 @@
+//! 查询一个路径所在的卷落在哪些物理磁盘上：只查询属性，不读写磁盘内容，不需要管理员权限。
+
+use std::ffi::OsString;
+use std::fs::{File, OpenOptions};
+use std::io;
+use std::mem::{offset_of, size_of};
+use std::os::windows::ffi::OsStringExt;
+use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::AsRawHandle;
+use std::path::{Path, PathBuf};
+
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_NAME_NORMALIZED, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, GetFinalPathNameByHandleW, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+    VOLUME_NAME_GUID,
+};
+use windows_sys::Win32::System::Ioctl::{DISK_EXTENT, VOLUME_DISK_EXTENTS};
+
+use crate::IoError;
+use crate::ioctl::{field, invalid_data, ioctl};
+
+/// 磁盘区段查询的缓冲区：结构体头 8 字节，之后每个区段 24 字节，够一百多块盘组成的卷。
+const EXTENTS_BUFFER_SIZE: usize = 4096;
+/// 卷的 GUID 路径以此开头，例如 `\\?\Volume{0a1b…}\`。
+const VOLUME_PREFIX: &str = r"\\?\Volume{";
+
+/// `path` 所在的卷落在哪些物理磁盘上，编号与 `\\.\PhysicalDriveN` 的 N 相同；跨盘的卷会有多个。
+///
+/// `path` 可以还不存在：取最近一级已存在的上级目录，打开它（随目录联接、符号链接走到真实位置），
+/// 再查它所在卷的磁盘区段。还不存在的那几级目录之后才创建，不会改变所在的卷。
+/// 网络路径、查不到磁盘区段的卷都返回错误。
+pub fn volume_disk_numbers(path: impl AsRef<Path>) -> Result<Vec<u32>, IoError> {
+    let path = path.as_ref();
+    let locate = |path: &Path, source| IoError::Locate {
+        path: path.to_path_buf(),
+        source,
+    };
+    let existing = path
+        .ancestors()
+        .find(|ancestor| !ancestor.as_os_str().is_empty() && ancestor.exists())
+        .ok_or_else(|| {
+            locate(
+                path,
+                io::Error::new(io::ErrorKind::NotFound, "路径及其上级目录都不存在"),
+            )
+        })?;
+    let open = |path: &Path, flags: u32| {
+        OpenOptions::new()
+            .access_mode(0)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(flags)
+            .open(path)
+            .map_err(|source| IoError::Open {
+                path: path.to_path_buf(),
+                source,
+            })
+    };
+    let directory = open(existing, FILE_FLAG_BACKUP_SEMANTICS)?;
+    let final_path = final_path_by_guid(&directory).map_err(|source| locate(existing, source))?;
+    let volume = volume_root(&final_path).ok_or_else(|| {
+        let shown = String::from_utf16_lossy(&final_path);
+        locate(
+            existing,
+            invalid_data(format!("不是卷的 GUID 路径：{shown}")),
+        )
+    })?;
+    let volume = open(&PathBuf::from(OsString::from_wide(volume)), 0)?;
+
+    let mut extents = [0u8; EXTENTS_BUFFER_SIZE];
+    let returned = ioctl(
+        volume.as_raw_handle(),
+        IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+        &[],
+        &mut extents,
+    )
+    .map_err(|source| locate(existing, source))?;
+    parse_disk_extents(extents.get(..returned).unwrap_or_default())
+        .map_err(|source| locate(existing, source))
+}
+
+/// 以卷的 GUID 路径表示的完整路径，例如 `\\?\Volume{…}\Users\me`，不含结尾的 0。
+fn final_path_by_guid(file: &File) -> io::Result<Vec<u16>> {
+    let mut buffer = vec![0u16; 512];
+    loop {
+        let capacity = u32::try_from(buffer.len()).map_err(|_| io::Error::other("路径过长"))?;
+        // SAFETY: 句柄来自仍然存活的 `file`；缓冲区指针和长度来自独占借用的 `buffer`，
+        // 函数最多写入 `capacity` 个 u16，返回后不再访问这个指针。
+        let written = unsafe {
+            GetFinalPathNameByHandleW(
+                file.as_raw_handle(),
+                buffer.as_mut_ptr(),
+                capacity,
+                VOLUME_NAME_GUID | FILE_NAME_NORMALIZED,
+            )
+        };
+        let written = usize::try_from(written).map_err(|_| io::Error::other("路径过长"))?;
+        if written == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // 缓冲区不够时返回需要的长度（含结尾的 0），够时返回写入的长度（不含 0）
+        if written < buffer.len() {
+            buffer.truncate(written);
+            return Ok(buffer);
+        }
+        buffer.resize(written, 0);
+    }
+}
+
+/// 从 `\\?\Volume{…}\…` 里取出卷本身的路径 `\\?\Volume{…}`（不带结尾的反斜杠，打开的是卷设备而不是根目录）。
+fn volume_root(path: &[u16]) -> Option<&[u16]> {
+    let prefix: Vec<u16> = VOLUME_PREFIX.encode_utf16().collect();
+    let rest = path.strip_prefix(prefix.as_slice())?;
+    let close = rest.iter().position(|&unit| unit == u16::from(b'}'))?;
+    let end = prefix.len() + close + 1;
+    let after = path.get(end).copied();
+    if after.is_some_and(|unit| unit != u16::from(b'\\')) {
+        return None;
+    }
+    path.get(..end)
+}
+
+/// 解析 `VOLUME_DISK_EXTENTS`，返回去重后的磁盘编号。没有任何区段时视为查询失败，不当作「不在任何盘上」。
+fn parse_disk_extents(bytes: &[u8]) -> io::Result<Vec<u32>> {
+    let count = u32::from_ne_bytes(field(
+        bytes,
+        offset_of!(VOLUME_DISK_EXTENTS, NumberOfDiskExtents),
+    )?);
+    let count = usize::try_from(count).map_err(|_| invalid_data(format!("区段数 {count} 过大")))?;
+    if count == 0 {
+        return Err(invalid_data("卷没有报告所在的磁盘".to_owned()));
+    }
+    let first = offset_of!(VOLUME_DISK_EXTENTS, Extents);
+    let mut disks = Vec::new();
+    for index in 0..count {
+        let extent = index
+            .checked_mul(size_of::<DISK_EXTENT>())
+            .and_then(|offset| offset.checked_add(first))
+            .ok_or_else(|| invalid_data(format!("区段数 {count} 过大")))?;
+        let disk = u32::from_ne_bytes(field(bytes, extent + offset_of!(DISK_EXTENT, DiskNumber))?);
+        if !disks.contains(&disk) {
+            disks.push(disk);
+        }
+    }
+    disks.sort_unstable();
+    Ok(disks)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().collect()
+    }
+
+    /// 按 `VOLUME_DISK_EXTENTS` 的布局拼出给定磁盘编号的区段列表。
+    fn extents(disks: &[u32]) -> Vec<u8> {
+        let first = offset_of!(VOLUME_DISK_EXTENTS, Extents);
+        let mut bytes = vec![0u8; first + disks.len() * size_of::<DISK_EXTENT>()];
+        bytes[..4].copy_from_slice(&(disks.len() as u32).to_ne_bytes());
+        for (index, disk) in disks.iter().enumerate() {
+            let at = first + index * size_of::<DISK_EXTENT>() + offset_of!(DISK_EXTENT, DiskNumber);
+            bytes[at..at + 4].copy_from_slice(&disk.to_ne_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn disk_extents_are_deduplicated_and_sorted() {
+        assert_eq!(parse_disk_extents(&extents(&[0])).unwrap(), [0]);
+        assert_eq!(parse_disk_extents(&extents(&[3, 1, 3])).unwrap(), [1, 3]);
+    }
+
+    #[test]
+    fn empty_or_truncated_extents_are_errors() {
+        assert!(parse_disk_extents(&extents(&[])).is_err());
+        assert!(parse_disk_extents(&[]).is_err());
+        let mut short = extents(&[2, 5]);
+        short.truncate(short.len() - size_of::<DISK_EXTENT>());
+        assert!(parse_disk_extents(&short).is_err());
+    }
+
+    #[test]
+    fn volume_root_keeps_only_the_volume() {
+        let volume = r"\\?\Volume{0a1b2c3d-0000-1111-2222-333344445555}";
+        let root = wide(volume);
+        assert_eq!(
+            volume_root(&wide(&format!(r"{volume}\Users\me"))),
+            Some(root.as_slice())
+        );
+        assert_eq!(
+            volume_root(&wide(&format!(r"{volume}\"))),
+            Some(root.as_slice())
+        );
+        assert_eq!(volume_root(&root), Some(root.as_slice()));
+        assert_eq!(volume_root(&wide(r"\\?\C:\Users")), None);
+        assert_eq!(volume_root(&wide(r"\\?\UNC\server\share")), None);
+        assert_eq!(volume_root(&wide(&format!("{volume}x"))), None);
+        assert_eq!(volume_root(&wide(r"\\?\Volume{unterminated")), None);
+    }
+
+    /// 只查询属性：本仓库所在的卷一定在某块盘上；还不存在的子目录与它同卷。
+    #[test]
+    fn existing_and_missing_paths_resolve_to_the_same_disks() {
+        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let disks = volume_disk_numbers(here).unwrap();
+        assert!(!disks.is_empty());
+        assert_eq!(
+            volume_disk_numbers(here.join("no-such-dir").join("deeper")).unwrap(),
+            disks
+        );
+    }
+
+    #[test]
+    fn relative_path_without_existing_ancestor_is_an_error() {
+        assert!(volume_disk_numbers("no-such-dir-yisi/deeper").is_err());
+    }
+}

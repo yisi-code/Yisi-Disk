@@ -1,0 +1,171 @@
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import type { UnlistenFn } from '@tauri-apps/api/event'
+import {
+  cancelJob,
+  onJobEvent,
+  toHostError,
+  type FoundFile,
+  type HostError,
+  type JobEvent,
+} from '../services/host'
+
+export type JobStatus =
+  | 'idle'
+  | 'starting'
+  | 'running'
+  | 'cancelling'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+
+/** 各类任务自己的结果处理：任务完成时交出结果，深度恢复还会陆续交出找到的文件 */
+export interface JobHandlers<TResult> {
+  onCompleted: (result: TResult) => void
+  onFound?: (files: FoundFile[]) => void
+}
+
+/**
+ * 一个任务的通用状态：发起、取消、进度与速度、无响应与恢复、终结。
+ * 任务 ID 在调用宿主之前生成并记下，事件先于启动命令返回到达时也不会丢；不属于当前任务的事件一律忽略。
+ */
+export function useJob<TResult>(handlers: JobHandlers<TResult>) {
+  const status = ref<JobStatus>('idle')
+  const done = ref(0)
+  const total = ref(0)
+  const bytesPerSecond = ref<number | null>(null)
+  const failure = ref<HostError | null>(null)
+  const isUnresponsive = ref(false)
+
+  let jobId: string | null = null
+  let startedAt = 0
+  let unlisten: UnlistenFn | null = null
+  let isDisposed = false
+
+  const isBusy = computed(
+    () => status.value === 'starting' || status.value === 'running' || status.value === 'cancelling',
+  )
+  const percent = computed(() =>
+    total.value > 0 ? Math.floor((done.value / total.value) * 100) : 0,
+  )
+
+  onMounted(async () => {
+    const stop = await onJobEvent<TResult>(handleJobEvent)
+    // 组件在监听建立前已卸载时，立即取消监听
+    if (isDisposed) {
+      stop()
+    } else {
+      unlisten = stop
+    }
+  })
+
+  onBeforeUnmount(() => {
+    isDisposed = true
+    unlisten?.()
+  })
+
+  /** `launch` 拿到新生成的任务 ID，调用宿主启动任务。正在运行时什么也不做 */
+  async function start(launch: (jobId: string) => Promise<void>) {
+    if (isBusy.value) {
+      return
+    }
+    const id = crypto.randomUUID()
+    jobId = id
+    startedAt = performance.now()
+    status.value = 'starting'
+    done.value = 0
+    total.value = 0
+    bytesPerSecond.value = null
+    failure.value = null
+    isUnresponsive.value = false
+    try {
+      await launch(id)
+      if (jobId === id && status.value === 'starting') {
+        status.value = 'running'
+      }
+    } catch (error) {
+      if (jobId === id) {
+        status.value = 'failed'
+        failure.value = toHostError(error)
+      }
+    }
+  }
+
+  async function cancel() {
+    // 启动阶段（可能正在等 UAC）引擎还没接下任务，只能在运行中取消
+    if (jobId === null || status.value !== 'running') {
+      return
+    }
+    status.value = 'cancelling'
+    try {
+      await cancelJob(jobId)
+    } catch {
+      // 任务恰好在取消前结束：终结事件会更新状态，这里只撤回「正在取消」
+      if (status.value === 'cancelling') {
+        status.value = 'running'
+      }
+    }
+  }
+
+  function handleJobEvent(event: JobEvent<TResult>) {
+    if (event.jobId !== jobId) {
+      return
+    }
+    switch (event.kind) {
+      case 'progress': {
+        // 物理磁盘可能先等了一段 UAC，速度从第一次进度算起
+        if (event.data.done === 0) {
+          startedAt = performance.now()
+        }
+        const seconds = (performance.now() - startedAt) / 1000
+        done.value = event.data.done
+        total.value = event.data.total
+        bytesPerSecond.value = seconds > 0 ? event.data.done / seconds : null
+        if (status.value === 'starting') {
+          status.value = 'running'
+        }
+        break
+      }
+      case 'found':
+        handlers.onFound?.(event.data.files)
+        break
+      case 'completed':
+        handlers.onCompleted(event.data.result)
+        isUnresponsive.value = false
+        status.value = 'completed'
+        break
+      case 'failed':
+        failure.value =
+          event.data.reason === 'engineExited'
+            ? { code: 'engineExited', detail: `exit code ${event.data.exitCode ?? '?'}` }
+            : { code: 'jobFailed', detail: event.data.message ?? '' }
+        isUnresponsive.value = false
+        status.value = 'failed'
+        break
+      case 'cancelled':
+        isUnresponsive.value = false
+        status.value = 'cancelled'
+        break
+      case 'unresponsive':
+        isUnresponsive.value = true
+        break
+      case 'responsive':
+        isUnresponsive.value = false
+        break
+      case 'log':
+        break
+    }
+  }
+
+  return {
+    status,
+    done,
+    total,
+    percent,
+    bytesPerSecond,
+    failure,
+    isUnresponsive,
+    isBusy,
+    start,
+    cancel,
+  }
+}

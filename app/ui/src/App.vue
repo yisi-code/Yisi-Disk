@@ -1,21 +1,27 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { nextTick, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import CarveWizard from './components/CarveWizard.vue'
 import EngineSelfTest from './components/EngineSelfTest.vue'
 import { SUPPORTED_LOCALES } from './i18n'
 import { getAppInfo } from './services/host'
 
-const SCENARIO_KEYS = [
-  'findPartitions',
-  'repairPartition',
-  'undelete',
-  'carve',
-  'fsCheck',
-  'image',
-] as const
+type AppView = 'home' | 'carve'
+
+/** 首页的场景；view 为 null 的还没有接入 */
+const SCENARIOS: { key: string; view: AppView | null }[] = [
+  { key: 'findPartitions', view: null },
+  { key: 'repairPartition', view: null },
+  { key: 'undelete', view: null },
+  { key: 'carve', view: 'carve' },
+  { key: 'fsCheck', view: null },
+  { key: 'image', view: null },
+]
 
 const { t, locale } = useI18n()
 
+const view = ref<AppView>('home')
+const scenariosTitle = ref<HTMLHeadingElement | null>(null)
 const appVersion = ref<string | null>(null)
 const hostError = ref<string | null>(null)
 
@@ -34,6 +40,17 @@ onMounted(async () => {
     hostError.value = String(error)
   }
 })
+
+function openView(next: AppView) {
+  view.value = next
+}
+
+/** 从向导回到首页：焦点放回场景标题，键盘用户不会落到页面开头 */
+async function returnHome() {
+  view.value = 'home'
+  await nextTick()
+  scenariosTitle.value?.focus()
+}
 </script>
 
 <template>
@@ -54,14 +71,30 @@ onMounted(async () => {
     </header>
 
     <main class="app-main">
-      <h2 class="scenario-section__title">{{ t('scenarios.title') }}</h2>
-      <ul class="scenario-list">
-        <li v-for="key in SCENARIO_KEYS" :key="key" class="scenario-card">
-          <span class="scenario-card__name">{{ t(`scenarios.${key}`) }}</span>
-          <span class="scenario-card__status">{{ t('scenarios.unavailable') }}</span>
-        </li>
-      </ul>
-      <EngineSelfTest />
+      <CarveWizard v-if="view === 'carve'" @exit="returnHome" />
+      <template v-else>
+        <h2 ref="scenariosTitle" class="scenario-section__title" tabindex="-1">
+          {{ t('scenarios.title') }}
+        </h2>
+        <ul class="scenario-list">
+          <li v-for="scenario in SCENARIOS" :key="scenario.key" class="scenario-list__item">
+            <button
+              v-if="scenario.view"
+              class="scenario-card scenario-card--available"
+              type="button"
+              @click="openView(scenario.view)"
+            >
+              <span class="scenario-card__name">{{ t(`scenarios.${scenario.key}`) }}</span>
+              <span class="scenario-card__status">{{ t(`scenarios.${scenario.key}Description`) }}</span>
+            </button>
+            <div v-else class="scenario-card">
+              <span class="scenario-card__name">{{ t(`scenarios.${scenario.key}`) }}</span>
+              <span class="scenario-card__status">{{ t('scenarios.unavailable') }}</span>
+            </div>
+          </li>
+        </ul>
+        <EngineSelfTest />
+      </template>
     </main>
 
     <footer class="app-footer">
@@ -132,6 +165,11 @@ onMounted(async () => {
   font-weight: 600;
 }
 
+/* 标题只是从向导返回后的焦点落点，不可操作，不画焦点框 */
+.scenario-section__title:focus-visible {
+  outline: none;
+}
+
 .scenario-list {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -141,14 +179,30 @@ onMounted(async () => {
   list-style: none;
 }
 
+.scenario-list__item {
+  display: flex;
+}
+
 .scenario-card {
   display: flex;
+  flex: 1;
   flex-direction: column;
   gap: var(--space-xs);
   padding: var(--space-md);
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-card);
+}
+
+.scenario-card--available {
+  color: var(--color-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.scenario-card--available:hover {
+  border-color: var(--color-accent);
 }
 
 .scenario-card__name {

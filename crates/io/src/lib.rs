@@ -12,6 +12,8 @@ mod ioctl;
 mod raw;
 mod read;
 #[cfg(windows)]
+mod volume;
+#[cfg(windows)]
 mod windows_disk;
 
 pub use device::BlockDevice;
@@ -19,5 +21,7 @@ pub use device::BlockDevice;
 pub use disk_list::{BusType, DiskInfo, list_disks};
 pub use error::IoError;
 pub use raw::RawImage;
+#[cfg(windows)]
+pub use volume::volume_disk_numbers;
 #[cfg(windows)]
 pub use windows_disk::WindowsDisk;
