@@ -14,8 +14,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter};
 use yisi_engine::protocol::{
-    CANCEL, CANCELLED, CAPABILITIES, COMPLETED, Capabilities, DiskList, FAILED, HEARTBEAT, JobRef,
-    LIST_DISKS, LOG, PROGRESS, READ_SCAN, ReadScanParams, Source,
+    CANCEL, CANCELLED, CAPABILITIES, COMPLETED, Capabilities, DiskList, FAILED, FOUND, HEARTBEAT,
+    JobRef, LIST_DISKS, LOG, PROGRESS, READ_SCAN, ReadScanParams, Source,
 };
 
 use crate::broker::BrokerSession;
@@ -53,7 +53,7 @@ impl HostError {
     }
 }
 
-/// 发给界面的任务事件。`kind` 为 progress、log、completed、failed、cancelled、unresponsive、responsive。
+/// 发给界面的任务事件。`kind` 为 progress、found、log、completed、failed、cancelled、unresponsive、responsive。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobEvent {
@@ -323,6 +323,7 @@ impl EngineProcess {
         }
         let kind = match method {
             PROGRESS => "progress",
+            FOUND => "found",
             LOG => "log",
             COMPLETED => "completed",
             FAILED => "failed",

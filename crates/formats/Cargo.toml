@@ -6,3 +6,7 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+# 测试样本生成器，供其他 crate 的测试使用
+test-samples = []
