@@ -3,12 +3,13 @@ import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import DiskPicker from './DiskPicker.vue'
 import { useHostErrorText } from '../composables/useHostErrorText'
-import { useReadScan, type ScanTarget } from '../composables/useReadScan'
+import { useReadScan } from '../composables/useReadScan'
 import {
   getEngineCapabilities,
   toHostError,
   type EngineCapabilities,
   type HostError,
+  type JobTarget,
 } from '../services/host'
 import { formatBytes } from '../utils/format'
 
@@ -33,7 +34,7 @@ const {
 
 const capabilities = ref<EngineCapabilities | null>(null)
 const capabilitiesError = ref<HostError | null>(null)
-const sourceKind = ref<ScanTarget['kind']>('image')
+const sourceKind = ref<JobTarget['kind']>('image')
 const imagePath = ref('')
 const selectedDisk = ref<number | null>(null)
 
@@ -41,7 +42,7 @@ const canScanDisks = computed(
   () => capabilities.value?.methods.includes(LIST_DISKS_METHOD) ?? false,
 )
 
-const scanTarget = computed<ScanTarget | null>(() => {
+const scanTarget = computed<JobTarget | null>(() => {
   if (sourceKind.value === 'image') {
     const path = imagePath.value.trim()
     return path === '' ? null : { kind: 'image', path }
@@ -151,7 +152,7 @@ function handleCancel() {
       </div>
       <template v-else>
         <DiskPicker v-model="selectedDisk" :disabled="isBusy" />
-        <p class="self-test__hint">{{ t('selfTest.disk.hint') }}</p>
+        <p class="self-test__hint">{{ t('selfTest.diskHint') }}</p>
       </template>
 
       <div class="self-test__actions">

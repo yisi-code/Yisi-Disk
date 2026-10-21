@@ -256,6 +256,7 @@ fn carve_recovers_all_five_formats_from_an_image() {
         )
         .unwrap_err();
     assert_eq!(unknown.code, rpc_error::INVALID_PARAMS);
+    // 不是磁盘的句柄认领不了；源打不开时不创建输出目录
     let disk = engine
         .call(
             CARVE_START,
@@ -263,6 +264,7 @@ fn carve_recovers_all_five_formats_from_an_image() {
         )
         .unwrap_err();
     assert_eq!(disk.code, error_code::SOURCE_UNAVAILABLE);
+    assert!(!dir.join("recovered-c0").exists());
 
     let accepted = engine
         .call(

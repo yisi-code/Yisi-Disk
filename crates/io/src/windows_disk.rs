@@ -11,7 +11,7 @@ use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
 use windows_sys::Win32::System::Ioctl::{
     DISK_GEOMETRY, GET_LENGTH_INFORMATION, IOCTL_DISK_GET_DRIVE_GEOMETRY,
-    IOCTL_DISK_GET_LENGTH_INFO,
+    IOCTL_DISK_GET_LENGTH_INFO, IOCTL_STORAGE_GET_DEVICE_NUMBER, STORAGE_DEVICE_NUMBER,
 };
 
 use crate::device::validate_sector_size;
@@ -87,6 +87,24 @@ impl WindowsDisk {
             size,
             sector_size,
         })
+    }
+
+    /// 磁盘编号，与 `\\.\PhysicalDriveN` 的 N、卷的磁盘区段里的编号相同。
+    pub fn device_number(&self) -> Result<u32, IoError> {
+        let query = |source| IoError::Query {
+            what: "磁盘编号",
+            source,
+        };
+        let mut out = [0u8; size_of::<STORAGE_DEVICE_NUMBER>()];
+        ioctl_read(
+            self.file.as_raw_handle(),
+            IOCTL_STORAGE_GET_DEVICE_NUMBER,
+            &mut out,
+        )
+        .map_err(query)?;
+        field(&out, offset_of!(STORAGE_DEVICE_NUMBER, DeviceNumber))
+            .map(u32::from_ne_bytes)
+            .map_err(query)
     }
 }
 

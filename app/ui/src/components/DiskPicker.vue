@@ -35,26 +35,26 @@ async function refreshDisks() {
 
 function diskName(disk: DiskSummary): string {
   const name = [disk.vendor, disk.model].filter((part) => part !== '').join(' ')
-  return name === '' ? t('selfTest.disk.unnamed') : name
+  return name === '' ? t('disk.unnamed') : name
 }
 
 function busLabel(disk: DiskSummary): string {
-  const key = `selfTest.disk.bus.${disk.bus}`
+  const key = `disk.bus.${disk.bus}`
   return te(key) ? t(key) : disk.bus
 }
 </script>
 
 <template>
   <fieldset class="disk-picker" :disabled="disabled">
-    <legend class="disk-picker__legend">{{ t('selfTest.disk.legend') }}</legend>
+    <legend class="disk-picker__legend">{{ t('disk.legend') }}</legend>
 
     <p v-if="loadError" class="disk-picker__error" role="alert">
       {{ formatHostError(loadError) }}
     </p>
     <p v-else-if="isLoading && disks.length === 0" class="disk-picker__note">
-      {{ t('selfTest.disk.loading') }}
+      {{ t('disk.loading') }}
     </p>
-    <p v-else-if="disks.length === 0" class="disk-picker__note">{{ t('selfTest.disk.empty') }}</p>
+    <p v-else-if="disks.length === 0" class="disk-picker__note">{{ t('disk.empty') }}</p>
 
     <ul v-if="disks.length > 0" class="disk-picker__list">
       <li v-for="disk in disks" :key="disk.number">
@@ -63,21 +63,21 @@ function busLabel(disk: DiskSummary): string {
             v-model="selectedDisk"
             class="disk-picker__radio"
             type="radio"
-            name="self-test-disk"
+            name="disk-picker"
             :value="disk.number"
           />
           <span class="disk-picker__name">
-            {{ t('selfTest.disk.title', { number: disk.number, name: diskName(disk) }) }}
+            {{ t('disk.title', { number: disk.number, name: diskName(disk) }) }}
           </span>
           <span class="disk-picker__meta">
             {{
-              t('selfTest.disk.meta', {
+              t('disk.meta', {
                 bus: busLabel(disk),
                 size: formatBytes(disk.size),
                 sectorSize: disk.sectorSize,
               })
             }}
-            <template v-if="disk.removable"> · {{ t('selfTest.disk.removable') }}</template>
+            <template v-if="disk.removable"> · {{ t('disk.removable') }}</template>
           </span>
         </label>
       </li>
@@ -89,7 +89,7 @@ function busLabel(disk: DiskSummary): string {
       :disabled="isLoading"
       @click="refreshDisks"
     >
-      {{ t('selfTest.disk.refresh') }}
+      {{ t('disk.refresh') }}
     </button>
   </fieldset>
 </template>

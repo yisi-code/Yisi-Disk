@@ -9,13 +9,14 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter};
 use yisi_engine::protocol::{
-    CANCEL, CANCELLED, CAPABILITIES, COMPLETED, Capabilities, DiskList, FAILED, FOUND, HEARTBEAT,
-    JobRef, LIST_DISKS, LOG, PROGRESS, READ_SCAN, ReadScanParams, Source,
+    CANCEL, CANCELLED, CAPABILITIES, CARVE_START, COMPLETED, Capabilities, CarveParams, DiskList,
+    FAILED, FOUND, FileTypeList, HEARTBEAT, JobRef, LIST_DISKS, LIST_FILE_TYPES, LOG, PROGRESS,
+    READ_SCAN, ReadScanParams, Source, error_code,
 };
 
 use crate::broker::BrokerSession;
@@ -53,6 +54,19 @@ impl HostError {
     }
 }
 
+/// 界面选定的源：镜像文件，或按编号指定的物理磁盘。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Target {
+    Image {
+        path: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Disk {
+        disk_number: u32,
+    },
+}
+
 /// 发给界面的任务事件。`kind` 为 progress、found、log、completed、failed、cancelled、unresponsive、responsive。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -78,6 +92,10 @@ impl Engines {
         query(LIST_DISKS)
     }
 
+    pub fn file_types(&self) -> Result<FileTypeList, HostError> {
+        query(LIST_FILE_TYPES)
+    }
+
     pub fn start_image_scan(
         &self,
         app: AppHandle,
@@ -100,22 +118,61 @@ impl Engines {
         job_id: String,
         disk_number: u32,
     ) -> Result<(), HostError> {
-        if disk_number > MAX_DISK_NUMBER {
-            return Err(HostError::new("invalidDisk", disk_number.to_string()));
-        }
-        let path = format!(r"\\.\PhysicalDrive{disk_number}");
+        let path = disk_path(disk_number)?;
         self.start_read_scan(app, job_id, |engine_pid| {
             let handle = broker.open_disk(&path, engine_pid)?;
             Ok(Source::Disk { handle })
         })
     }
 
-    /// 启动引擎并交给它一个读取扫描任务。`source` 拿到引擎的进程 ID，返回要扫描的对象。
+    /// `source` 拿到引擎的进程 ID，返回要扫描的对象。
     fn start_read_scan(
         &self,
         app: AppHandle,
         job_id: String,
         source: impl FnOnce(u32) -> Result<Source, HostError>,
+    ) -> Result<(), HostError> {
+        let params_job_id = job_id.clone();
+        self.start_job(app, job_id, READ_SCAN, |engine_pid| {
+            to_params(&ReadScanParams {
+                job_id: params_job_id,
+                source: source(engine_pid)?,
+            })
+        })
+    }
+
+    /// 深度恢复。源为物理磁盘时，引擎在开始前核对输出目录不在这块盘上，否则拒绝（`outputOnSource`）。
+    pub fn start_carve(
+        &self,
+        app: AppHandle,
+        broker: &BrokerSession,
+        job_id: String,
+        target: Target,
+        output_dir: String,
+        extensions: Vec<String>,
+    ) -> Result<(), HostError> {
+        // 磁盘编号不合法时不启动引擎
+        if let Target::Disk { disk_number } = &target {
+            disk_path(*disk_number)?;
+        }
+        let params_job_id = job_id.clone();
+        self.start_job(app, job_id, CARVE_START, |engine_pid| {
+            to_params(&CarveParams {
+                job_id: params_job_id,
+                source: resolve_source(target, broker, engine_pid)?,
+                output_dir,
+                extensions: Some(extensions),
+            })
+        })
+    }
+
+    /// 启动引擎并交给它一个任务。`params` 拿到引擎的进程 ID，返回任务方法 `method` 的参数。
+    fn start_job(
+        &self,
+        app: AppHandle,
+        job_id: String,
+        method: &str,
+        params: impl FnOnce(u32) -> Result<Value, HostError>,
     ) -> Result<(), HostError> {
         validate_job_id(&job_id)?;
         if lock(&self.jobs).contains_key(&job_id) {
@@ -128,15 +185,7 @@ impl Engines {
         })?;
         lock(&self.jobs).insert(job_id.clone(), Arc::clone(&process));
 
-        let started = source(process.pid).and_then(|source| {
-            let params = ReadScanParams {
-                job_id: job_id.clone(),
-                source,
-            };
-            let params = serde_json::to_value(params)
-                .map_err(|error| HostError::new("engineProtocol", error.to_string()))?;
-            process.request(READ_SCAN, params)
-        });
+        let started = params(process.pid).and_then(|params| process.request(method, params));
         if let Err(error) = started {
             // 引擎没接下任务：关闭输入让它退出，并且不再为这个任务发事件
             process.abandon();
@@ -247,7 +296,7 @@ impl EngineProcess {
         }
         match receiver.recv_timeout(REQUEST_TIMEOUT) {
             Ok(Ok(result)) => Ok(result),
-            Ok(Err(error)) => Err(HostError::new("engineRejected", error.message)),
+            Ok(Err(error)) => Err(HostError::new(engine_error_code(error.code), error.message)),
             Err(RecvTimeoutError::Timeout) => {
                 lock(&self.pending).remove(&id);
                 Err(HostError::new("engineTimeout", method))
@@ -400,6 +449,46 @@ fn emit(app: &AppHandle, job_id: &str, kind: &'static str, data: Value) {
     }
 }
 
+/// 镜像直接给出路径；物理盘请磁盘代理把只读句柄复制进引擎（第一次需要时提权启动代理）。
+fn resolve_source(
+    target: Target,
+    broker: &BrokerSession,
+    engine_pid: u32,
+) -> Result<Source, HostError> {
+    match target {
+        Target::Image { path } => Ok(Source::Image {
+            path,
+            sector_size: IMAGE_SECTOR_SIZE,
+        }),
+        Target::Disk { disk_number } => Ok(Source::Disk {
+            handle: broker.open_disk(&disk_path(disk_number)?, engine_pid)?,
+        }),
+    }
+}
+
+/// 磁盘代理只接受 `\\.\PhysicalDriveN` 形式的路径。
+fn disk_path(disk_number: u32) -> Result<String, HostError> {
+    if disk_number > MAX_DISK_NUMBER {
+        return Err(HostError::new("invalidDisk", disk_number.to_string()));
+    }
+    Ok(format!(r"\\.\PhysicalDrive{disk_number}"))
+}
+
+fn to_params(params: &impl Serialize) -> Result<Value, HostError> {
+    serde_json::to_value(params)
+        .map_err(|error| HostError::new("engineProtocol", error.to_string()))
+}
+
+/// 引擎的错误码对应的界面错误码；没有专门文案的统一为 `engineRejected`。
+fn engine_error_code(code: i64) -> &'static str {
+    match code {
+        error_code::SOURCE_UNAVAILABLE => "sourceUnavailable",
+        error_code::OUTPUT_UNAVAILABLE => "outputUnavailable",
+        error_code::OUTPUT_ON_SOURCE => "outputOnSource",
+        _ => "engineRejected",
+    }
+}
+
 /// 临时启动一个引擎发一次查询，查完关闭它的输入，引擎随即退出。
 fn query<T: DeserializeOwned>(method: &str) -> Result<T, HostError> {
     let process = EngineProcess::spawn(None, || {})?;
@@ -444,6 +533,39 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn targets_use_the_interface_wire_format() {
+        let image: Target =
+            serde_json::from_value(json!({"kind": "image", "path": "a.img"})).unwrap();
+        assert!(matches!(image, Target::Image { path } if path == "a.img"));
+        let disk: Target =
+            serde_json::from_value(json!({"kind": "disk", "diskNumber": 3})).unwrap();
+        assert!(matches!(disk, Target::Disk { disk_number: 3 }));
+    }
+
+    #[test]
+    fn engine_errors_map_to_interface_codes() {
+        assert_eq!(
+            engine_error_code(error_code::OUTPUT_ON_SOURCE),
+            "outputOnSource"
+        );
+        assert_eq!(
+            engine_error_code(error_code::OUTPUT_UNAVAILABLE),
+            "outputUnavailable"
+        );
+        assert_eq!(
+            engine_error_code(error_code::SOURCE_UNAVAILABLE),
+            "sourceUnavailable"
+        );
+        assert_eq!(engine_error_code(-32602), "engineRejected");
+    }
+
+    #[test]
+    fn disk_numbers_are_bounded() {
+        assert_eq!(disk_path(7).unwrap(), r"\\.\PhysicalDrive7");
+        assert!(disk_path(MAX_DISK_NUMBER + 1).is_err());
+    }
 
     #[test]
     fn job_ids_are_restricted() {

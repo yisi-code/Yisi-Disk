@@ -1,15 +1,18 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "主窗口可调用的命令，以及接收任务事件所需的监听权限",
+  "description": "主窗口可调用的命令、接收任务事件所需的监听权限，以及选择输出目录的系统对话框",
   "windows": ["main"],
   "permissions": [
     "allow-app-info",
     "allow-engine-capabilities",
     "allow-disk-list",
+    "allow-carve-file-types",
     "allow-job-start-image-scan",
     "allow-job-start-disk-scan",
+    "allow-job-start-carve",
     "allow-job-cancel",
+    "dialog:allow-open",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]
