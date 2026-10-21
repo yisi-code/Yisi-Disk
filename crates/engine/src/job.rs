@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
 use serde_json::Value;
 use yisi_engine::protocol::{
     CANCELLED, COMPLETED, FAILED, JobCompleted, JobFailed, JobRef, PROGRESS, Progress,
@@ -46,6 +47,15 @@ pub struct JobContext {
 }
 
 impl JobContext {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// 发一条任务通知（参数里自行带上任务 ID）。
+    pub fn notify(&self, method: &str, params: impl Serialize) {
+        self.outbox.notify(method, params);
+    }
+
     pub fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
     }

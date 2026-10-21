@@ -4327,6 +4327,11 @@ dependencies = [
 [[package]]
 name = "yisi-carve"
 version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+ "yisi-formats",
+ "yisi-io",
+]
 
 [[package]]
 name = "yisi-engine"
@@ -4336,6 +4341,8 @@ dependencies = [
  "serde_json",
  "tracing",
  "tracing-subscriber",
+ "yisi-carve",
+ "yisi-formats",
  "yisi-io",
  "yisi-rpc",
 ]

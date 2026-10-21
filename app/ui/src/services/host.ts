@@ -41,6 +41,14 @@ export interface DiskSummary {
   removable: boolean
 }
 
+/** 深度恢复找到的一个文件 */
+export interface FoundFile {
+  name: string
+  extension: string
+  offset: number
+  length: number
+}
+
 export interface ByteRange {
   offset: number
   length: number
@@ -57,6 +65,7 @@ export interface ReadScanReport {
 
 export type JobEvent =
   | { jobId: string; kind: 'progress'; data: { done: number; total: number } }
+  | { jobId: string; kind: 'found'; data: { files: FoundFile[] } }
   | { jobId: string; kind: 'log'; data: { level: string; message: string } }
   | { jobId: string; kind: 'completed'; data: { result: ReadScanReport } }
   | {

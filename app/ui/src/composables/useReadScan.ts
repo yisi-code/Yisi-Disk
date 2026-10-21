@@ -153,6 +153,7 @@ export function useReadScan() {
       case 'responsive':
         isUnresponsive.value = false
         break
+      case 'found':
       case 'log':
         break
     }

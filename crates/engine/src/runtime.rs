@@ -1,6 +1,7 @@
 //! 消息循环：从宿主读请求、派发、写答复；后台发心跳；任务结束或宿主断开后退出。
 
 use std::io::{Read, Write};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -8,12 +9,14 @@ use std::thread;
 
 use serde::Serialize;
 use serde_json::{Value, json};
+use yisi_carve::DirectorySink;
 use yisi_engine::protocol::{
-    self, CANCEL, CAPABILITIES, Capabilities, HEARTBEAT, HEARTBEAT_INTERVAL, JobRef, LIST_DISKS,
-    READ_SCAN, ReadScanParams, Source,
+    self, CANCEL, CAPABILITIES, CARVE_START, Capabilities, CarveParams, HEARTBEAT,
+    HEARTBEAT_INTERVAL, JobRef, LIST_DISKS, LIST_FILE_TYPES, READ_SCAN, ReadScanParams, Source,
 };
 #[cfg(windows)]
 use yisi_engine::protocol::{DiskList, DiskSummary};
+use yisi_formats::Registry;
 use yisi_io::{BlockDevice, RawImage};
 use yisi_rpc::{
     ErrorObject, FrameError, Message, Notification, Request, Response, error_code, read_message,
@@ -21,7 +24,7 @@ use yisi_rpc::{
 };
 
 use crate::job::{self, RunningJob};
-use crate::read_scan;
+use crate::{carve_job, read_scan};
 
 /// 向宿主发消息。答复、通知可能来自不同线程，写入时加锁，保证一帧不被拆开。
 pub struct Outbox {
@@ -93,7 +96,12 @@ fn dispatch(
 ) -> Result<Value, ErrorObject> {
     match request.method.as_str() {
         CAPABILITIES => {
-            let mut methods = vec![READ_SCAN.to_owned(), CANCEL.to_owned()];
+            let mut methods = vec![
+                READ_SCAN.to_owned(),
+                CANCEL.to_owned(),
+                LIST_FILE_TYPES.to_owned(),
+                CARVE_START.to_owned(),
+            ];
             if cfg!(windows) {
                 methods.push(LIST_DISKS.to_owned());
             }
@@ -118,6 +126,59 @@ fn dispatch(
                 params.job_id,
                 Arc::clone(outbox),
                 move |context| read_scan::run(device.as_ref(), context),
+                move || {
+                    let _ = finished.send(Event::JobFinished);
+                },
+            ));
+            Ok(json!({}))
+        }
+        LIST_FILE_TYPES => to_result(&carve_job::file_types(&Registry::builtin())),
+        CARVE_START => {
+            if job.is_some() {
+                return Err(ErrorObject::new(
+                    protocol::error_code::JOB_ALREADY_RUNNING,
+                    "每个引擎进程只运行一个任务",
+                ));
+            }
+            let params: CarveParams = request.params()?;
+            // 输出不能写回被扫描的盘：物理盘的这项检查随界面入口一起做，目前只接受镜像文件
+            if matches!(params.source, Source::Disk { .. }) {
+                return Err(ErrorObject::new(
+                    protocol::error_code::SOURCE_UNAVAILABLE,
+                    "深度恢复暂时只支持镜像文件",
+                ));
+            }
+            let registry = Registry::builtin();
+            let enabled = carve_job::enabled_formats(&registry, params.extensions.as_deref())
+                .map_err(|extension| {
+                    ErrorObject::new(
+                        error_code::INVALID_PARAMS,
+                        format!("不认识的格式 {extension}"),
+                    )
+                })?;
+            let device = open_source(&params.source)?;
+            let output_dir = Path::new(&params.output_dir)
+                .join(format!("recovered-{}", short_id(&params.job_id)));
+            let sink = DirectorySink::new(&output_dir).map_err(|error| {
+                ErrorObject::new(
+                    protocol::error_code::OUTPUT_UNAVAILABLE,
+                    format!("无法创建输出目录 {}：{error}", output_dir.display()),
+                )
+            })?;
+            let finished = events.clone();
+            *job = Some(job::start(
+                params.job_id,
+                Arc::clone(outbox),
+                move |context| {
+                    carve_job::run(
+                        device.as_ref(),
+                        &registry,
+                        enabled,
+                        sink,
+                        &output_dir,
+                        context,
+                    )
+                },
                 move || {
                     let _ = finished.send(Event::JobFinished);
                 },
@@ -203,6 +264,16 @@ fn disk_list() -> DiskList {
     DiskList { disks }
 }
 
+/// 输出子目录名里用的任务 ID：只取字母、数字和连字符，最多 8 个。
+fn short_id(job_id: &str) -> String {
+    let id: String = job_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
+        .take(8)
+        .collect();
+    if id.is_empty() { "job".to_owned() } else { id }
+}
+
 fn to_result(value: &impl Serialize) -> Result<Value, ErrorObject> {
     serde_json::to_value(value).map_err(|error| {
         ErrorObject::new(error_code::INTERNAL_ERROR, format!("无法编码答复：{error}"))
@@ -244,7 +315,7 @@ fn spawn_heartbeat(outbox: Arc<Outbox>) -> Arc<AtomicBool> {
 }
 
 /// 把错误及其来源串成一句话。
-fn error_chain(error: &dyn std::error::Error) -> String {
+pub(crate) fn error_chain(error: &dyn std::error::Error) -> String {
     let mut message = error.to_string();
     let mut source = error.source();
     while let Some(cause) = source {

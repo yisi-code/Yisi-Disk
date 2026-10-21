@@ -116,7 +116,7 @@ created → running ⇄ waiting_decision → completed
 | `broker.executeWrite` | 由磁盘代理执行一份已确认的写入计划 |
 | `broker.shutdown` | 结束磁盘代理 |
 | `carve.listFileTypes` | 列出全部格式和分组 |
-| `carve.start` / `carve.resume` | 启动或续传深度恢复（任务） |
+| `carve.start` / `carve.resume` | 启动或续传深度恢复（任务）；找到的文件经 `job.found` 分批通知。目前只接受镜像文件，物理盘随「输出不在被扫描的盘上」检查一起开放 |
 | `image.create` / `image.resume` | 制作或续做能识别坏区的镜像（任务）；产出镜像文件和坏区图 |
 | `disk.readScan` | 从头到尾顺序读一遍设备或镜像，记下读不出的区段（任务，只读）；整盘坏区扫描的基础 |
 | `job.cancel` / `job.status` | 取消任务；查询状态 |
@@ -235,21 +235,22 @@ pub trait BlockDevice: Send + Sync {
 pub trait FileFormat: Send + Sync {
     fn info(&self) -> &FormatInfo;          // 扩展名、描述、最大尺寸、默认启用
     fn signatures(&self) -> &[Signature];   // (偏移, 魔数)
-    fn header_check(&self, block: &[u8], ctx: &CarveCtx) -> Option<Box<dyn Recovering>>;
+    fn header_check(&self, block: &[u8]) -> Option<Box<dyn Recovering>>;
 }
 
 pub trait Recovering: Send {
-    fn data_check(&mut self, block: &[u8]) -> DataCheck;            // 继续 / 结束 / 需要更多数据
-    fn file_check(&mut self, out: &mut dyn ReadSeek) -> FinalSize;   // 收尾与截断
-    fn rename(&self, out: &mut dyn ReadSeek) -> Option<String>;      // 按内容命名
+    fn data_check(&mut self, offset: u64, block: &[u8]) -> DataCheck; // 继续 / 在某长度处结束 / 无效
+    fn open_ended(&self) -> bool;                // 没有结束标志（如 PDF）：遇到下一个文件头时收尾
+    fn finish(&mut self, received: u64) -> Option<u64>; // 数据到此为止时的文件长度
+    fn waiting_at(&self) -> Option<u64>;         // 正在等待的位置，用来尽早排除长度离谱的误识别
 }
 ```
 
-- 一个格式一个源文件，自带样本测试和 fuzz 目标。
-- 注册表在启动时把全部签名建成"偏移 + 前缀字节"的查找表，每个块只查表，不遍历格式。
+- **结构遍历器**：大多数格式的插件只实现一个小状态机，每一步告诉遍历器「下一步要从哪里开始的几个字节」（`Need`）、「从哪里开始找什么」（`Scan`）、「文件在这里结束」（`Done`）或「无效」。跨块拼接、跳过大段数据、跨块查找都由遍历器处理，插件不必关心数据怎么分块。遍历器保留最近一次交付或匹配处的字节，插件可以先读签名、再从同一位置读整条记录。
+- 一个格式一个源文件，自带样本测试。样本由代码按格式结构现场生成（`yisi-formats` 的 `test-samples` 特性），不放二进制样本进仓库；每个格式还要过同一组随机与变异输入测试，只能给出结果或「不认识」，不能 panic。
+- 注册表在启动时把全部签名建成「偏移 + 前两个字节」的查找表，每个块只查表，不遍历格式。
 - 界面上的格式列表来自 `carve.listFileTypes`，不在界面里硬编码。
-
-（以上接口是草案，签名在实现中细化。）
+- 按内容给文件命名（`rename`）在后续加入。
 
 ### 5.4 深度恢复流水线
 
@@ -264,6 +265,15 @@ pub trait Recovering: Send {
 - 不同物理盘的任务各开一个引擎进程，可以并行。
 - 输出盘空间不足时自动暂停并通知界面。
 - 定期写入断点，异常退出后可以续传。
+
+**目前的实现（线性恢复，只处理连续存放的文件）：**
+
+- 按 1 MiB 读设备，再按扇区大小的块处理；文件只可能从块边界开始。整段读不出时逐块重读，只跳过真正读不出的块，正在恢复的文件随之放弃。
+- 块开头命中文件头时开始恢复，后续块交给插件判断结尾；结尾之后的下一个块边界继续找。
+- 插件判为无效、超过最大尺寸，或到设备末尾仍不完整时，视为误识别，从它的下一块重新找，它覆盖过的块里可能有真正的文件。插件等待的位置已超出设备末尾或最大尺寸时，立即判为误识别。
+- 没有结束标志的格式（PDF）遇到下一个文件头时收尾。
+- 输出在指定目录下新建 `recovered-<任务 ID 前 8 位>` 子目录；文件名为 `f` 加十位起始扇区号（按 512 字节计），写入期间带 `.part` 后缀，确认完整后才改名。
+- 碎片重组、块大小探测、断点续传、恢复报告与上面的三线程流水线在后续阶段加入。
 
 ### 5.5 能力探测
 
@@ -346,7 +356,7 @@ pub trait Recovering: Send {
 ## 7. 宿主
 
 - 管理引擎进程与代理进程的启动、心跳、退出。引擎程序与宿主程序放在同一目录；Windows 上以 `CREATE_NO_WINDOW` 启动，不弹出控制台窗口。
-- 把引擎事件合并后转给界面，界面侧不直接面对高频事件。界面只收一个事件 `job-event`，载荷是 `{jobId, kind, data}`，`kind` 为 progress、log、completed、failed、cancelled、unresponsive、responsive。
+- 把引擎事件合并后转给界面，界面侧不直接面对高频事件。界面只收一个事件 `job-event`，载荷是 `{jobId, kind, data}`，`kind` 为 progress、found、log、completed、failed、cancelled、unresponsive、responsive。
 - 任务 ID 由界面生成（UUID），在调用启动命令之前就记下，避免事件先于命令返回到达时被丢掉；宿主只接受字母、数字和连字符。
 - 返回给界面的错误是 `{code, detail}`：`code` 由界面翻译成当前语言，`detail` 是技术细节。
 - 磁盘代理在整个会话里只启动一次（第一次需要打开物理磁盘时），之后复用；宿主退出时代理随之退出。等待 UAC 期间，其他打开请求排队，不会同时弹出多个 UAC。代理程序同样放在宿主程序旁边，`tauri dev` / `tauri build` 会先编出引擎和代理。

@@ -8,8 +8,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use yisi_engine::protocol::{
-    CANCEL, CAPABILITIES, COMPLETED, HEARTBEAT, PROGRESS, READ_SCAN, ReadScanReport, error_code,
+    CANCEL, CAPABILITIES, CARVE_START, COMPLETED, CarveSummary, FOUND, FoundFile, HEARTBEAT,
+    LIST_FILE_TYPES, PROGRESS, READ_SCAN, ReadScanReport, error_code,
 };
+use yisi_formats::samples;
 use yisi_rpc::{Id, Message, Request, error_code as rpc_error, read_message, write_message};
 
 const TIMEOUT: Duration = Duration::from_secs(20);
@@ -205,5 +207,95 @@ fn read_scan_reports_progress_then_completes_and_exits() {
     assert!(report.unreadable.is_empty());
 
     // 任务结束后引擎自行退出
+    assert!(engine.wait_exit().success());
+}
+
+#[test]
+fn carve_recovers_all_five_formats_from_an_image() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-carve");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let originals = [
+        ("jpg", samples::jpg(6000)),
+        ("png", samples::png(&[200, 80_000])),
+        (
+            "zip",
+            samples::zip(&[("readme.txt", 700, false), ("data.bin", 5000, true)], b""),
+        ),
+        ("pdf", samples::pdf(3, true)),
+        ("mp4", samples::mp4(30_000, true)),
+    ];
+    // 每个文件从扇区边界开始，前后用 0x20 填充（不会像任何文件头）
+    let mut image = vec![0x20u8; 2048];
+    let mut offsets = Vec::new();
+    for (_, bytes) in &originals {
+        offsets.push(image.len() as u64);
+        image.extend_from_slice(bytes);
+        let padded = image.len().div_ceil(512) * 512 + 1024;
+        image.resize(padded, 0x20);
+    }
+    let image_path = dir.join("disk.img");
+    std::fs::write(&image_path, &image).unwrap();
+
+    let mut engine = Engine::start();
+    let types = engine.call(LIST_FILE_TYPES, Value::Null).unwrap();
+    let extensions: Vec<_> = types["types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["extension"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(extensions, ["jpg", "png", "pdf", "zip", "mp4"]);
+
+    let unknown = engine
+        .call(
+            CARVE_START,
+            json!({"jobId": "c0", "source": {"type": "image", "path": image_path, "sectorSize": 512},
+                   "outputDir": dir, "extensions": ["exe"]}),
+        )
+        .unwrap_err();
+    assert_eq!(unknown.code, rpc_error::INVALID_PARAMS);
+    let disk = engine
+        .call(
+            CARVE_START,
+            json!({"jobId": "c0", "source": {"type": "disk", "handle": 4}, "outputDir": dir}),
+        )
+        .unwrap_err();
+    assert_eq!(disk.code, error_code::SOURCE_UNAVAILABLE);
+
+    let accepted = engine
+        .call(
+            CARVE_START,
+            json!({"jobId": "carve-1-abcdef", "source": {"type": "image", "path": image_path, "sectorSize": 512},
+                   "outputDir": dir}),
+        )
+        .unwrap();
+    assert_eq!(accepted, json!({}));
+
+    let notifications = engine.notifications_until(COMPLETED);
+    let found: Vec<FoundFile> = notifications
+        .iter()
+        .filter(|(method, _)| method == FOUND)
+        .flat_map(|(_, params)| {
+            assert_eq!(params["jobId"], "carve-1-abcdef");
+            serde_json::from_value::<Vec<FoundFile>>(params["files"].clone()).unwrap()
+        })
+        .collect();
+    let (_, completed) = notifications.last().unwrap();
+    let summary: CarveSummary = serde_json::from_value(completed["result"].clone()).unwrap();
+
+    let output = dir.join("recovered-carve-1-");
+    assert_eq!(Path::new(&summary.output_dir), output);
+    assert_eq!(summary.files, 5);
+    assert_eq!(found.len(), 5);
+    for ((extension, bytes), (file, offset)) in originals.iter().zip(found.iter().zip(&offsets)) {
+        assert_eq!(
+            (file.extension.as_str(), file.offset),
+            (*extension, *offset)
+        );
+        let recovered = std::fs::read(output.join(&file.name)).unwrap();
+        assert!(&recovered == bytes, "{extension} 内容不一致");
+    }
     assert!(engine.wait_exit().success());
 }
