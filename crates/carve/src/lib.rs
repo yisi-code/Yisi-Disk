@@ -1,7 +1,7 @@
 //! 深度恢复：不依赖文件系统，按块顺序读设备，块开头命中文件头时开始恢复一个文件，
 //! 由格式插件判断它在哪里结束，写到输出目录。
 //!
-//! 读设备与识别在调用线程里进行，写出交给单独的写线程，输出盘慢时不拖住扫描。
+//! 三段流水线：读线程顺序读设备，调用线程识别文件，写线程写出，读盘、识别、写盘同时进行。
 //!
 //! 目前只处理连续存放的文件；碎片重组、块大小探测、断点续传在后续阶段加入。
 #![forbid(unsafe_code)]
@@ -23,6 +23,9 @@ pub use sink::{DirectorySink, RecoveredFile, Sink, SinkFile};
 
 /// 每次从设备读这么多再按块处理，进度也按这个粒度报告。
 const CHUNK_SIZE: usize = 1 << 20;
+
+/// 读线程最多领先识别这么多段（每段 [`CHUNK_SIZE`]）。
+const READ_AHEAD: usize = 4;
 
 /// 一个文件的数据攒到这么多再交给写线程。
 const FLUSH_SIZE: usize = 1 << 20;
@@ -99,8 +102,10 @@ pub fn carve(
             current: None,
             opened: false,
         };
+        let mut reader = ChunkReader::spawn(scope, device, block_size);
         let scanned = scan(
-            device,
+            device.size(),
+            &mut reader,
             registry,
             options,
             block_size,
@@ -108,6 +113,8 @@ pub fn carve(
             &mut report,
             control,
         );
+        // 关掉读线程的通道，它随即退出
+        drop(reader);
         // 关掉队列，等写线程把排着的文件写完
         let Output { commands, done, .. } = output;
         drop(commands);
@@ -132,8 +139,13 @@ pub fn carve(
 }
 
 /// 读设备、识别文件，把要写的内容排进 `output`。扫完返回 `true`，被取消返回 `false`。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "扫描所需的各方都由 carve 现场建好传入"
+)]
 fn scan(
-    device: &dyn BlockDevice,
+    size: u64,
+    reader: &mut ChunkReader<'_>,
     registry: &Registry,
     options: &CarveOptions,
     block_size: usize,
@@ -142,8 +154,6 @@ fn scan(
     control: &dyn CarveControl,
 ) -> Result<bool, CarveError> {
     let block = block_size as u64;
-    let size = device.size();
-    let mut reader = ChunkReader::new(device, block_size);
     let mut active: Option<Active> = None;
     let mut position = 0u64;
     let mut next_progress = 0u64;
@@ -483,36 +493,70 @@ fn write_files(
     Ok(())
 }
 
-/// 按 1 MiB 一段读设备；整段读不出时逐块重读，只把真正读不出的块标出来。
-struct ChunkReader<'a> {
-    device: &'a dyn BlockDevice,
-    block_size: usize,
-    data: Vec<u8>,
+/// 读线程读好的一段。`generation` 标明它属于哪一次连续读：扫描回头重找时换一个编号，旧编号的段丢掉。
+struct Chunk {
+    generation: u64,
     start: u64,
-    len: usize,
+    data: Vec<u8>,
     unreadable: Vec<bool>,
 }
 
-impl<'a> ChunkReader<'a> {
-    fn new(device: &'a dyn BlockDevice, block_size: usize) -> Self {
+/// 扫描这一侧的读取接口。读线程按 1 MiB 一段顺序读，读好的排在有界队列里，读盘与识别同时进行；
+/// 要的位置不是紧接着的下一段时（误识别后回头重找），请读线程从新位置重读。
+struct ChunkReader<'scope> {
+    block_size: usize,
+    chunks: Receiver<Chunk>,
+    seeks: Sender<(u64, u64)>,
+    /// 用完的缓冲区还给读线程，不必每段重新分配 1 MiB。
+    spare: Sender<Vec<u8>>,
+    reader: Option<thread::ScopedJoinHandle<'scope, ()>>,
+    current: Option<Chunk>,
+    generation: u64,
+    /// 读线程按顺序接下来会送来的那一段的起点。
+    next_start: u64,
+}
+
+impl<'scope> ChunkReader<'scope> {
+    fn spawn<'env>(
+        scope: &'scope thread::Scope<'scope, 'env>,
+        device: &'env dyn BlockDevice,
+        block_size: usize,
+    ) -> Self {
+        let (chunk_sender, chunks) = mpsc::sync_channel(READ_AHEAD);
+        let (seeks, seek_requests) = mpsc::channel();
+        let (spare, spare_buffers) = mpsc::channel();
+        let reader = scope.spawn(move || {
+            read_chunks(
+                device,
+                block_size,
+                chunk_sender,
+                seek_requests,
+                spare_buffers,
+            );
+        });
         Self {
-            device,
             block_size,
-            data: vec![0; CHUNK_SIZE],
-            start: 0,
-            len: 0,
-            unreadable: Vec::new(),
+            chunks,
+            seeks,
+            spare,
+            reader: Some(reader),
+            current: None,
+            generation: 0,
+            next_start: 0,
         }
     }
 
     /// `offset` 必须是块大小的整数倍且小于设备容量。读不出时返回 `None`。
     fn block(&mut self, offset: u64) -> Option<&[u8]> {
-        let loaded = offset >= self.start && offset < self.start + self.len as u64;
+        let loaded = self.current.as_ref().is_some_and(|chunk| {
+            offset >= chunk.start && offset < chunk.start + chunk.data.len() as u64
+        });
         if !loaded {
             self.load(offset - offset % CHUNK_SIZE as u64);
         }
-        let begin = usize::try_from(offset.checked_sub(self.start)?).ok()?;
-        if self
+        let chunk = self.current.as_ref()?;
+        let begin = usize::try_from(offset.checked_sub(chunk.start)?).ok()?;
+        if chunk
             .unreadable
             .get(begin / self.block_size)
             .copied()
@@ -520,32 +564,111 @@ impl<'a> ChunkReader<'a> {
         {
             return None;
         }
-        let end = (begin + self.block_size).min(self.len);
-        self.data.get(begin..end)
+        let end = (begin + self.block_size).min(chunk.data.len());
+        chunk.data.get(begin..end)
     }
 
+    /// 换成从 `start` 开始的那一段。
     fn load(&mut self, start: u64) {
-        let remaining = self.device.size().saturating_sub(start);
-        let len = usize::try_from(remaining.min(CHUNK_SIZE as u64)).unwrap_or(CHUNK_SIZE);
-        self.start = start;
-        self.len = len;
-        self.unreadable.clear();
-        self.unreadable.resize(len.div_ceil(self.block_size), false);
-        let Some(buffer) = self.data.get_mut(..len) else {
-            self.unreadable.fill(true);
-            return;
-        };
-        if self.device.read_exact_at(start, buffer).is_ok() {
+        if let Some(used) = self.current.take() {
+            let _ = self.spare.send(used.data);
+        }
+        if start != self.next_start {
+            self.seek(start);
+        }
+        loop {
+            let Ok(chunk) = self.chunks.recv() else {
+                self.reader_stopped();
+                return;
+            };
+            if chunk.generation != self.generation {
+                let _ = self.spare.send(chunk.data);
+                continue;
+            }
+            if chunk.start != start {
+                // 按顺序读来的段对不上要的位置，不该发生；按新位置重读
+                let _ = self.spare.send(chunk.data);
+                self.seek(start);
+                continue;
+            }
+            self.next_start = chunk.start + chunk.data.len() as u64;
+            self.current = Some(chunk);
             return;
         }
-        for (index, piece) in buffer.chunks_mut(self.block_size).enumerate() {
-            let at = start + (index * self.block_size) as u64;
-            if self.device.read_exact_at(at, piece).is_err()
-                && let Some(flag) = self.unreadable.get_mut(index)
+    }
+
+    fn seek(&mut self, start: u64) {
+        self.generation += 1;
+        let _ = self.seeks.send((self.generation, start));
+    }
+
+    /// 读线程只在 panic 时才会先于扫描退出：把 panic 原样续抛，不把整块盘当成读不出。
+    fn reader_stopped(&mut self) {
+        if let Some(reader) = self.reader.take()
+            && let Err(payload) = reader.join()
+        {
+            panic::resume_unwind(payload);
+        }
+    }
+}
+
+/// 读线程：从 0 开始按段顺序读；收到重定位请求就从新位置接着读；读到设备末尾后等请求，扫描结束（通道关闭）时退出。
+fn read_chunks(
+    device: &dyn BlockDevice,
+    block_size: usize,
+    chunks: SyncSender<Chunk>,
+    seeks: Receiver<(u64, u64)>,
+    spare: Receiver<Vec<u8>>,
+) {
+    let size = device.size();
+    let (mut generation, mut next) = (0u64, 0u64);
+    loop {
+        if let Some((latest, start)) = seeks.try_iter().last() {
+            (generation, next) = (latest, start);
+        }
+        if next >= size {
+            match seeks.recv() {
+                Ok((latest, start)) => (generation, next) = (latest, start),
+                Err(_) => return,
+            }
+            continue;
+        }
+        let buffer = spare.try_recv().unwrap_or_default();
+        let chunk = read_chunk(device, block_size, generation, next, buffer);
+        next += chunk.data.len() as u64;
+        if chunks.send(chunk).is_err() {
+            return;
+        }
+    }
+}
+
+/// 读一段；整段读不出时逐块重读，只把真正读不出的块标出来。
+fn read_chunk(
+    device: &dyn BlockDevice,
+    block_size: usize,
+    generation: u64,
+    start: u64,
+    mut data: Vec<u8>,
+) -> Chunk {
+    let remaining = device.size().saturating_sub(start);
+    let len = usize::try_from(remaining.min(CHUNK_SIZE as u64)).unwrap_or(CHUNK_SIZE);
+    data.resize(len, 0);
+    let mut unreadable = vec![false; len.div_ceil(block_size)];
+    if device.read_exact_at(start, &mut data).is_err() {
+        for (index, piece) in data.chunks_mut(block_size).enumerate() {
+            let at = start + (index * block_size) as u64;
+            if device.read_exact_at(at, piece).is_err()
+                && let Some(flag) = unreadable.get_mut(index)
             {
                 *flag = true;
             }
         }
+    }
+    Chunk {
+        generation,
+        start,
+        data,
+        unreadable,
     }
 }
 
@@ -846,6 +969,48 @@ mod tests {
         let (_, saved) = run(&image.device(vec![]), None, &Recorder::default());
         assert_eq!(saved.len(), 1);
         assert!(saved[0].1 == png);
+    }
+
+    #[test]
+    fn rescan_after_a_long_false_candidate_reads_earlier_chunks_again() {
+        let mut image = ImageBuilder::new();
+        // 像 JPEG 的开头，之后再也没有 0xFF：一直读到 3 MiB 外的设备末尾才知道它不完整，
+        // 回头重找时要让读线程退回好几段重读
+        let mut fake = b"\xFF\xD8\xFF\xE0\x00\x04ab\xFF\xDA\x00\x04cd".to_vec();
+        fake.resize(BLOCK, 0x41);
+        image.file("fake", fake);
+        let png = samples::png(&[60]);
+        let mut png_block = png.clone();
+        png_block.resize(BLOCK, 0x41);
+        image.file("png", png_block);
+        image.data.resize(image.data.len() + 3 * CHUNK_SIZE, 0x41);
+        let (report, saved) = run(&image.device(vec![]), None, &Recorder::default());
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].1 == png);
+        assert_eq!(report.unwrap().unreadable_bytes, 0);
+    }
+
+    #[test]
+    fn unreadable_block_in_a_later_chunk_drops_only_its_file() {
+        let mut image = ImageBuilder::new();
+        image
+            .garbage(CHUNK_SIZE / BLOCK + 100)
+            .file("png", samples::png(&[3000]))
+            .garbage(1)
+            .file("jpg", samples::jpg(2000))
+            .garbage(1);
+        let (png_offset, _, _) = image.placed[0].clone();
+        let bad_start = png_offset + 2 * BLOCK as u64;
+        let bad = vec![(bad_start, bad_start + BLOCK as u64)];
+        let (report, saved) = run(&image.device(bad), None, &Recorder::default());
+        let extensions: Vec<_> = saved
+            .iter()
+            .map(|(file, _)| file.extension.as_str())
+            .collect();
+        assert_eq!(extensions, ["jpg"]);
+        assert!(saved[0].1 == image.placed[1].2);
+        assert_eq!(report.unwrap().unreadable_bytes, BLOCK as u64);
+        assert!(png_offset > CHUNK_SIZE as u64);
     }
 
     #[test]
