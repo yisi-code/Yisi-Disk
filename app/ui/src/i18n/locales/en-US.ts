@@ -10,37 +10,185 @@ const enUS: typeof zhCN = {
     'zh-CN': '中文',
     'en-US': 'English',
   },
-  scenarios: {
-    title: 'What do you want to do?',
-    unavailable: 'Engine not connected yet',
-    findPartitions: 'Find lost partitions',
-    repairPartition: 'Repair a partition that will not open',
-    undelete: 'Recover deleted files',
-    carve: 'Deep recovery by file type',
-    fsCheck: 'Check and repair a file system',
-    image: 'Create a disk image (bad-sector aware)',
-    carveDescription:
-      'Recover photos, documents, archives and videos from an image or disk by file signature, without relying on the file system',
-    undeleteDescription:
-      'Browse FAT / exFAT partitions by their folders, find deleted files and copy them to another disk',
+  nav: {
+    label: 'Navigate by problem',
+    overview: 'Home',
+    problems: 'What went wrong',
+    allFeatures: 'All features',
+    about: 'About',
+    back: 'Back',
+  },
+  problems: {
+    overview: {
+      title: 'What happened?',
+      intro:
+        'Pick the problem closest to yours. Each page describes the symptoms it covers and lists the features to try, in the recommended order, along with what to watch out for.',
+      safety:
+        'Whatever happened: until your data is back, do not write anything to the affected disk, and save recovered files to a different disk.',
+      allFeaturesHint: 'Already know which feature you need?',
+      allFeaturesLink: 'See all features',
+    },
+    symptomsTitle: 'Choose this when',
+    featuresTitle: 'Try in this order',
+    notesTitle: 'Things to watch out for',
+    step: 'Step {step}',
+    deleted: {
+      name: 'Deleted files by mistake',
+      summary: 'Files or folders were deleted and are not in the Recycle Bin; the partition still opens normally.',
+      symptoms: [
+        'You deleted files or folders and they are not in the Recycle Bin, or the bin was emptied.',
+        'They were removed with Shift + Delete, from the command line or by another program.',
+        'The partition itself still opens; only these files are missing.',
+      ],
+      steps: {
+        undelete: 'Try this first: it brings files back with their original names and folders.',
+        carve: 'If the first step cannot find them, or the copies will not open, search the whole partition by file format.',
+      },
+      notes: [
+        'Stop writing to this disk right away: do not install software or download files, and never save recovered files back to it.',
+        'On SSDs, deleted data is usually wiped soon after deletion; the sooner you recover, the better.',
+        'If the files were on the system drive (C:), Windows keeps writing to it while running; if you can, shut down and recover from another computer.',
+      ],
+    },
+    unopenable: {
+      name: 'Partition will not open / asks to format',
+      summary: 'Opening the partition asks you to format it, it shows up as RAW, or it was formatted.',
+      symptoms: [
+        'Windows says "You need to format the disk in drive before you can use it".',
+        'Disk Management shows the partition\'s file system as RAW.',
+        'The partition was formatted by mistake (quick format).',
+      ],
+      steps: {
+        carve: 'Available now: finds files by format without relying on the partition structure, but without original names.',
+        repairPartition: 'Once the partition is repaired, files come back with their names.',
+        fsCheck: 'For partitions that open but show garbled content or folders that will not open.',
+      },
+      notes: [
+        'Do not click "Format disk", and do not run chkdsk or other repair tools that write to the disk.',
+        'Save recovered files to a different disk.',
+        'Files can often be recovered after a quick format; a full format overwrites the data with zeros.',
+      ],
+    },
+    lostPartition: {
+      name: 'Partition or drive letter is gone',
+      summary: 'A drive letter disappeared, Disk Management shows "Unallocated", or a partition vanished after partitioning.',
+      symptoms: [
+        'A drive letter is missing from This PC and Disk Management shows the area as "Unallocated".',
+        'A partition disappeared after reinstalling Windows or resizing or deleting partitions.',
+        'The whole disk shows as "Not initialized" or without partitions.',
+      ],
+      steps: {
+        findPartitions: 'The best option: find the lost partition and get all of its files back.',
+        carve: 'Available now: finds files by format across the whole disk, but without original names.',
+      },
+      notes: [
+        'Do not create a new partition in the empty space or initialize the disk: that overwrites the old partition information.',
+        'Save recovered files to a different disk.',
+      ],
+    },
+    failingDisk: {
+      name: 'Bad sectors / slow or failing disk',
+      summary: 'Copying fails with errors, reads are very slow or erratic, or Windows reports a disk problem.',
+      symptoms: [
+        'Copying fails with "Data error (cyclic redundancy check)" or "I/O device error".',
+        'Read speed jumps up and down, the disk often hangs, or it makes clicking noises.',
+        'Windows or a disk health tool reports that the disk is in poor health.',
+      ],
+      steps: {
+        badSectors: 'Check first: read the whole disk once and see which areas cannot be read. Skip this if you already know it has bad sectors and the data matters.',
+        image: 'Copy the disk to an image file and recover from the image, so the failing disk is not read again and again.',
+        undelete: 'Recover deleted files from the image (or this disk), keeping their names.',
+        carve: 'Recover files by format from the image (or this disk).',
+      },
+      notes: [
+        'Image first, recover later: every full read can make a failing disk worse, so try to read it in full only once.',
+        'If the disk makes unusual noises or keeps disconnecting, stop using it; for very important data, consider a professional recovery service.',
+        'Do not defragment the disk, repair it with chkdsk, or low-level format it.',
+      ],
+    },
+  },
+  features: {
+    pending: 'In development',
+    pendingReason: 'This feature is still in development and cannot be used yet.',
+    suits: 'Good for:',
+    notSuits: 'Not for:',
+    catalogIntro:
+      'Every feature in one place, for when you already know what you need. Features marked "In development" cannot be used yet.',
+    undelete: {
+      name: 'Recover deleted files',
+      summary: 'Browse the folders on a partition, find deleted files and copy them, with their names and folders, to another disk.',
+      suits: 'The partition is still recognized (FAT, exFAT, NTFS), little has been written since the deletion, and you want to keep the original names.',
+      notSuits: 'Formatted, unopenable or lost partitions; files deleted on SSDs have often been wiped already.',
+    },
+    carve: {
+      name: 'Deep recovery by file type',
+      summary: 'Ignores the file system and searches a whole disk or image for photos, documents, archives and videos by their file signatures.',
+      suits: 'The partition will not open, was formatted or is lost, or "Recover deleted files" could not find the files.',
+      notSuits: 'Recovered files have no original names or folders, only numbers; supported formats are listed in step 2 of the wizard, and heavily fragmented files may be incomplete.',
+    },
+    badSectors: {
+      name: 'Bad sector check',
+      summary: 'Reads a whole disk or image from start to end and reports which areas cannot be read. Read-only; the disk is not changed.',
+      suits: 'The disk is slow or copying fails, and you want to know whether it has bad sectors and where.',
+      notSuits: 'It does not repair bad sectors or recover files; if you already know the disk has bad sectors and the data matters, a full read adds strain, so create an image first.',
+    },
+    findPartitions: {
+      name: 'Find lost partitions',
+      summary: 'Searches the whole disk for partitions lost to deletion or a damaged partition table, and writes them back after you confirm.',
+      suits: 'A drive letter is gone, Disk Management shows "Unallocated", or a partition vanished after partitioning.',
+      notSuits: 'If the partition still exists but will not open, use "Repair a partition that will not open".',
+    },
+    repairPartition: {
+      name: 'Repair a partition that will not open',
+      summary: 'Checks the partition\'s boot sector and restores it from the partition\'s own backup or rebuilds it.',
+      suits: 'The partition is still there but asks to be formatted or shows up as RAW.',
+      notSuits: 'If the partition is gone entirely, use "Find lost partitions"; repairing writes to the disk, so recover important data or create an image first.',
+    },
+    fsCheck: {
+      name: 'Check and repair a file system',
+      summary: 'Checks that FAT and exFAT directories and allocation tables agree, lists the problems, and repairs the ones you select.',
+      suits: 'The partition opens but file names are garbled, folders will not open, the space does not add up, or Windows asks to scan and fix after unplugging.',
+      notSuits: 'NTFS gets only a few checks such as the boot sector; repairing writes to the disk, so recover important files first.',
+    },
+    image: {
+      name: 'Create a disk image (bad-sector aware)',
+      summary: 'Copies a whole disk to an image file: reads the healthy areas first, returns to the bad areas last, and saves a map of where they are.',
+      suits: 'The disk has bad sectors or read errors and the data matters: image it first and recover from the image.',
+      notSuits: 'You need another disk with at least as much free space as the source disk.',
+    },
+  },
+  about: {
+    title: 'About Yisi-Disk',
+    intro:
+      'Yisi-Disk is a disk data recovery tool: recover deleted files, deep recovery by file type, and bad sector checks. Scanning and browsing are read-only, and recovered files are always saved to another disk.',
+    version: 'Version',
+    engine: 'Recovery engine',
+    checking: 'Checking…',
+    engineReady: 'Working',
+    engineFailed: 'Cannot start, so recovery is unavailable for now; try restarting the program.',
+    technical: 'Technical details',
+    engineVersion: 'Engine version',
+    engineMethods: 'Supported operations',
   },
   host: {
     connecting: 'Connecting to host…',
     failed: 'Cannot connect to host: {reason}',
     version: 'Version {version}',
   },
-  selfTest: {
-    title: 'Engine self-test',
-    engineChecking: 'Checking the engine…',
-    engineReady: 'Engine {version} ready, supports: {methods}',
-    source: {
-      legend: 'Scan',
-      image: 'Image file',
-      disk: 'Physical disk',
+  badSectors: {
+    intro:
+      'Reads a whole disk or image file from start to end and records the areas that cannot be read. It is read-only and does not change the disk; it does not repair bad sectors or recover files, but tells you whether the disk can still be read safely.',
+    guide: {
+      title: 'How to read the result',
+      clean: 'No unreadable ranges: the whole disk could be read this time, and no bad sectors were found.',
+      unreadable:
+        'Unreadable ranges: these areas cannot be read now, most likely because of bad sectors, and files stored there will be incomplete. Ranges are recorded in 1 MiB units, so not every sector in a range is necessarily bad.',
+      slow: 'Low or erratic read speed: even without unreadable ranges, the disk may be wearing out; copy important files off it soon.',
+      limits: 'Each area is read once, without retries: an area that fails only occasionally may read fine this time and fail next time.',
     },
-    imagePath: 'Path',
-    imagePathPlaceholder: 'Full path of the image file, e.g. D:/images/disk.img',
-    start: 'Start read scan',
+    diskHint:
+      'Reading a physical disk needs administrator rights. The check is read-only but reads the whole disk, so larger disks take longer. If you already know the disk has bad sectors and the data matters, create an image first instead of checking.',
+    start: 'Start check',
     cancel: 'Cancel',
     cancelling: 'Cancelling…',
     unresponsive: 'The engine has not responded for over 10 seconds',
@@ -48,18 +196,28 @@ const enUS: typeof zhCN = {
       starting: 'Starting the engine…',
       startingDisk: 'Requesting administrator rights and opening the disk…',
       running: 'Read {done} of {total} ({percent}%), {rate}/s',
-      completed: 'Scan completed',
-      failed: 'Scan failed',
+      completed: 'Check completed',
+      failed: 'Check failed',
       cancelled: 'Cancelled',
     },
-    diskHint:
-      'The read scan is read-only but reads the whole disk from start to end. If a disk has already reported read errors, create an image first instead of scanning it directly.',
     result: {
+      clean: 'No unreadable ranges found',
+      found: 'Unreadable ranges found, {bytes} in total',
       bytesRead: 'Read',
       unreadable: 'Unreadable ranges',
       unreadableValue: '{count} ranges, {bytes} in total',
-      elapsed: 'Elapsed',
+      elapsed: 'Time',
       elapsedValue: '{seconds} s',
+      rangesCaption: 'Unreadable areas',
+      start: 'Start',
+      length: 'Length',
+      positionValue: '{position} (offset {offset} bytes)',
+      moreRanges: 'Showing the first {shown} of {count} ranges.',
+      truncated: 'Too many unreadable ranges: only the first {count} were recorded; the total above still includes all of them.',
+      nextClean:
+        'Next: if the disk is still slow or reports errors, copy important files off it soon; to recover deleted files, pick the matching problem in the navigation.',
+      nextFound:
+        'Next: if the data matters, image the disk first and recover from the image (disk imaging is still in development). Until then, use the disk as little as possible; if you must recover now, "Recover deleted files" or "Deep recovery by file type" can read it directly, and save recovered files only to another disk.',
     },
   },
   disk: {
@@ -92,7 +250,6 @@ const enUS: typeof zhCN = {
     mp4: 'MP4 / MOV video',
   },
   carve: {
-    exit: 'Back to home',
     steps: {
       source: 'Source',
       formats: 'Formats',

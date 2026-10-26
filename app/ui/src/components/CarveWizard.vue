@@ -446,10 +446,10 @@ async function pickPath(pick: () => Promise<string | null>, apply: (path: string
         :disabled="isBusy"
         @click="handleExit"
       >
-        {{ t('carve.exit') }}
+        {{ t('nav.back') }}
       </button>
       <h2 id="carve-wizard-title" ref="titleElement" class="wizard__title" tabindex="-1">
-        {{ t('scenarios.carve') }}
+        {{ t('features.carve.name') }}
       </h2>
     </header>
 

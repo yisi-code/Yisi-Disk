@@ -373,10 +373,10 @@ function noteText(note: string): string {
         :disabled="copy.isBusy.value"
         @click="handleExit"
       >
-        {{ t('carve.exit') }}
+        {{ t('nav.back') }}
       </button>
       <h2 id="undelete-wizard-title" ref="titleElement" class="wizard__title" tabindex="-1">
-        {{ t('scenarios.undelete') }}
+        {{ t('features.undelete.name') }}
       </h2>
     </header>
 
