@@ -214,6 +214,58 @@ pub fn mp4(mdat_size: usize, large_mdat: bool) -> Vec<u8> {
     out
 }
 
+/// 分片 MP4：ftyp、moov，`sidx_version` 给出时加一个索引全部分片的 sidx（版本 0 或 1），
+/// `gap` 大于 0 时在 sidx 与第一个分片之间插一个这么长的 free（sidx 的 first_offset 跳过它，至少 8），
+/// 然后每个 `mdat_sizes` 一组 moof + mdat，`mfra` 时结尾再加一个不在索引范围内的 mfra。
+pub fn mp4_fragmented(
+    mdat_sizes: &[usize],
+    sidx_version: Option<u8>,
+    gap: usize,
+    mfra: bool,
+) -> Vec<u8> {
+    let mut noise = Noise::new(0x0046_4D50);
+    let mut out = Vec::new();
+    mp4_box(&mut out, b"ftyp", b"iso6\x00\x00\x00\x00iso6dash");
+    mp4_box(&mut out, b"moov", &noise.bytes(100));
+    let mut fragments = Vec::new();
+    for &size in mdat_sizes {
+        let mut fragment = Vec::new();
+        mp4_box(&mut fragment, b"moof", &noise.bytes(40));
+        mp4_box(&mut fragment, b"mdat", &noise.bytes(size));
+        fragments.push(fragment);
+    }
+    if let Some(version) = sidx_version {
+        let mut sidx = vec![version, 0, 0, 0];
+        sidx.extend_from_slice(&1u32.to_be_bytes()); // reference_ID
+        sidx.extend_from_slice(&1000u32.to_be_bytes()); // timescale
+        if version == 0 {
+            sidx.extend_from_slice(&0u32.to_be_bytes());
+            sidx.extend_from_slice(&(gap as u32).to_be_bytes());
+        } else {
+            sidx.extend_from_slice(&0u64.to_be_bytes());
+            sidx.extend_from_slice(&(gap as u64).to_be_bytes());
+        }
+        sidx.extend_from_slice(&0u16.to_be_bytes());
+        sidx.extend_from_slice(&(fragments.len() as u16).to_be_bytes());
+        for fragment in &fragments {
+            sidx.extend_from_slice(&(fragment.len() as u32).to_be_bytes()); // reference_type 0：媒体
+            sidx.extend_from_slice(&1000u32.to_be_bytes()); // subsegment_duration
+            sidx.extend_from_slice(&0x9000_0000u32.to_be_bytes()); // 以 1 型 SAP 开头
+        }
+        mp4_box(&mut out, b"sidx", &sidx);
+    }
+    if gap > 0 {
+        mp4_box(&mut out, b"free", &vec![0; gap.saturating_sub(8)]);
+    }
+    for fragment in &fragments {
+        out.extend_from_slice(fragment);
+    }
+    if mfra {
+        mp4_box(&mut out, b"mfra", &noise.bytes(16));
+    }
+    out
+}
+
 fn mp4_box(out: &mut Vec<u8>, kind: &[u8; 4], payload: &[u8]) {
     out.extend_from_slice(&(8 + payload.len() as u32).to_be_bytes());
     out.extend_from_slice(kind);
