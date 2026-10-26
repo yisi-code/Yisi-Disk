@@ -14,12 +14,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter};
 use yisi_engine::protocol::{
-    BROWSE_OPEN, BrowseOpened, BrowseParams, CANCEL, CANCELLED, CAPABILITIES, CARVE_START,
-    COMPLETED, COPIED, COPY_FILES, Capabilities, CarveParams, CarveStarted, CopyItem, CopyParams,
-    CopyStarted, DiskList, FAILED, FOUND, FileListPage, FilePreview, FileTypeList, HEARTBEAT,
-    JobRef, LIST_DISKS, LIST_FILE_TYPES, LIST_FILES, LOG, ListFilesParams, PREVIEW_FILE,
-    PREVIEW_FS_FILE, PROGRESS, PartitionRef, PreviewFsParams, PreviewParams, READ_SCAN,
-    ReadScanParams, Source, error_code,
+    BROWSE_OPEN, BrowseOpened, BrowseParams, CANCEL, CANCELLED, CAPABILITIES, CARVE_EXTRACT,
+    CARVE_START, COMPLETED, COPIED, COPY_FILES, Capabilities, CarveParams, CarveStarted, CopyItem,
+    CopyParams, CopyStarted, DiskList, ExtractItem, ExtractParams, FAILED, FOUND, FileListPage,
+    FilePreview, FileTypeList, HEARTBEAT, JobRef, LIST_DISKS, LIST_FILE_TYPES, LIST_FILES, LOG,
+    ListFilesParams, PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS, PartitionRef,
+    PreviewFsParams, PreviewParams, PreviewRangeParams, READ_SCAN, ReadScanParams, Source,
+    error_code,
 };
 
 use crate::broker::BrokerSession;
@@ -89,6 +90,8 @@ pub struct Engines {
     recovered_dirs: Mutex<HashMap<String, PathBuf>>,
     /// 本次运行里启动过的复制任务各自的输出目录，供打开、在文件夹中显示复制出的文件。
     copied_dirs: Mutex<HashMap<String, PathBuf>>,
+    /// 本次运行里启动过的深度恢复任务各自的源：只扫描时，预览和保存都要回到这个源上读。
+    carve_targets: Mutex<HashMap<String, Target>>,
 }
 
 impl Engines {
@@ -158,7 +161,7 @@ impl Engines {
         broker: &BrokerSession,
         job_id: String,
         target: Target,
-        output_dir: String,
+        output_dir: Option<String>,
         extensions: Vec<String>,
     ) -> Result<(), HostError> {
         // 磁盘编号不合法时不启动引擎
@@ -166,6 +169,7 @@ impl Engines {
             disk_path(*disk_number)?;
         }
         let params_job_id = job_id.clone();
+        let source_target = target.clone();
         let started = self.start_job(app, job_id.clone(), CARVE_START, |engine_pid| {
             to_params(&CarveParams {
                 job_id: params_job_id,
@@ -174,10 +178,68 @@ impl Engines {
                 extensions: Some(extensions),
             })
         })?;
-        let CarveStarted { output_dir } = serde_json::from_value(started)
-            .map_err(|error| HostError::new("engineProtocol", error.to_string()))?;
+        let CarveStarted { output_dir } = from_value(started)?;
+        if let Some(output_dir) = output_dir {
+            lock(&self.recovered_dirs).insert(job_id.clone(), PathBuf::from(output_dir));
+        }
+        lock(&self.carve_targets).insert(job_id, source_target);
+        Ok(())
+    }
+
+    /// 预览只扫描、还没保存的文件：另起一个引擎回到扫描任务 `scan_job_id` 的源上读这一段。
+    pub fn preview_range(
+        &self,
+        broker: &BrokerSession,
+        scan_job_id: &str,
+        offset: u64,
+        length: u64,
+    ) -> Result<FilePreview, HostError> {
+        let target = self.carve_target(scan_job_id)?;
+        let process = EngineProcess::spawn(None, || {})?;
+        let result = resolve_source(target, broker, process.pid)
+            .and_then(|source| {
+                to_params(&PreviewRangeParams {
+                    source,
+                    offset,
+                    length,
+                })
+            })
+            .and_then(|params| process.request(PREVIEW_RANGE, params, BROWSE_TIMEOUT));
+        process.abandon();
+        from_value(result?)
+    }
+
+    /// 保存只扫描时选中的文件：回到扫描任务 `scan_job_id` 的源上重新读出并校验，写进输出目录。
+    /// 之后按这个保存任务的 ID 加文件名打开、在文件夹中显示（与边扫边保存的结果一样）。
+    pub fn start_extract(
+        &self,
+        app: AppHandle,
+        broker: &BrokerSession,
+        job_id: String,
+        scan_job_id: &str,
+        items: Vec<ExtractItem>,
+        output_dir: String,
+    ) -> Result<(), HostError> {
+        let target = self.carve_target(scan_job_id)?;
+        let params_job_id = job_id.clone();
+        let started = self.start_job(app, job_id.clone(), CARVE_EXTRACT, |engine_pid| {
+            to_params(&ExtractParams {
+                job_id: params_job_id,
+                source: resolve_source(target, broker, engine_pid)?,
+                items,
+                output_dir,
+            })
+        })?;
+        let CopyStarted { output_dir } = from_value(started)?;
         lock(&self.recovered_dirs).insert(job_id, PathBuf::from(output_dir));
         Ok(())
+    }
+
+    fn carve_target(&self, scan_job_id: &str) -> Result<Target, HostError> {
+        lock(&self.carve_targets)
+            .get(scan_job_id)
+            .cloned()
+            .ok_or_else(|| HostError::new("jobNotFound", scan_job_id))
     }
 
     /// 深度恢复任务输出目录里的一个文件。只接受恢复时起的文件名，不接受其他路径。

@@ -19,7 +19,7 @@ use std::time::Instant;
 use yisi_formats::{DataCheck, Recovering, Registry};
 use yisi_io::BlockDevice;
 
-pub use sink::{DirectorySink, RecoveredFile, Sink, SinkFile};
+pub use sink::{DirectorySink, RecoveredFile, ScanOnlySink, Sink, SinkFile, recovered_name};
 
 /// 每次从设备读这么多再按块处理，进度也按这个粒度报告。
 const CHUNK_SIZE: usize = 1 << 20;

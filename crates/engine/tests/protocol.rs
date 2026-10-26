@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use yisi_engine::protocol::{
-    BROWSE_OPEN, BrowseOpened, CANCEL, CANCELLED, CAPABILITIES, CARVE_START, COMPLETED, COPIED,
-    COPY_FILES, CarveSummary, CopiedFile, CopySummary, FOUND, FileListPage, FilePreview, FoundFile,
-    HEARTBEAT, LIST_FILE_TYPES, LIST_FILES, PREVIEW_FILE, PREVIEW_FS_FILE, PROGRESS, READ_SCAN,
-    ReadScanReport, error_code,
+    BROWSE_OPEN, BrowseOpened, CANCEL, CANCELLED, CAPABILITIES, CARVE_EXTRACT, CARVE_START,
+    COMPLETED, COPIED, COPY_FILES, CarveSummary, CopiedFile, CopySummary, FOUND, FileListPage,
+    FilePreview, FoundFile, HEARTBEAT, LIST_FILE_TYPES, LIST_FILES, PREVIEW_FILE, PREVIEW_FS_FILE,
+    PREVIEW_RANGE, PROGRESS, READ_SCAN, ReadScanReport, error_code,
 };
 use yisi_formats::samples;
 use yisi_rpc::{Id, Message, Request, error_code as rpc_error, read_message, write_message};
@@ -290,7 +290,10 @@ fn carve_recovers_all_five_formats_from_an_image() {
     let (_, completed) = notifications.last().unwrap();
     let summary: CarveSummary = serde_json::from_value(completed["result"].clone()).unwrap();
 
-    assert_eq!(Path::new(&summary.output_dir), output);
+    assert_eq!(
+        summary.output_dir.as_deref().map(Path::new),
+        Some(output.as_path())
+    );
     assert_eq!(summary.files, 5);
     assert_eq!(found.len(), 5);
     for ((extension, bytes), (file, offset)) in originals.iter().zip(found.iter().zip(&offsets)) {
@@ -545,4 +548,128 @@ fn browse_lists_pages_previews_and_copies_deleted_files() {
         report
     );
     assert!(copier.wait_exit().success());
+}
+
+#[test]
+fn scan_only_then_preview_and_save_selected_files() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-scan-only");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let originals = [
+        ("jpg", samples::jpg(6000)),
+        ("pdf", samples::pdf(3, true)),
+        ("zip", samples::zip(&[("a.txt", 3000, true)], b"")),
+    ];
+    let mut image = vec![0x20u8; 2048];
+    let mut offsets = Vec::new();
+    for (_, bytes) in &originals {
+        offsets.push(image.len());
+        image.extend_from_slice(bytes);
+        let padded = image.len().div_ceil(512) * 512 + 1024;
+        image.resize(padded, 0x20);
+    }
+    let image_path = dir.join("disk.img");
+    std::fs::write(&image_path, &image).unwrap();
+    let source = json!({"type": "image", "path": image_path, "sectorSize": 512});
+
+    // 只扫描：不给输出目录，什么都不写
+    let mut engine = Engine::start();
+    let accepted = engine
+        .call(
+            CARVE_START,
+            json!({"jobId": "scan-1-abcdef", "source": source}),
+        )
+        .unwrap();
+    assert_eq!(accepted, json!({"outputDir": null}));
+    let notifications = engine.notifications_until(COMPLETED);
+    let found: Vec<FoundFile> = notifications
+        .iter()
+        .filter(|(method, _)| method == FOUND)
+        .flat_map(|(_, params)| {
+            serde_json::from_value::<Vec<FoundFile>>(params["files"].clone()).unwrap()
+        })
+        .collect();
+    let summary: CarveSummary =
+        serde_json::from_value(notifications.last().unwrap().1["result"].clone()).unwrap();
+    assert_eq!((summary.files, summary.output_dir), (3, None));
+    assert_eq!(found.len(), 3);
+    assert_eq!(found[0].name, format!("f{:010}.jpg", offsets[0] / 512));
+    assert!(
+        std::fs::read_dir(&dir).unwrap().count() == 1,
+        "只扫描时不应建任何目录"
+    );
+    assert!(engine.wait_exit().success());
+
+    // 从源上预览还没保存的文件
+    let mut viewer = Engine::start();
+    let preview: FilePreview = serde_json::from_value(
+        viewer
+            .call(
+                PREVIEW_RANGE,
+                json!({"source": source, "offset": found[1].offset, "length": found[1].length}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(preview.length, found[1].length);
+
+    // 扫描之后源上的 ZIP 被改了：保存时重新校验，不保留
+    let zip_at = offsets[2];
+    image[zip_at..zip_at + 4].copy_from_slice(b"XXXX");
+    std::fs::write(&image_path, &image).unwrap();
+
+    let mut saver = Engine::start();
+    let items: Vec<_> = found
+        .iter()
+        .map(|file| json!({"offset": file.offset, "length": file.length, "extension": file.extension}))
+        .collect();
+    let bogus = saver
+        .call(
+            CARVE_EXTRACT,
+            json!({"jobId": "save-1", "source": source, "outputDir": dir,
+                   "items": [{"offset": 0, "length": 0, "extension": "jpg"}]}),
+        )
+        .unwrap_err();
+    assert_eq!(bogus.code, rpc_error::INVALID_PARAMS);
+    let started = saver
+        .call(
+            CARVE_EXTRACT,
+            json!({"jobId": "save-1-xyz", "source": source, "outputDir": dir, "items": items}),
+        )
+        .unwrap();
+    let output = dir.join("recovered-save-1-x");
+    assert_eq!(started, json!({"outputDir": output.display().to_string()}));
+    let notifications = saver.notifications_until(COMPLETED);
+    let saved: Vec<CopiedFile> = notifications
+        .iter()
+        .filter(|(method, _)| method == COPIED)
+        .flat_map(|(_, params)| {
+            serde_json::from_value::<Vec<CopiedFile>>(params["files"].clone()).unwrap()
+        })
+        .collect();
+    let outcome: Vec<_> = saved
+        .iter()
+        .map(|file| (file.path.as_str(), file.error.is_none()))
+        .collect();
+    assert_eq!(
+        outcome,
+        [
+            (found[0].name.as_str(), true),
+            (found[1].name.as_str(), true),
+            (found[2].name.as_str(), false),
+        ]
+    );
+    let summary: CopySummary =
+        serde_json::from_value(notifications.last().unwrap().1["result"].clone()).unwrap();
+    assert_eq!((summary.files, summary.failed), (2, 1));
+    for ((_, bytes), file) in originals.iter().zip(&found).take(2) {
+        assert!(
+            std::fs::read(output.join(&file.name)).unwrap() == *bytes,
+            "{} 内容不一致",
+            file.name
+        );
+    }
+    assert!(!output.join(&found[2].name).exists());
+    assert!(saver.wait_exit().success());
 }

@@ -11,6 +11,7 @@ import {
   openCopiedFile,
   pickDirectory,
   revealCopiedFile,
+  startCopy as startCopyJob,
   toHostError,
   type CopyItem,
   type HostError,
@@ -281,12 +282,8 @@ async function startCopy(items: CopyItem[], dir: string) {
   if (source === null || partition === null) {
     return
   }
-  await copy.start(
-    source,
-    { number: partition.number, offset: partition.offset, length: partition.length },
-    items,
-    dir,
-  )
+  const partitionRef = { number: partition.number, offset: partition.offset, length: partition.length }
+  await copy.start((jobId) => startCopyJob(jobId, source, partitionRef, items, dir))
 }
 
 async function revealOutput() {

@@ -4,7 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use yisi_carve::{CarveControl, CarveOptions, DirectorySink, RecoveredFile, carve};
+use yisi_carve::{CarveControl, CarveOptions, RecoveredFile, Sink, carve};
 use yisi_engine::protocol::{
     CarveSummary, FOUND, FileType, FileTypeList, FoundFile, JobFound, TypeTotal,
 };
@@ -63,8 +63,8 @@ pub fn run(
     device: &dyn BlockDevice,
     registry: &Registry,
     enabled: Vec<bool>,
-    mut sink: DirectorySink,
-    output_dir: &Path,
+    sink: &mut (dyn Sink + Send),
+    output_dir: Option<&Path>,
     context: &JobContext,
 ) -> Result<JobOutcome, String> {
     let control = Reporter {
@@ -76,13 +76,13 @@ pub fn run(
         block_size: device.sector_size(),
         enabled,
     };
-    let outcome = carve(device, registry, &options, &mut sink, &control);
+    let outcome = carve(device, registry, &options, sink, &control);
     // 终结通知之前把剩下的文件发完
     control.flush();
     match outcome {
         Ok(Some(report)) => {
             let summary = CarveSummary {
-                output_dir: output_dir.display().to_string(),
+                output_dir: output_dir.map(|dir| dir.display().to_string()),
                 files: report.files,
                 bytes: report.bytes,
                 by_type: report

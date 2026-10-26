@@ -13,6 +13,7 @@ mod raw;
 mod read;
 #[cfg(windows)]
 mod volume;
+mod window;
 #[cfg(windows)]
 mod windows_disk;
 
@@ -23,5 +24,6 @@ pub use error::IoError;
 pub use raw::RawImage;
 #[cfg(windows)]
 pub use volume::volume_disk_numbers;
+pub use window::Window;
 #[cfg(windows)]
 pub use windows_disk::WindowsDisk;

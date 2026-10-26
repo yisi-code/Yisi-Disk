@@ -113,6 +113,11 @@ const enUS: typeof zhCN = {
       hint: 'Select only the formats you need to get fewer false matches.',
     },
     output: {
+      modeLegend: 'When to save',
+      whileScanning: 'Save to the folder below while scanning',
+      afterScan: 'Scan first, then choose which files to save',
+      afterScanHint:
+        'Nothing is written while scanning. Afterwards you can preview and select files, then choose a folder to save them; saving reads them from the source again and re-checks them. The scan results live only in this session of the app, so save before leaving.',
       label: 'Save to',
       placeholder: 'Full path of the output folder, e.g. F:/recovered',
       pickTitle: 'Choose where to save recovered files',
@@ -131,6 +136,8 @@ const enUS: typeof zhCN = {
       cancel: 'Cancel',
       cancelling: 'Cancelling…',
       unresponsive: 'The engine has not responded for over 10 seconds',
+      cancelledScanOnlyNote: 'Files found before cancelling can still be selected and saved.',
+      outputAfterScan: 'Choose files to save after the scan',
       cancelledNote: 'Complete files recovered before cancelling remain in the output folder.',
       status: {
         starting: 'Starting the engine…',
@@ -163,8 +170,14 @@ const enUS: typeof zhCN = {
       at: 'at {position}',
       empty: 'No files found yet',
       hint: 'Click a group to expand or collapse it, click a file to see its details, double-click a file to open it with its default app.',
+      selectHint:
+        'Click a group to expand or collapse it, click a file to see its details, double-click a file to save and then open it. Use the checkboxes or Space to select files to save; checking a group selects all of it.',
+      check: 'Select {name}',
+      checkGroup: 'Select the whole group {name}',
     },
     preview: {
+      notSavedHint:
+        'This file has not been saved yet: the preview is read from the source, and it is saved to the folder below before it is opened.',
       title: 'File details',
       placeholder: 'Select a file on the left to see its details and preview.',
       name: 'Name',
@@ -176,6 +189,23 @@ const enUS: typeof zhCN = {
       positionValue: '{position} (offset {offset}, sector {sector})',
       open: 'Open with default app',
       reveal: 'Show in folder',
+    },
+    save: {
+      hint: 'Selected files are saved into a new subfolder (named recovered-…) of this folder, with the same names as when saving while scanning. Saving reads them from the source again and re-checks them; files that no longer match the scan are not saved.',
+      start: 'Save {count} selected files',
+      savedCount: '{saved} / {total} saved',
+      failedCount: '{count} files could not be saved',
+      failedItem: '{name}: {reason}',
+      summary: 'Saved {count} files, {bytes} in total, in {dir}',
+      discardConfirm:
+        'Some files found by the scan have not been saved; they will be gone after leaving or scanning again. Continue?',
+      status: {
+        starting: 'Starting to save…',
+        running: 'Saved {done} / {total} ({percent}%), {count} files',
+        completed: 'Saving finished',
+        failed: 'Saving failed',
+        cancelled: 'Cancelled; files already saved stay in the destination',
+      },
     },
   },
   source: {
