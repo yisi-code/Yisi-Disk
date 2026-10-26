@@ -52,6 +52,8 @@ mod robustness {
             samples::pdf(2, true),
             samples::zip(&[("a", 30, true), ("b", 40, false)], b"x"),
             samples::mp4(200, true),
+            samples::mp4_fragmented(&[120, 60], Some(0), 16, true),
+            samples::mp4_fragmented(&[80, 90, 40], Some(1), 0, false),
         ];
         for round in 0..3000 {
             let seed = &seeds[round % seeds.len()];
