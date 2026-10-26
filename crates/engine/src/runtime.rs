@@ -11,8 +11,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use yisi_carve::DirectorySink;
 use yisi_engine::protocol::{
-    self, CANCEL, CAPABILITIES, CARVE_START, Capabilities, CarveParams, HEARTBEAT,
-    HEARTBEAT_INTERVAL, JobRef, LIST_DISKS, LIST_FILE_TYPES, READ_SCAN, ReadScanParams, Source,
+    self, CANCEL, CAPABILITIES, CARVE_START, Capabilities, CarveParams, CarveStarted, HEARTBEAT,
+    HEARTBEAT_INTERVAL, JobRef, LIST_DISKS, LIST_FILE_TYPES, PREVIEW_FILE, PreviewParams,
+    READ_SCAN, ReadScanParams, Source,
 };
 #[cfg(windows)]
 use yisi_engine::protocol::{DiskList, DiskSummary};
@@ -24,7 +25,7 @@ use yisi_rpc::{
 };
 
 use crate::job::{self, RunningJob};
-use crate::{carve_job, read_scan};
+use crate::{carve_job, preview, read_scan};
 
 /// 向宿主发消息。答复、通知可能来自不同线程，写入时加锁，保证一帧不被拆开。
 pub struct Outbox {
@@ -101,6 +102,7 @@ fn dispatch(
                 CANCEL.to_owned(),
                 LIST_FILE_TYPES.to_owned(),
                 CARVE_START.to_owned(),
+                PREVIEW_FILE.to_owned(),
             ];
             if cfg!(windows) {
                 methods.push(LIST_DISKS.to_owned());
@@ -158,6 +160,9 @@ fn dispatch(
                     format!("无法创建输出目录 {}：{error}", output_dir.display()),
                 )
             })?;
+            let started = CarveStarted {
+                output_dir: output_dir.display().to_string(),
+            };
             let finished = events.clone();
             *job = Some(job::start(
                 params.job_id,
@@ -176,7 +181,17 @@ fn dispatch(
                     let _ = finished.send(Event::JobFinished);
                 },
             ));
-            Ok(json!({}))
+            to_result(&started)
+        }
+        PREVIEW_FILE => {
+            let PreviewParams { path } = request.params()?;
+            let preview = preview::preview(Path::new(&path)).map_err(|error| {
+                ErrorObject::new(
+                    protocol::error_code::PREVIEW_UNAVAILABLE,
+                    format!("无法读取 {path}：{error}"),
+                )
+            })?;
+            to_result(&preview)
         }
         CANCEL => {
             let JobRef { job_id } = request.params()?;

@@ -149,7 +149,6 @@ const enUS: typeof zhCN = {
       typeColumn: 'Format',
       countColumn: 'Files',
       sizeColumn: 'Size',
-      recent: 'Recently found',
       report: {
         files: 'Recovered',
         filesValue: '{count} files, {bytes} in total',
@@ -158,6 +157,34 @@ const enUS: typeof zhCN = {
         elapsedValue: '{seconds} s',
         outputDir: 'Saved in',
       },
+    },
+    browser: {
+      title: 'Found files',
+      groupBy: 'Group by',
+      byType: 'Format',
+      byPosition: 'Disk position',
+      range: '{start} – {end}',
+      groupTotals: '{count} files, {bytes}',
+      at: 'at {position}',
+      empty: 'No files found yet',
+      hint: 'Click a group to expand or collapse it, click a file to see its details, double-click a file to open it with its default app.',
+    },
+    preview: {
+      title: 'File details',
+      placeholder: 'Select a file on the left to see its details and preview.',
+      name: 'Name',
+      format: 'Format',
+      size: 'Size',
+      sizeValue: '{size} ({bytes} bytes)',
+      position: 'Start',
+      positionValue: 'at {position} (sector {sector})',
+      open: 'Open with default app',
+      reveal: 'Show in folder',
+      loading: 'Reading…',
+      thumbnailAlt: 'Thumbnail of {name}',
+      imageSize: 'Original {width} × {height}',
+      imageError: 'Cannot show the image: {reason}',
+      hexTitle: 'First {bytes} of the file',
     },
   },
   errors: {
@@ -185,6 +212,10 @@ const enUS: typeof zhCN = {
     outputUnavailable: 'Cannot create or write to the output folder',
     outputOnSource:
       'The output folder must be on a different disk: writing back to the scanned disk would overwrite data that has not been recovered yet',
+    previewUnavailable: 'Cannot read this file',
+    recoveredNotFound: 'This recovered file cannot be found',
+    invalidRecoveredName: 'The file name was not given by the recovery',
+    openFailed: 'Cannot open it',
   },
 }
 

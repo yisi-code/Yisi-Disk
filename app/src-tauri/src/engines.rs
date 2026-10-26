@@ -14,9 +14,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter};
 use yisi_engine::protocol::{
-    CANCEL, CANCELLED, CAPABILITIES, CARVE_START, COMPLETED, Capabilities, CarveParams, DiskList,
-    FAILED, FOUND, FileTypeList, HEARTBEAT, JobRef, LIST_DISKS, LIST_FILE_TYPES, LOG, PROGRESS,
-    READ_SCAN, ReadScanParams, Source, error_code,
+    CANCEL, CANCELLED, CAPABILITIES, CARVE_START, COMPLETED, Capabilities, CarveParams,
+    CarveStarted, DiskList, FAILED, FOUND, FilePreview, FileTypeList, HEARTBEAT, JobRef,
+    LIST_DISKS, LIST_FILE_TYPES, LOG, PREVIEW_FILE, PROGRESS, PreviewParams, READ_SCAN,
+    ReadScanParams, Source, error_code,
 };
 
 use crate::broker::BrokerSession;
@@ -76,10 +77,12 @@ pub struct JobEvent {
     pub data: Value,
 }
 
-/// 正在运行的任务，键是界面分配的任务 ID。
 #[derive(Default)]
 pub struct Engines {
+    /// 正在运行的任务，键是界面分配的任务 ID。
     jobs: Arc<Mutex<HashMap<String, Arc<EngineProcess>>>>,
+    /// 本次运行里启动过的深度恢复任务各自的输出目录，任务结束后仍保留，供预览和打开恢复出的文件。
+    recovered_dirs: Mutex<HashMap<String, PathBuf>>,
 }
 
 impl Engines {
@@ -139,6 +142,7 @@ impl Engines {
                 source: source(engine_pid)?,
             })
         })
+        .map(|_| ())
     }
 
     /// 深度恢复。源为物理磁盘时，引擎在开始前核对输出目录不在这块盘上，否则拒绝（`outputOnSource`）。
@@ -156,24 +160,58 @@ impl Engines {
             disk_path(*disk_number)?;
         }
         let params_job_id = job_id.clone();
-        self.start_job(app, job_id, CARVE_START, |engine_pid| {
+        let started = self.start_job(app, job_id.clone(), CARVE_START, |engine_pid| {
             to_params(&CarveParams {
                 job_id: params_job_id,
                 source: resolve_source(target, broker, engine_pid)?,
                 output_dir,
                 extensions: Some(extensions),
             })
-        })
+        })?;
+        let CarveStarted { output_dir } = serde_json::from_value(started)
+            .map_err(|error| HostError::new("engineProtocol", error.to_string()))?;
+        lock(&self.recovered_dirs).insert(job_id, PathBuf::from(output_dir));
+        Ok(())
     }
 
-    /// 启动引擎并交给它一个任务。`params` 拿到引擎的进程 ID，返回任务方法 `method` 的参数。
+    /// 深度恢复任务输出目录里的一个文件。只接受恢复时起的文件名，不接受其他路径。
+    pub fn recovered_file(&self, job_id: &str, name: &str) -> Result<PathBuf, HostError> {
+        if !is_recovered_name(name) {
+            return Err(HostError::new("invalidRecoveredName", name));
+        }
+        let path = lock(&self.recovered_dirs)
+            .get(job_id)
+            .map(|dir| dir.join(name))
+            .ok_or_else(|| HostError::new("recoveredNotFound", job_id))?;
+        if path.is_file() {
+            Ok(path)
+        } else {
+            Err(HostError::new(
+                "recoveredNotFound",
+                path.display().to_string(),
+            ))
+        }
+    }
+
+    /// 由引擎读取并生成预览：图片在引擎里解码，界面只拿到重新编码的缩略图。
+    pub fn preview(&self, job_id: &str, name: &str) -> Result<FilePreview, HostError> {
+        let path = self.recovered_file(job_id, name)?;
+        query_with(
+            PREVIEW_FILE,
+            to_params(&PreviewParams {
+                path: path.display().to_string(),
+            })?,
+        )
+    }
+
+    /// 启动引擎并交给它一个任务，返回引擎接下任务时的答复。`params` 拿到引擎的进程 ID，返回任务方法 `method` 的参数。
     fn start_job(
         &self,
         app: AppHandle,
         job_id: String,
         method: &str,
         params: impl FnOnce(u32) -> Result<Value, HostError>,
-    ) -> Result<(), HostError> {
+    ) -> Result<Value, HostError> {
         validate_job_id(&job_id)?;
         if lock(&self.jobs).contains_key(&job_id) {
             return Err(HostError::new("jobExists", job_id));
@@ -186,13 +224,12 @@ impl Engines {
         lock(&self.jobs).insert(job_id.clone(), Arc::clone(&process));
 
         let started = params(process.pid).and_then(|params| process.request(method, params));
-        if let Err(error) = started {
+        if started.is_err() {
             // 引擎没接下任务：关闭输入让它退出，并且不再为这个任务发事件
             process.abandon();
             lock(&self.jobs).remove(&job_id);
-            return Err(error);
         }
-        Ok(())
+        started
     }
 
     pub fn cancel(&self, job_id: &str) -> Result<(), HostError> {
@@ -485,14 +522,19 @@ fn engine_error_code(code: i64) -> &'static str {
         error_code::SOURCE_UNAVAILABLE => "sourceUnavailable",
         error_code::OUTPUT_UNAVAILABLE => "outputUnavailable",
         error_code::OUTPUT_ON_SOURCE => "outputOnSource",
+        error_code::PREVIEW_UNAVAILABLE => "previewUnavailable",
         _ => "engineRejected",
     }
 }
 
 /// 临时启动一个引擎发一次查询，查完关闭它的输入，引擎随即退出。
 fn query<T: DeserializeOwned>(method: &str) -> Result<T, HostError> {
+    query_with(method, Value::Null)
+}
+
+fn query_with<T: DeserializeOwned>(method: &str, params: Value) -> Result<T, HostError> {
     let process = EngineProcess::spawn(None, || {})?;
-    let result = process.request(method, Value::Null);
+    let result = process.request(method, params);
     process.abandon();
     serde_json::from_value(result?)
         .map_err(|error| HostError::new("engineProtocol", error.to_string()))
@@ -524,6 +566,22 @@ fn validate_job_id(job_id: &str) -> Result<(), HostError> {
     } else {
         Err(HostError::new("invalidJobId", job_id))
     }
+}
+
+/// 恢复时起的文件名：`f`、十位起始扇区号、`.`、1 到 8 位小写字母或数字的扩展名，例如 `f0000012345.jpg`。
+fn is_recovered_name(name: &str) -> bool {
+    let Some((stem, extension)) = name.split_once('.') else {
+        return false;
+    };
+    let Some(sector) = stem.strip_prefix('f') else {
+        return false;
+    };
+    sector.len() == 10
+        && sector.bytes().all(|byte| byte.is_ascii_digit())
+        && (1..=8).contains(&extension.len())
+        && extension
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
 }
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -565,6 +623,37 @@ mod tests {
     fn disk_numbers_are_bounded() {
         assert_eq!(disk_path(7).unwrap(), r"\\.\PhysicalDrive7");
         assert!(disk_path(MAX_DISK_NUMBER + 1).is_err());
+    }
+
+    #[test]
+    fn only_names_given_by_the_recovery_are_accepted() {
+        for good in ["f0000012345.jpg", "f0000000000.mp4", "f9999999999.mp4v2"] {
+            assert!(is_recovered_name(good), "{good}");
+        }
+        for bad in [
+            "",
+            "f0000012345",
+            "f000001234.jpg",
+            "g0000012345.jpg",
+            "f0000012345.JPG",
+            "f0000012345.jpg.part",
+            "f0000012345.",
+            "../f0000012345.jpg",
+            "f0000012345.verylongext",
+        ] {
+            assert!(!is_recovered_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn unknown_jobs_and_bad_names_do_not_reach_the_disk() {
+        let engines = Engines::default();
+        let error = engines.recovered_file("job", "../secret.txt").unwrap_err();
+        assert_eq!(error.code, "invalidRecoveredName");
+        let error = engines
+            .recovered_file("job", "f0000012345.jpg")
+            .unwrap_err();
+        assert_eq!(error.code, "recoveredNotFound");
     }
 
     #[test]

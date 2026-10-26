@@ -1,17 +1,22 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import DiskPicker from './DiskPicker.vue'
 import FileTypePicker from './FileTypePicker.vue'
+import RecoveredBrowser from './RecoveredBrowser.vue'
+import RecoveredPreview from './RecoveredPreview.vue'
 import { useCarve } from '../composables/useCarve'
 import { useFileTypeName } from '../composables/useFileTypeName'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import {
   listFileTypes,
+  openRecoveredFile,
   pickDirectory,
   pickFile,
+  revealRecoveredFile,
   toHostError,
   type FileType,
+  type FoundFile,
   type HostError,
   type JobTarget,
 } from '../services/host'
@@ -26,6 +31,7 @@ const { t, locale } = useI18n()
 const { formatHostError } = useHostErrorText()
 const { fileTypeName } = useFileTypeName()
 const {
+  jobId,
   status,
   targetKind,
   done,
@@ -34,7 +40,7 @@ const {
   bytesPerSecond,
   foundCount,
   foundByType,
-  recentFiles,
+  files,
   summary,
   failure,
   isUnresponsive,
@@ -56,6 +62,10 @@ const outputDir = ref('')
 const dialogError = ref<HostError | null>(null)
 /** 发起恢复时勾选的格式：之后回到上一步改勾选，不影响正在显示的这次结果 */
 const runExtensions = ref<string[]>([])
+/** 结果列表里选中的文件，右侧显示它的详情与预览 */
+const selectedFile = ref<FoundFile | null>(null)
+/** 打开或在文件夹中显示失败的原因，换选中的文件时清掉 */
+const fileActionError = ref<HostError | null>(null)
 
 const stepIndex = computed(() => STEPS.indexOf(step.value))
 
@@ -120,6 +130,15 @@ const typeRows = computed(() => {
     }))
 })
 
+const selectedTypeName = computed(() => {
+  const file = selectedFile.value
+  if (file === null) {
+    return ''
+  }
+  const description = fileTypes.value.find((type) => type.extension === file.extension)?.description
+  return fileTypeName(file.extension, description)
+})
+
 /** 启动失败（例如输出目录在源盘上）时还没有任何结果，不显示空的统计表 */
 const hasResults = computed(
   () =>
@@ -153,6 +172,10 @@ const statusText = computed(() => {
       return t('carve.run.status.cancelled')
   }
   return ''
+})
+
+watch(selectedFile, () => {
+  fileActionError.value = null
 })
 
 onMounted(() => {
@@ -193,11 +216,37 @@ function handleStart() {
     return
   }
   runExtensions.value = [...selectedExtensions.value]
+  selectedFile.value = null
   void start(target.value, trimmedOutputDir.value, runExtensions.value)
 }
 
 function handleCancel() {
   void cancel()
+}
+
+/** 结果列表里双击文件、或点「用默认程序打开」 */
+async function openFile(file: FoundFile) {
+  await runFileAction(file, openRecoveredFile)
+}
+
+async function revealFile(file: FoundFile) {
+  await runFileAction(file, revealRecoveredFile)
+}
+
+async function runFileAction(
+  file: FoundFile,
+  action: (jobId: string, name: string) => Promise<void>,
+) {
+  if (jobId.value === null) {
+    return
+  }
+  selectedFile.value = file
+  fileActionError.value = null
+  try {
+    await action(jobId.value, file.name)
+  } catch (error) {
+    fileActionError.value = toHostError(error)
+  }
 }
 
 async function loadFileTypes() {
@@ -405,14 +454,22 @@ async function pickPath(pick: () => Promise<string | null>, apply: (path: string
               </tbody>
             </table>
 
-            <div v-if="recentFiles.length > 0" class="carve-wizard__recent">
-              <h3 class="carve-wizard__subtitle">{{ t('carve.run.recent') }}</h3>
-              <ul class="carve-wizard__recent-list">
-                <li v-for="file in recentFiles" :key="file.name">
-                  {{ file.name }}
-                  <span class="carve-wizard__muted">{{ formatBytes(file.length) }}</span>
-                </li>
-              </ul>
+            <div class="carve-wizard__files">
+              <RecoveredBrowser
+                v-model:selected="selectedFile"
+                :files="files"
+                :file-types="fileTypes"
+                :device-size="total"
+                @open="openFile"
+              />
+              <RecoveredPreview
+                :job-id="jobId"
+                :file="selectedFile"
+                :type-name="selectedTypeName"
+                :action-error="fileActionError"
+                @open="openFile"
+                @reveal="revealFile"
+              />
             </div>
           </div>
 
@@ -667,15 +724,22 @@ async function pickPath(pick: () => Promise<string | null>, apply: (path: string
 }
 
 .carve-wizard__results {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: var(--space-lg);
-  align-items: start;
 }
 
 .carve-wizard__table {
   width: 100%;
+  max-width: 560px;
   border-collapse: collapse;
+}
+
+.carve-wizard__files {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-lg);
+  align-items: start;
 }
 
 .carve-wizard__caption {
@@ -703,24 +767,6 @@ async function pickPath(pick: () => Promise<string | null>, apply: (path: string
 .carve-wizard__table .carve-wizard__number {
   text-align: right;
   font-variant-numeric: tabular-nums;
-}
-
-.carve-wizard__subtitle {
-  margin: 0 0 var(--space-xs);
-  font-size: var(--font-size-body);
-  font-weight: 600;
-}
-
-.carve-wizard__recent-list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  font-variant-numeric: tabular-nums;
-}
-
-.carve-wizard__muted {
-  margin-left: var(--space-sm);
-  color: var(--color-text-muted);
 }
 
 .carve-wizard__nav {

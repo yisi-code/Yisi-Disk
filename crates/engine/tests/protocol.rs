@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use yisi_engine::protocol::{
-    CANCEL, CAPABILITIES, CARVE_START, COMPLETED, CarveSummary, FOUND, FoundFile, HEARTBEAT,
-    LIST_FILE_TYPES, PROGRESS, READ_SCAN, ReadScanReport, error_code,
+    CANCEL, CAPABILITIES, CARVE_START, COMPLETED, CarveSummary, FOUND, FilePreview, FoundFile,
+    HEARTBEAT, LIST_FILE_TYPES, PREVIEW_FILE, PROGRESS, READ_SCAN, ReadScanReport, error_code,
 };
 use yisi_formats::samples;
 use yisi_rpc::{Id, Message, Request, error_code as rpc_error, read_message, write_message};
@@ -273,7 +273,8 @@ fn carve_recovers_all_five_formats_from_an_image() {
                    "outputDir": dir}),
         )
         .unwrap();
-    assert_eq!(accepted, json!({}));
+    let output = dir.join("recovered-carve-1-");
+    assert_eq!(accepted, json!({"outputDir": output.display().to_string()}));
 
     let notifications = engine.notifications_until(COMPLETED);
     let found: Vec<FoundFile> = notifications
@@ -287,7 +288,6 @@ fn carve_recovers_all_five_formats_from_an_image() {
     let (_, completed) = notifications.last().unwrap();
     let summary: CarveSummary = serde_json::from_value(completed["result"].clone()).unwrap();
 
-    let output = dir.join("recovered-carve-1-");
     assert_eq!(Path::new(&summary.output_dir), output);
     assert_eq!(summary.files, 5);
     assert_eq!(found.len(), 5);
@@ -300,4 +300,25 @@ fn carve_recovers_all_five_formats_from_an_image() {
         assert!(&recovered == bytes, "{extension} 内容不一致");
     }
     assert!(engine.wait_exit().success());
+
+    // 任务结束后引擎已退出，预览另起一个引擎，与宿主的做法一致
+    let mut viewer = Engine::start();
+    let png = found.iter().find(|file| file.extension == "png").unwrap();
+    let preview: FilePreview = serde_json::from_value(
+        viewer
+            .call(PREVIEW_FILE, json!({"path": output.join(&png.name)}))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(preview.length, png.length);
+    // 样本 PNG 的 IDAT 是随机数据：认得出是 PNG、尝试解码，解不出时给出原因
+    assert!(preview.image.is_none());
+    assert!(preview.image_error.is_some());
+    let missing = viewer
+        .call(
+            PREVIEW_FILE,
+            json!({"path": output.join("f9999999999.png")}),
+        )
+        .unwrap_err();
+    assert_eq!(missing.code, error_code::PREVIEW_UNAVAILABLE);
 }

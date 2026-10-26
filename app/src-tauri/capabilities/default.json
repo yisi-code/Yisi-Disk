@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "主窗口可调用的命令、接收任务事件所需的监听权限，以及选择输出目录的系统对话框",
+  "description": "主窗口可调用的命令、接收任务事件所需的监听权限，以及选择输出目录的系统对话框。打开恢复出的文件走宿主自己的命令，不开放 opener 插件",
   "windows": ["main"],
   "permissions": [
     "allow-app-info",
@@ -12,6 +12,9 @@
     "allow-job-start-disk-scan",
     "allow-job-start-carve",
     "allow-job-cancel",
+    "allow-recovered-preview",
+    "allow-recovered-open",
+    "allow-recovered-reveal",
     "dialog:allow-open",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
