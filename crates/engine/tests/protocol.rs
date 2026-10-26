@@ -8,10 +8,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use yisi_engine::protocol::{
-    BROWSE_OPEN, BrowseOpened, CANCEL, CANCELLED, CAPABILITIES, CARVE_EXTRACT, CARVE_START,
-    COMPLETED, COPIED, COPY_FILES, CarveSummary, CopiedFile, CopySummary, FOUND, FileListPage,
-    FilePreview, FoundFile, HEARTBEAT, LIST_FILE_TYPES, LIST_FILES, PREVIEW_FILE, PREVIEW_FS_FILE,
-    PREVIEW_RANGE, PROGRESS, READ_SCAN, ReadScanReport, error_code,
+    BROWSE_OPEN, BrowseOpened, CANCEL, CANCEL_SCAN, CANCELLED, CAPABILITIES, CARVE_EXTRACT,
+    CARVE_START, COMPLETED, COPIED, COPY_FILES, CarveSummary, CopiedFile, CopySummary, FOUND,
+    FileListPage, FilePreview, FoundFile, HEARTBEAT, LIST_FILE_TYPES, LIST_FILES, PREVIEW_FILE,
+    PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS, READ_SCAN, ReadScanReport, SCAN_DELETED, ScanResult,
+    error_code,
 };
 use yisi_formats::samples;
 use yisi_rpc::{Id, Message, Request, error_code as rpc_error, read_message, write_message};
@@ -52,13 +53,28 @@ impl Engine {
     }
 
     fn call(&mut self, method: &str, params: Value) -> Result<Value, yisi_rpc::ErrorObject> {
+        self.call_noting(method, params).0
+    }
+
+    /// 发请求、等答复，同时收下途中的通知（不含心跳）。
+    fn call_noting(
+        &mut self,
+        method: &str,
+        params: Value,
+    ) -> (Result<Value, yisi_rpc::ErrorObject>, Vec<(String, Value)>) {
         self.next_id += 1;
         let id = Id::Number(self.next_id);
         let request = Message::Request(Request::new(id.clone(), method, params));
         write_message(self.stdin.as_mut().unwrap(), &request).unwrap();
+        let mut seen = Vec::new();
         loop {
             match self.incoming.recv_timeout(TIMEOUT).unwrap() {
-                Message::Response(response) if response.id == id => return response.outcome,
+                Message::Response(response) if response.id == id => {
+                    return (response.outcome, seen);
+                }
+                Message::Notification(notification) if notification.method != HEARTBEAT => {
+                    seen.push((notification.method, notification.params));
+                }
                 Message::Notification(_) => {}
                 other => panic!("意外的消息：{other:?}"),
             }
@@ -672,4 +688,188 @@ fn scan_only_then_preview_and_save_selected_files() {
     }
     assert!(!output.join(&found[2].name).exists());
     assert!(saver.wait_exit().success());
+}
+
+/// 一块 MBR 盘，1 号分区是 NTFS：现存与删除的文件、删除的目录、找不到原目录的文件。
+fn ntfs_image(dir: &Path) -> (String, Vec<u8>, Vec<u8>) {
+    use yisi_fs::samples::{NTFS_ROOT, NtfsImage, pattern};
+    use yisi_part::samples::{MbrEntry, mbr_disk};
+
+    let mut ntfs = NtfsImage::new();
+    ntfs.set_label("NTFSDATA");
+    ntfs.add_file(NTFS_ROOT, "keep.txt", b"keep");
+    let docs = ntfs.mkdir(NTFS_ROOT, "Docs");
+    let live = pattern(1, 9000);
+    ntfs.add_file(docs, "a.bin", &live);
+    let gone = pattern(2, 20_000);
+    let placed = ntfs.add_file(docs, "deleted.bin", &gone);
+    ntfs.delete(placed);
+    let old = ntfs.mkdir(NTFS_ROOT, "Old");
+    let inner = ntfs.add_file(old, "old.txt", b"old");
+    ntfs.delete(inner);
+    ntfs.delete(old);
+    let temp = ntfs.mkdir(NTFS_ROOT, "Temp");
+    let lost = ntfs.add_file(temp, "lost.txt", b"lost");
+    ntfs.delete(lost);
+    ntfs.delete(temp);
+    ntfs.reuse(temp, NTFS_ROOT, "reused.txt", b"new");
+    let ntfs = ntfs.finish();
+
+    let start = 2048u32;
+    let mut image = mbr_disk(
+        start as usize * 512 + ntfs.len(),
+        &[MbrEntry::new(0x07, start, (ntfs.len() / 512) as u32)],
+    );
+    image[start as usize * 512..][..ntfs.len()].copy_from_slice(&ntfs);
+    let path = dir.join("ntfs.img");
+    std::fs::write(&path, &image).unwrap();
+    (path.to_string_lossy().into_owned(), live, gone)
+}
+
+#[test]
+fn ntfs_partition_is_scanned_listed_and_copied() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-ntfs");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (image, live, gone) = ntfs_image(&dir);
+    let source = json!({"type": "image", "path": image, "sectorSize": 512});
+
+    let mut engine = Engine::start();
+    let opened: BrowseOpened = serde_json::from_value(
+        engine
+            .call(BROWSE_OPEN, json!({"jobId": "n1", "source": source}))
+            .unwrap(),
+    )
+    .unwrap();
+    let partition = &opened.partitions[0];
+    assert_eq!(
+        (
+            partition.filesystem.as_str(),
+            partition.label.as_deref(),
+            partition.browsable,
+            partition.needs_scan,
+            partition.times_utc
+        ),
+        ("ntfs", Some("NTFSDATA"), true, true, true)
+    );
+    let list = |engine: &mut Engine, dir: Option<&str>| -> FileListPage {
+        serde_json::from_value(
+            engine
+                .call(
+                    LIST_FILES,
+                    json!({"jobId": "n1", "partition": 1, "dir": dir, "offset": 0, "limit": 100}),
+                )
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let before = list(&mut engine, None);
+    assert!(before.entries.iter().all(|entry| !entry.deleted));
+
+    // 没在扫的分区：停止扫描什么也不做
+    engine
+        .call(CANCEL_SCAN, json!({"jobId": "n1", "partition": 1}))
+        .unwrap();
+    let (result, notifications) =
+        engine.call_noting(SCAN_DELETED, json!({"jobId": "n1", "partition": 1}));
+    let result: ScanResult = serde_json::from_value(result.unwrap()).unwrap();
+    assert!(!result.cancelled);
+    assert_eq!((result.deleted, result.orphans), (4, 1));
+    let last = notifications
+        .iter()
+        .rfind(|(method, _)| method == PROGRESS)
+        .unwrap();
+    assert_eq!(last.1["stage"], "scanMft");
+    assert_eq!(last.1["done"], last.1["total"]);
+
+    // 扫完之后目录缓存已清掉，根目录带上已删除的项与「找不到原目录的文件」
+    let root = list(&mut engine, None);
+    let names: Vec<_> = root
+        .entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.name.as_str(),
+                entry.deleted,
+                entry.virtual_dir.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("$Orphans", false, Some("orphans")),
+            ("Docs", false, None),
+            ("Old", true, None),
+            ("keep.txt", false, None),
+            ("reused.txt", false, None),
+        ]
+    );
+    assert!(
+        root.entries
+            .iter()
+            .all(|entry| entry.record.is_some() || entry.virtual_dir.is_some())
+    );
+    let orphans = list(&mut engine, Some(&root.entries[0].file));
+    assert_eq!(orphans.entries[0].name, "lost.txt");
+    let docs = root.entries[1].file.clone();
+    let inside = list(&mut engine, Some(&docs));
+    let deleted = inside
+        .entries
+        .iter()
+        .find(|entry| entry.name == "deleted.bin")
+        .unwrap();
+    assert_eq!((deleted.deleted, deleted.state.as_str()), (true, "intact"));
+    assert!(deleted.position.is_some());
+
+    engine.call(CANCEL, json!({"jobId": "n1"})).unwrap();
+    engine.notifications_until(CANCELLED);
+    assert!(engine.wait_exit().success());
+
+    // 复制整个 Docs 目录：复制引擎先扫一遍 MFT，删除的文件一起复制出来
+    let partition_ref =
+        json!({"number": 1, "offset": partition.offset, "length": partition.length});
+    let mut copier = Engine::start();
+    copier
+        .call(
+            COPY_FILES,
+            json!({"jobId": "copy-ntfs", "source": source, "outputDir": dir, "partition": partition_ref,
+                   "items": [{"file": docs, "path": ["Docs"]}]}),
+        )
+        .unwrap();
+    let notifications = copier.notifications_until(COMPLETED);
+    assert!(
+        notifications
+            .iter()
+            .any(|(method, params)| method == PROGRESS && params["stage"] == "scanMft")
+    );
+    let copied: Vec<CopiedFile> = notifications
+        .iter()
+        .filter(|(method, _)| method == COPIED)
+        .flat_map(|(_, params)| {
+            serde_json::from_value::<Vec<CopiedFile>>(params["files"].clone()).unwrap()
+        })
+        .collect();
+    let mut paths: Vec<_> = copied
+        .iter()
+        .map(|file| (file.path.as_str(), file.size, file.all_zero))
+        .collect();
+    paths.sort();
+    assert_eq!(
+        paths,
+        [
+            ("Docs/a.bin", 9000, false),
+            ("Docs/deleted.bin", 20_000, false)
+        ]
+    );
+    let output = dir.join("restored-copy-ntf");
+    assert_eq!(
+        std::fs::read(output.join("Docs").join("a.bin")).unwrap(),
+        live
+    );
+    assert_eq!(
+        std::fs::read(output.join("Docs").join("deleted.bin")).unwrap(),
+        gone
+    );
+    assert!(copier.wait_exit().success());
 }

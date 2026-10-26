@@ -14,6 +14,8 @@ const props = defineProps<{
   item: TreeItem | null
   /** 源的逻辑扇区大小，位置同时给出扇区号 */
   sectorSize: number
+  /** 分区记录的是 UTC 时间（NTFS），时间后面标上 */
+  timesUtc: boolean
   /** 复制任务进行中时不能打开（打开要先复制出来） */
   canOpen: boolean
   /** 打开失败、或打开前的复制失败时由父组件给出 */
@@ -26,12 +28,30 @@ const emit = defineEmits<{ open: [item: TreeItem] }>()
 const { t, locale } = useI18n()
 const { formatHostError } = useHostErrorText()
 
-// 目录没有内容可预览
+// 目录没有内容可预览；存放方式不支持的文件读不出原内容，也不预览
 const { preview, error: previewError, isLoading } = useDelayedPreview(
-  () => (props.item !== null && !props.item.entry.isDir ? props.item : null),
+  () =>
+    props.item !== null && !props.item.entry.isDir && props.item.entry.unsupported === null
+      ? props.item
+      : null,
   (item) => `${props.jobId}/${props.partition}/${item.id}`,
   (item) => previewFsFile(props.jobId, props.partition, item.entry.file),
 )
+
+const stateText = computed(() => {
+  const entry = props.item?.entry
+  if (entry === undefined) {
+    return ''
+  }
+  if (entry.virtualDir !== null) {
+    return t(`undelete.stateDetail.${entry.virtualDir}`)
+  }
+  return t(`undelete.stateDetail.${entry.deleted ? entry.state : 'live'}`)
+})
+
+function formatTime(time: string): string {
+  return props.timesUtc ? t('undelete.details.utcTime', { time }) : time
+}
 
 const position = computed(() => {
   const value = props.item?.entry.position
@@ -65,7 +85,11 @@ const position = computed(() => {
         <dt>{{ t('undelete.details.path') }}</dt>
         <dd class="fs-entry-details__selectable">/{{ item.path.join('/') }}</dd>
         <dt>{{ t('undelete.details.state') }}</dt>
-        <dd>{{ t(`undelete.stateDetail.${item.entry.deleted ? item.entry.state : 'live'}`) }}</dd>
+        <dd>{{ stateText }}</dd>
+        <template v-if="item.entry.unsupported">
+          <dt>{{ t('undelete.details.storage') }}</dt>
+          <dd>{{ t(`undelete.unsupportedDetail.${item.entry.unsupported}`) }}</dd>
+        </template>
         <template v-if="!item.entry.isDir">
           <dt>{{ t('undelete.details.size') }}</dt>
           <dd>
@@ -79,15 +103,19 @@ const position = computed(() => {
         </template>
         <template v-if="item.entry.modified">
           <dt>{{ t('undelete.details.modified') }}</dt>
-          <dd>{{ item.entry.modified }}</dd>
+          <dd>{{ formatTime(item.entry.modified) }}</dd>
         </template>
         <template v-if="item.entry.created">
           <dt>{{ t('undelete.details.created') }}</dt>
-          <dd>{{ item.entry.created }}</dd>
+          <dd>{{ formatTime(item.entry.created) }}</dd>
         </template>
         <template v-if="position">
           <dt>{{ t('undelete.details.position') }}</dt>
           <dd>{{ position }}</dd>
+        </template>
+        <template v-if="item.entry.record !== null">
+          <dt>{{ t('undelete.details.record') }}</dt>
+          <dd>{{ item.entry.record.toLocaleString(locale) }}</dd>
         </template>
       </dl>
 
@@ -96,7 +124,7 @@ const position = computed(() => {
           <button
             class="wizard__button"
             type="button"
-            :disabled="!canOpen"
+            :disabled="!canOpen || item.entry.unsupported !== null"
             @click="emit('open', item)"
           >
             {{ t('undelete.details.open') }}
@@ -108,6 +136,7 @@ const position = computed(() => {
           {{ formatHostError(actionError) }}
         </p>
         <FilePreviewView
+          v-if="item.entry.unsupported === null"
           :preview="preview"
           :is-loading="isLoading"
           :error="previewError"

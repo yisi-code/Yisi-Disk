@@ -1,5 +1,6 @@
 //! 复制任务：把分区里选中的文件与目录（连同其中全部内容）复制到输出目录，保留相对路径。
 //! 源只读；单个文件读不出时记为失败、继续下一个，写输出出错（例如输出盘满）时整个任务失败。
+//! NTFS 分区上选了目录时，先扫一遍 MFT，目录里已删除的项才能一起复制。
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -11,6 +12,7 @@ use std::time::{Duration, Instant};
 use yisi_engine::protocol::{COPIED, CopiedFile, CopySummary, JobCopied};
 use yisi_fs::{FileRef, Volume};
 
+use crate::browse::STAGE_SCAN_MFT;
 use crate::job::{JobContext, JobOutcome};
 use crate::runtime::error_chain;
 
@@ -39,6 +41,18 @@ pub fn run(
     let reporter = Reporter::new(context);
     let mut failed = 0u64;
 
+    if volume.needs_scan() && items.iter().any(|item| item.file.is_dir) {
+        let scanned = volume
+            .scan(&mut |done, total| {
+                context.stage_progress(STAGE_SCAN_MFT, done, total);
+                !context.is_cancelled()
+            })
+            .map_err(|error| format!("扫描 MFT 失败：{}", error_chain(&error)))?;
+        if scanned.is_none() {
+            return Ok(JobOutcome::Cancelled);
+        }
+    }
+
     // 先展开目录，算出总字节数，进度才有意义
     let mut files = Vec::new();
     let mut dirs = Vec::new();
@@ -55,6 +69,7 @@ pub fn run(
                     path,
                     size: 0,
                     error: Some(message),
+                    all_zero: false,
                 });
             },
         );
@@ -86,13 +101,14 @@ pub fn run(
         let target = output_dir.join(&relative);
         let shown = to_display(&relative);
         match copy_one(volume, &item.file, &target, context, &mut done, total) {
-            Ok(CopyResult::Done) => {
+            Ok(CopyResult::Done { size, all_zero }) => {
                 copied += 1;
-                bytes += item.file.size;
+                bytes += size;
                 reporter.push(CopiedFile {
                     path: shown,
-                    size: item.file.size,
+                    size,
                     error: None,
+                    all_zero,
                 });
             }
             Ok(CopyResult::Cancelled) => {
@@ -105,6 +121,7 @@ pub fn run(
                     path: shown,
                     size: item.file.size,
                     error: Some(message),
+                    all_zero: false,
                 });
             }
             Err(error) => {
@@ -177,7 +194,11 @@ fn expand(
 }
 
 enum CopyResult {
-    Done,
+    /// 实际写出的长度（NTFS 以 MFT 记录为准，可能与目录里记的不同），以及内容是否全为 0。
+    Done {
+        size: u64,
+        all_zero: bool,
+    },
     Cancelled,
     /// 源读不出（簇链断了、读错误）：这个文件算失败，继续下一个。
     SourceFailed(String),
@@ -204,16 +225,26 @@ fn copy_one(
     let partial = PathBuf::from(partial);
     let mut output = File::create_new(&partial)?;
     let mut buffer = vec![0u8; CHUNK];
+    let mut written = 0u64;
+    let mut all_zero = true;
     let outcome = loop {
         if context.is_cancelled() {
             break CopyResult::Cancelled;
         }
         let read = match reader.read(&mut buffer) {
-            Ok(0) => break CopyResult::Done,
+            Ok(0) => {
+                break CopyResult::Done {
+                    size: written,
+                    all_zero: all_zero && written > 0,
+                };
+            }
             Ok(read) => read,
             Err(error) => break CopyResult::SourceFailed(error.to_string()),
         };
-        if let Err(error) = output.write_all(buffer.get(..read).unwrap_or_default()) {
+        let data = buffer.get(..read).unwrap_or_default();
+        all_zero = all_zero && data.iter().all(|&byte| byte == 0);
+        written += read as u64;
+        if let Err(error) = output.write_all(data) {
             drop(output);
             let _ = fs::remove_file(&partial);
             return Err(error);
@@ -223,7 +254,7 @@ fn copy_one(
     };
     drop(output);
     match outcome {
-        CopyResult::Done => fs::rename(&partial, target)?,
+        CopyResult::Done { .. } => fs::rename(&partial, target)?,
         _ => {
             let _ = fs::remove_file(&partial);
         }

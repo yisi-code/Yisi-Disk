@@ -125,7 +125,30 @@ export interface PartitionInfo {
   filesystem: string
   label: string | null
   browsable: boolean
+  /** 列出已删除的项之前要先 scanDeleted（NTFS） */
+  needsScan: boolean
+  /** 卷上的时间是 UTC（NTFS）；否则是写入时的本地时间（FAT、exFAT） */
+  timesUtc: boolean
 }
+
+/** 扫描已删除的项的结果；cancelled 时其余各项为 0 */
+export interface ScanResult {
+  cancelled: boolean
+  /** MFT 里的记录数、在用的记录数 */
+  records: number
+  inUse: number
+  /** 已删除、还留着内容的文件与目录记录数，以及它们的名字数 */
+  deleted: number
+  deletedNames: number
+  /** 原来的目录已找不到的名字数 */
+  orphans: number
+  /** 读不出的记录数 */
+  unreadable: number
+  elapsedMs: number
+}
+
+/** 内容的存放方式暂不支持读出 */
+export type UnsupportedReason = 'compressed' | 'encrypted' | 'systemCompressed' | 'reparse'
 
 /** live：未删除；intact：已删除、看起来完整；overwritten：已被覆盖；unknown：无法判断 */
 export type EntryState = 'live' | 'intact' | 'overwritten' | 'unknown'
@@ -144,8 +167,14 @@ export interface FsEntry {
   state: EntryState
   /** 引擎给的定位信息，原样传回 */
   file: string
-  /** 数据在源上的起始字节偏移 */
+  /** 数据在源上的起始字节偏移；没有数据、或还不知道时为空 */
   position: number | null
+  /** 存放方式暂不支持读出（NTFS 压缩、加密等） */
+  unsupported: UnsupportedReason | null
+  /** NTFS 的 MFT 记录号 */
+  record: number | null
+  /** 不在卷上的虚拟目录：orphans 是「找不到原目录的文件」 */
+  virtualDir: 'orphans' | null
 }
 
 export interface FileListPage {
@@ -173,6 +202,8 @@ export interface CopiedFile {
   path: string
   size: number
   error: string | null
+  /** 复制出的内容全是 0（固态硬盘 TRIM 后的已删除文件常常如此） */
+  allZero: boolean
 }
 
 export interface CopySummary {
@@ -199,7 +230,12 @@ export interface ReadScanReport {
 
 /** 宿主转发的任务事件；`completed` 的结果随任务种类而定（读取扫描为 ReadScanReport，深度恢复为 CarveSummary） */
 export type JobEvent<TResult = unknown> =
-  | { jobId: string; kind: 'progress'; data: { done: number; total: number } }
+  | {
+      jobId: string
+      kind: 'progress'
+      /** stage：任务里的哪个阶段，只有一个阶段的任务不给；目前只有 scanMft（扫描 MFT） */
+      data: { done: number; total: number; stage?: string }
+    }
   | { jobId: string; kind: 'found'; data: { files: FoundFile[] } }
   | { jobId: string; kind: 'copied'; data: { files: CopiedFile[] } }
   | { jobId: string; kind: 'log'; data: { level: string; message: string } }
@@ -328,6 +364,19 @@ export function listFiles(
 /** 预览浏览中的一个文件，规则与深度恢复的预览相同 */
 export function previewFsFile(jobId: string, partition: number, file: string): Promise<FilePreview> {
   return invoke<FilePreview>('browse_preview', { jobId, partition, file })
+}
+
+/**
+ * 找出浏览中的一个分区里已删除的项（NTFS 扫一遍 MFT），扫完才返回；
+ * 进度经浏览任务的 progress 事件送达（stage 为 scanMft）。扫过的分区直接返回上次的结果
+ */
+export function scanDeleted(jobId: string, partition: number): Promise<ScanResult> {
+  return invoke<ScanResult>('browse_scan', { jobId, partition })
+}
+
+/** 停下正在进行的扫描；那次 scanDeleted 返回 cancelled */
+export function cancelScan(jobId: string, partition: number): Promise<void> {
+  return invoke<void>('browse_cancel_scan', { jobId, partition })
 }
 
 /**

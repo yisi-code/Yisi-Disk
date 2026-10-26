@@ -1,7 +1,7 @@
 //! 文件系统识别；目录读取与文件提取；空闲空间位图；引导扇区与超级块的检查和重建；exFAT / FAT 一致性检查。
 //!
-//! 目前能浏览的是 FAT12/16/32 与 exFAT：列目录（含已删除的项，并判断还能不能完整找回）、按簇读出文件。
-//! 只读，不写盘。
+//! 目前能浏览的是 FAT12/16/32、exFAT 与 NTFS：列目录（含已删除的项，并判断还能不能完整找回）、读出文件。
+//! NTFS 的已删除项要先扫一遍 MFT（[`Volume::scan`]）才列得出。只读，不写盘。
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
@@ -9,6 +9,7 @@ mod clusters;
 mod entry;
 mod exfat;
 mod fat;
+mod ntfs;
 mod reader;
 mod region;
 #[cfg(any(test, feature = "test-samples"))]
@@ -20,7 +21,7 @@ use std::sync::Arc;
 
 use yisi_io::{BlockDevice, IoError};
 
-pub use entry::{Entry, FileRef, Listing, State};
+pub use entry::{ClusterRef, Entry, FileRef, Listing, Location, State, Unsupported};
 pub use reader::FileReader;
 
 use crate::region::Region;
@@ -47,7 +48,10 @@ pub enum FsKind {
 impl FsKind {
     /// 目前能浏览目录的文件系统。
     pub fn is_browsable(self) -> bool {
-        matches!(self, Self::Fat12 | Self::Fat16 | Self::Fat32 | Self::Exfat)
+        matches!(
+            self,
+            Self::Fat12 | Self::Fat16 | Self::Fat32 | Self::Exfat | Self::Ntfs
+        )
     }
 }
 
@@ -65,6 +69,24 @@ pub enum FsError {
     ChainBroken { offset: u64 },
     #[error("文件定位信息不合法")]
     BadRef,
+    #[error("这个文件的存放方式暂不支持读出：{0}")]
+    Unreadable(Unsupported),
+}
+
+/// 扫描 MFT 的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScanSummary {
+    /// MFT 里的记录数。
+    pub records: u64,
+    pub in_use: u64,
+    /// 未使用、但还留着内容的文件与目录记录。
+    pub deleted: u64,
+    /// 已删除的名字数（有硬链接的文件有几个名字）。
+    pub deleted_names: u64,
+    /// 其中原来的目录已找不到的名字数。
+    pub orphans: u64,
+    /// 读不出的记录数。
+    pub unreadable: u64,
 }
 
 /// 按分区开头的引导扇区（ext 是超级块）识别文件系统。读不出时返回错误，认不出时返回 [`FsKind::Unknown`]。
@@ -82,7 +104,13 @@ pub fn detect(device: &dyn BlockDevice, offset: u64, length: u64) -> Result<FsKi
                 FsKind::Unknown
             });
         }
-        Some(b"NTFS    ") => return Ok(FsKind::Ntfs),
+        Some(b"NTFS    ") => {
+            return Ok(if ntfs::parse_boot(&sector).is_some() {
+                FsKind::Ntfs
+            } else {
+                FsKind::Unknown
+            });
+        }
         Some(b"-FVE-FS-") => return Ok(FsKind::BitLocker),
         _ => {}
     }
@@ -106,6 +134,7 @@ pub fn detect(device: &dyn BlockDevice, offset: u64, length: u64) -> Result<FsKi
 enum Inner {
     Fat(fat::Fat),
     Exfat(exfat::Exfat),
+    Ntfs(ntfs::Ntfs),
 }
 
 /// 一个已打开、可以浏览的卷。
@@ -115,18 +144,20 @@ pub struct Volume {
 }
 
 impl Volume {
-    /// 打开设备上 `offset` 起 `length` 字节的分区。不是 FAT / exFAT 时返回 [`FsError::Unsupported`]。
+    /// 打开设备上 `offset` 起 `length` 字节的分区。不是 FAT / exFAT / NTFS 时返回 [`FsError::Unsupported`]。
     pub fn open(device: Arc<dyn BlockDevice>, offset: u64, length: u64) -> Result<Self, FsError> {
         let kind = detect(device.as_ref(), offset, length)?;
         let region = Region::new(device, offset, length);
         let inner = match kind {
             FsKind::Exfat => Inner::Exfat(exfat::Exfat::open(region)?),
             FsKind::Fat12 | FsKind::Fat16 | FsKind::Fat32 => Inner::Fat(fat::Fat::open(region)?),
+            FsKind::Ntfs => Inner::Ntfs(ntfs::Ntfs::open(region)?),
             other => return Err(FsError::Unsupported(other)),
         };
         let kind = match &inner {
             Inner::Fat(fat) => fat.kind(),
             Inner::Exfat(_) => FsKind::Exfat,
+            Inner::Ntfs(_) => FsKind::Ntfs,
         };
         Ok(Self { kind, inner })
     }
@@ -139,6 +170,7 @@ impl Volume {
         match &self.inner {
             Inner::Fat(fat) => fat.label(),
             Inner::Exfat(exfat) => exfat.label(),
+            Inner::Ntfs(ntfs) => ntfs.label(),
         }
     }
 
@@ -146,6 +178,7 @@ impl Volume {
         match &self.inner {
             Inner::Fat(fat) => fat.cluster_size(),
             Inner::Exfat(exfat) => exfat.cluster_size(),
+            Inner::Ntfs(ntfs) => ntfs.cluster_size(),
         }
     }
 
@@ -153,6 +186,32 @@ impl Volume {
         match &self.inner {
             Inner::Fat(fat) => fat.root(),
             Inner::Exfat(exfat) => exfat.root(),
+            Inner::Ntfs(ntfs) => ntfs.root(),
+        }
+    }
+
+    /// 卷上的时间是不是 UTC：NTFS 是，FAT / exFAT 记的是写入时的本地时间。
+    pub fn times_utc(&self) -> bool {
+        matches!(self.inner, Inner::Ntfs(_))
+    }
+
+    /// 列出已删除的项之前是否要先 [`scan`](Self::scan)：NTFS 还没扫过 MFT 时为 `true`。
+    pub fn needs_scan(&self) -> bool {
+        match &self.inner {
+            Inner::Ntfs(ntfs) => ntfs.needs_scan(),
+            _ => false,
+        }
+    }
+
+    /// 扫一遍 MFT，找出已删除的项（NTFS；其他文件系统什么也不做）。扫过一次之后直接返回上次的结果。
+    /// `progress(已处理字节, 总字节)` 返回 `false` 时停下，结果为 `None`，下次重新扫。
+    pub fn scan(
+        &self,
+        progress: &mut dyn FnMut(u64, u64) -> bool,
+    ) -> Result<Option<ScanSummary>, FsError> {
+        match &self.inner {
+            Inner::Ntfs(ntfs) => ntfs.scan(progress),
+            _ => Ok(Some(ScanSummary::default())),
         }
     }
 
@@ -161,6 +220,7 @@ impl Volume {
         match &self.inner {
             Inner::Fat(fat) => fat.list(dir),
             Inner::Exfat(exfat) => exfat.list(dir),
+            Inner::Ntfs(ntfs) => ntfs.list(dir),
         }
     }
 
@@ -169,14 +229,7 @@ impl Volume {
         match &self.inner {
             Inner::Fat(fat) => fat.open_file(file),
             Inner::Exfat(exfat) => exfat.open_file(file),
-        }
-    }
-
-    /// 首簇在分区里的字节偏移，供详情显示；没有数据的文件为 `None`。
-    pub fn first_offset(&self, file: &FileRef) -> Option<u64> {
-        match &self.inner {
-            Inner::Fat(fat) => fat.cluster_offset(file.first_cluster),
-            Inner::Exfat(exfat) => exfat.cluster_offset(file.first_cluster),
+            Inner::Ntfs(ntfs) => ntfs.open_file(file),
         }
     }
 }

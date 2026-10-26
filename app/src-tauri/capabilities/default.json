@@ -15,6 +15,8 @@
     "allow-recovered-preview",
     "allow-recovered-open",
     "allow-recovered-reveal",
+    "allow-browse-scan",
+    "allow-browse-cancel-scan",
     "dialog:allow-open",
     "core:event:allow-listen",
     "core:event:allow-unlisten"

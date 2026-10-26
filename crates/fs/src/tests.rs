@@ -6,9 +6,10 @@ use std::sync::Arc;
 use yisi_part::samples::{self as part_samples, MbrEntry};
 
 use crate::samples::{
-    ExfatImage, FatImage, FatType, Layout, MemoryDisk, Noise, SAMPLE_TIME, pattern,
+    ExfatImage, FatImage, FatType, Layout, MemoryDisk, NTFS_ROOT, Noise, NtfsImage, SAMPLE_TIME,
+    TAG_WOF, pattern,
 };
-use crate::{Entry, FileRef, FsKind, State, Volume, detect};
+use crate::{Entry, FileRef, FsError, FsKind, ScanSummary, State, Unsupported, Volume, detect};
 
 fn open(image: Vec<u8>) -> Volume {
     let length = image.len() as u64;
@@ -304,7 +305,7 @@ fn exfat_volume_is_browsed() {
 
     let entry = find(&entries, "gone chain.mp4");
     assert_eq!((entry.deleted(), entry.state), (true, State::Intact));
-    assert!(!entry.file.contiguous);
+    assert!(!entry.file.clusters().unwrap().contiguous);
     assert_eq!(read_all(&volume, &entry.file), gone_chain);
 
     assert_eq!(find(&entries, "victim.bin").state, State::Overwritten);
@@ -348,16 +349,23 @@ fn file_systems_are_detected_inside_partitions() {
     let volume = Volume::open(disk.clone(), second.offset, second.length).unwrap();
     assert!(volume.list(&volume.root()).unwrap().entries.is_empty());
 
+    // 只有 NTFS 标识、参数不自洽的引导扇区不算 NTFS
     let mut ntfs = vec![0u8; 4096];
     ntfs[3..11].copy_from_slice(b"NTFS    ");
     assert_eq!(
         detect(&MemoryDisk::new(ntfs.clone(), 512), 0, 4096).unwrap(),
-        FsKind::Ntfs
+        FsKind::Unknown
     );
     assert!(matches!(
         Volume::open(Arc::new(MemoryDisk::new(ntfs, 512)), 0, 4096),
-        Err(crate::FsError::Unsupported(FsKind::Ntfs))
+        Err(crate::FsError::Unsupported(FsKind::Unknown))
     ));
+    let ntfs = NtfsImage::new().finish();
+    let length = ntfs.len() as u64;
+    assert_eq!(
+        detect(&MemoryDisk::new(ntfs, 512), 0, length).unwrap(),
+        FsKind::Ntfs
+    );
     assert_eq!(
         detect(&MemoryDisk::new(vec![0; 4096], 512), 0, 4096).unwrap(),
         FsKind::Unknown
@@ -366,6 +374,9 @@ fn file_systems_are_detected_inside_partitions() {
 
 /// 递归列出并读出全部文件，限制深度与总数，防止测试本身陷进构造出来的环里。
 fn walk(volume: &Volume, dir: &FileRef, depth: usize, budget: &mut usize) {
+    if depth == 0 {
+        let _ = volume.scan(&mut |_, _| true);
+    }
     let Ok(listing) = volume.list(dir) else {
         return;
     };
@@ -409,14 +420,42 @@ fn mutated_volumes_never_panic() {
     exfat.delete(&gone);
     let exfat = exfat.finish();
 
+    let mut ntfs = NtfsImage::new();
+    let dir = ntfs.mkdir(NTFS_ROOT, "dir");
+    for index in 0..40 {
+        ntfs.add_file(dir, &format!("file {index}.txt"), &pattern(index, 100));
+    }
+    ntfs.add_split(dir, "split.bin", &pattern(1, 20_000));
+    ntfs.add_sparse(
+        NTFS_ROOT,
+        "sparse.bin",
+        &pattern(2, 4096),
+        2,
+        &pattern(3, 10),
+    );
+    let gone = ntfs.add_split(NTFS_ROOT, "gone.bin", &pattern(4, 9000));
+    ntfs.delete(gone);
+    let old = ntfs.mkdir(NTFS_ROOT, "old");
+    let inner = ntfs.add_file(old, "inner.txt", &pattern(5, 3000));
+    ntfs.delete(inner);
+    ntfs.delete(old);
+    let ntfs = ntfs.finish();
+
     let mut noise = Noise::new(11);
     for _ in 0..150 {
-        for base in [&fat, &exfat] {
-            let mut image = base.clone();
+        for (base, hot) in [
             // 改坏引导扇区、FAT 与开头的目录簇
-            let hot = image.len().min(64 * 1024);
+            (&fat, 0..64 * 1024),
+            (&exfat, 0..64 * 1024),
+            // NTFS：引导扇区、MFT（4 号簇起）、索引块与开头的数据（64 号簇起）
+            (&ntfs, 0..512),
+            (&ntfs, 16 * 1024..160 * 1024),
+            (&ntfs, 256 * 1024..320 * 1024),
+        ] {
+            let mut image = base.clone();
+            let hot = hot.start..hot.end.min(image.len());
             let count = 1 + noise.below(24) as usize;
-            noise.mutate(&mut image[..hot], count);
+            noise.mutate(&mut image[hot], count);
             let length = image.len() as u64;
             let Ok(volume) = Volume::open(Arc::new(MemoryDisk::new(image, 512)), 0, length) else {
                 continue;
@@ -425,4 +464,250 @@ fn mutated_volumes_never_panic() {
             walk(&volume, &volume.root(), 0, &mut budget);
         }
     }
+}
+
+// ───────────────────────────── NTFS ─────────────────────────────
+
+fn scan(volume: &Volume) -> ScanSummary {
+    volume.scan(&mut |_, _| true).unwrap().unwrap()
+}
+
+#[test]
+fn ntfs_volume_is_browsed_and_deleted_files_are_found() {
+    let mut sample = NtfsImage::new();
+    let cs = sample.cluster_size();
+    sample.set_label("我的 NTFS");
+    let hello = pattern(1, 100);
+    sample.add_file(NTFS_ROOT, "hello.txt", &hello);
+    let big = pattern(2, cs * 3 + 17);
+    sample.add_file(NTFS_ROOT, "big.bin", &big);
+    let photos = sample.mkdir(NTFS_ROOT, "Photos");
+    let photo = pattern(3, cs * 4 + 1);
+    sample.add_fragmented(photos, "照片 2024.jpg", &photo);
+    let many = sample.mkdir(NTFS_ROOT, "many");
+    for index in 0..60 {
+        sample.add_file(many, &format!("f{index:03}.bin"), &pattern(index as u8, 50));
+    }
+    let named = sample.add_file(NTFS_ROOT, "a long file name.txt", &pattern(4, 30));
+    sample.add_dos_name(named, "ALONGF~1.TXT");
+    let linked = sample.add_file(NTFS_ROOT, "link-a.txt", &pattern(5, 40));
+    sample.add_link(linked, photos, "link-b.txt");
+    let split = pattern(6, cs * 5 + 3);
+    sample.add_split(NTFS_ROOT, "split.bin", &split);
+    let before = pattern(7, cs);
+    let after = pattern(8, 100);
+    sample.add_sparse(NTFS_ROOT, "sparse.bin", &before, 3, &after);
+    let packed = sample.add_file(NTFS_ROOT, "packed.bin", &pattern(9, cs * 2));
+    sample.mark_compressed(packed);
+    let secret = sample.add_file(NTFS_ROOT, "secret.bin", &pattern(10, 300));
+    sample.mark_encrypted(secret);
+    let system = sample.add_file(NTFS_ROOT, "system.dll", &[]);
+    sample.mark_reparse(system, TAG_WOF);
+
+    let gone = pattern(11, cs * 2 + 5);
+    let placed = sample.add_file(NTFS_ROOT, "gone.jpg", &gone);
+    sample.delete(placed);
+    let small = pattern(12, 200);
+    let placed = sample.add_file(NTFS_ROOT, "gone small.txt", &small);
+    sample.delete(placed);
+    let gone_frag = pattern(13, cs * 3);
+    let placed = sample.add_fragmented(NTFS_ROOT, "gone frag.bin", &gone_frag);
+    sample.delete(placed);
+    let gone_split = pattern(14, cs * 4 + 9);
+    let placed = sample.add_split(NTFS_ROOT, "gone split.bin", &gone_split);
+    sample.delete(placed);
+    let placed = sample.add_split(NTFS_ROOT, "gone truncated.bin", &pattern(20, cs * 3));
+    sample.delete_truncating(placed);
+    let victim = sample.add_file(NTFS_ROOT, "victim.bin", &pattern(15, cs * 2));
+    let at = sample.first_lcn(victim);
+    sample.delete(victim);
+    sample.add_file_at(NTFS_ROOT, "new.bin", &pattern(16, cs), at);
+    let old = sample.mkdir(NTFS_ROOT, "Old");
+    let old_file = pattern(17, 700);
+    let inner = sample.add_file(old, "old.txt", &old_file);
+    sample.delete(inner);
+    sample.delete(old);
+    // 父目录的记录被重用：里面删除的文件找不到原目录
+    let temp = sample.mkdir(NTFS_ROOT, "Temp");
+    let lost = pattern(18, 64);
+    let placed = sample.add_file(temp, "lost.txt", &lost);
+    sample.delete(placed);
+    sample.delete(temp);
+    sample.reuse(temp, NTFS_ROOT, "reused.txt", &pattern(19, 10));
+
+    let volume = open(sample.finish());
+    assert_eq!(volume.kind(), FsKind::Ntfs);
+    assert_eq!(volume.label(), Some("我的 NTFS"));
+    assert!(volume.times_utc());
+    assert!(volume.needs_scan());
+
+    // 扫描之前：只有现存的项，长度取自目录索引
+    let entries = volume.list(&volume.root()).unwrap().entries;
+    assert!(
+        entries.iter().all(|entry| !entry.deleted()),
+        "{:?}",
+        names(&entries)
+    );
+    assert!(!names(&entries).contains(&"$Orphans"));
+    let entry = find(&entries, "hello.txt");
+    assert_eq!((entry.size, entry.state), (100, State::Live));
+    assert_eq!(entry.modified.as_deref(), Some(SAMPLE_TIME));
+    assert_eq!(entry.position, None);
+    assert_eq!(read_all(&volume, &entry.file), hello);
+
+    let summary = scan(&volume);
+    assert!(!volume.needs_scan());
+    assert_eq!(summary.orphans, 1);
+    assert!(summary.deleted >= 7, "{summary:?}");
+    // 再扫一次直接给出上次的结果
+    assert_eq!(scan(&volume), summary);
+
+    let entries = volume.list(&volume.root()).unwrap().entries;
+    let entry = find(&entries, "big.bin");
+    assert_eq!(entry.size, big.len() as u64);
+    assert!(entry.position.is_some());
+    assert_eq!(read_all(&volume, &entry.file), big);
+    let entry = find(&entries, "a long file name.txt");
+    assert_eq!(entry.short_name.as_deref(), Some("ALONGF~1.TXT"));
+    assert!(!names(&entries).contains(&"ALONGF~1.TXT"));
+    assert_eq!(read_all(&volume, &find(&entries, "split.bin").file), split);
+    let mut sparse = before.clone();
+    sparse.extend(vec![0u8; cs * 3]);
+    sparse.extend(&after);
+    assert_eq!(
+        read_all(&volume, &find(&entries, "sparse.bin").file),
+        sparse
+    );
+
+    for (name, reason) in [
+        ("packed.bin", Unsupported::Compressed),
+        ("secret.bin", Unsupported::Encrypted),
+        ("system.dll", Unsupported::SystemCompressed),
+    ] {
+        let entry = find(&entries, name);
+        assert_eq!(entry.unsupported, Some(reason), "{name}");
+        assert!(matches!(
+            volume.open_file(&entry.file),
+            Err(FsError::Unreadable(found)) if found == reason
+        ));
+    }
+
+    let photos = find(&entries, "Photos");
+    let inside = volume.list(&photos.file).unwrap().entries;
+    assert_eq!(names(&inside).len(), 2);
+    assert_eq!(
+        read_all(&volume, &find(&inside, "照片 2024.jpg").file),
+        photo
+    );
+    assert_eq!(
+        find(&inside, "link-b.txt").file,
+        find(&entries, "link-a.txt").file
+    );
+
+    // 项多的目录用 INDEX_ALLOCATION；位图里没标在用的索引块里的旧项不列出
+    let many = volume.list(&find(&entries, "many").file).unwrap();
+    assert_eq!(many.entries.len(), 60);
+    assert!(!names(&many.entries).contains(&"stale.txt"));
+
+    for (name, content) in [
+        ("gone.jpg", &gone),
+        ("gone small.txt", &small),
+        ("gone frag.bin", &gone_frag),
+        ("gone split.bin", &gone_split),
+    ] {
+        let entry = find(&entries, name);
+        assert_eq!(
+            (entry.deleted(), entry.state),
+            (true, State::Intact),
+            "{name}"
+        );
+        assert_eq!(&read_all(&volume, &entry.file), content, "{name}");
+        // 定位信息编成字符串再解回来，照样能读
+        let token = FileRef::from_token(&entry.file.to_token()).unwrap();
+        assert_eq!(&read_all(&volume, &token), content, "{name}");
+    }
+    assert_eq!(find(&entries, "victim.bin").state, State::Overwritten);
+
+    let old = find(&entries, "Old");
+    assert!(old.deleted() && old.is_dir());
+    let inside = volume.list(&old.file).unwrap().entries;
+    assert_eq!(names(&inside), ["old.txt"]);
+    assert_eq!(read_all(&volume, &inside[0].file), old_file);
+
+    // 删除时被截成 0 字节：位置已不在 MFT 里，不能报「可能完整」，也不能读出一个空文件
+    let truncated = find(&entries, "gone truncated.bin");
+    assert_eq!(truncated.state, State::Unknown);
+    assert!(volume.open_file(&truncated.file).is_err());
+
+    let orphans = find(&entries, "$Orphans");
+    assert!(orphans.file.is_orphans() && !orphans.deleted());
+    let inside = volume.list(&orphans.file).unwrap().entries;
+    assert_eq!(names(&inside), ["lost.txt"]);
+    assert_eq!(read_all(&volume, &inside[0].file), lost);
+    // 被重用的记录现在是别的文件：拿着旧的（已删除目录的）定位信息去读，要被拒绝
+    let reused = find(&entries, "reused.txt");
+    let stale = FileRef {
+        deleted: true,
+        ..reused.file
+    };
+    assert!(volume.open_file(&stale).is_err());
+}
+
+#[test]
+fn ntfs_mft_mirror_is_used_when_the_first_record_is_unreadable() {
+    let mut sample = NtfsImage::new();
+    sample.add_file(NTFS_ROOT, "a.txt", &pattern(1, 10));
+    let mut image = sample.finish();
+    // $MFT 在 4 号簇：把 0 号记录写坏
+    let mft = 4 * 4096;
+    image[mft..mft + 1024].fill(0xAB);
+    let volume = open(image);
+    let entries = volume.list(&volume.root()).unwrap().entries;
+    assert_eq!(names(&entries), ["a.txt"]);
+}
+
+#[test]
+fn ntfs_unreadable_records_keep_their_index_entries_after_a_scan() {
+    let mut sample = NtfsImage::new();
+    let torn = sample.add_file(NTFS_ROOT, "torn.txt", &pattern(1, 10));
+    let gone = sample.add_file(NTFS_ROOT, "gone.txt", &pattern(2, 10));
+    sample.delete(gone);
+    let mut image = sample.finish();
+    // 记录写到一半：第一个扇区末尾与更新序列号对不上，整条记录不用
+    let at = 4 * 4096 + torn as usize * 1024 + 510;
+    image[at] ^= 0xFF;
+    let volume = open(image);
+    scan(&volume);
+    let entries = volume.list(&volume.root()).unwrap().entries;
+    let entry = find(&entries, "torn.txt");
+    assert_eq!((entry.state, entry.size), (State::Live, 10));
+    assert!(volume.open_file(&entry.file).is_err());
+    assert!(find(&entries, "gone.txt").deleted());
+}
+
+#[test]
+fn ntfs_scan_can_be_cancelled_and_restarted() {
+    let mut sample = NtfsImage::new();
+    let placed = sample.add_file(NTFS_ROOT, "gone.txt", &pattern(1, 10));
+    sample.delete(placed);
+    let volume = open(sample.finish());
+    let mut calls = 0;
+    let cancelled = volume
+        .scan(&mut |_, _| {
+            calls += 1;
+            false
+        })
+        .unwrap();
+    assert_eq!((cancelled, calls), (None, 1));
+    assert!(volume.needs_scan());
+    let mut last = (0, 0);
+    let summary = volume
+        .scan(&mut |done, total| {
+            last = (done, total);
+            true
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(last.0, last.1);
+    assert_eq!(summary.deleted, 1);
 }

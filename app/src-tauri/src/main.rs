@@ -10,7 +10,7 @@ use serde::Serialize;
 use tauri::{AppHandle, State};
 use yisi_engine::protocol::{
     BrowseOpened, Capabilities, CopyItem, DiskList, ExtractItem, FileListPage, FilePreview,
-    FileTypeList, PartitionRef,
+    FileTypeList, PartitionRef, ScanResult,
 };
 
 use crate::broker::BrokerSession;
@@ -180,6 +180,25 @@ fn browse_preview(
     engines.preview_fs_file(job_id, partition, file)
 }
 
+/// 找出分区里已删除的项（NTFS 扫一遍 MFT）：扫完才返回，进度经任务事件送达。
+#[tauri::command(async)]
+fn browse_scan(
+    engines: State<'_, Engines>,
+    job_id: String,
+    partition: u32,
+) -> Result<ScanResult, HostError> {
+    engines.scan_deleted(job_id, partition)
+}
+
+#[tauri::command(async)]
+fn browse_cancel_scan(
+    engines: State<'_, Engines>,
+    job_id: String,
+    partition: u32,
+) -> Result<(), HostError> {
+    engines.cancel_scan(job_id, partition)
+}
+
 /// 把浏览中选中的项复制到另一块盘。
 #[tauri::command(async)]
 #[expect(clippy::too_many_arguments, reason = "与界面传来的参数一一对应")]
@@ -243,6 +262,8 @@ fn main() -> anyhow::Result<()> {
             browse_open,
             browse_list,
             browse_preview,
+            browse_scan,
+            browse_cancel_scan,
             job_start_copy,
             copied_open,
             copied_reveal

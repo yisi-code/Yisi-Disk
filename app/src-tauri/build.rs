@@ -12,6 +12,8 @@ fn main() {
         "recovered_preview",
         "recovered_open",
         "recovered_reveal",
+        "browse_scan",
+        "browse_cancel_scan",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("tauri-build 执行失败");

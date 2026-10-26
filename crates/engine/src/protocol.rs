@@ -31,12 +31,17 @@ pub const PREVIEW_RANGE: &str = "preview.range";
 /// 界面只显示这份缩略图，不直接渲染恢复出的文件。打不开时答复 [`error_code::PREVIEW_UNAVAILABLE`]。
 pub const PREVIEW_FILE: &str = "preview.file";
 /// 浏览分区（任务）：参数 [`BrowseParams`]，读出分区表后答复 [`BrowseOpened`]，之后一直运行到取消或宿主断开，
-/// 期间接受 [`LIST_FILES`] 与 [`PREVIEW_FS_FILE`]。只读源盘。
+/// 期间接受 [`LIST_FILES`]、[`PREVIEW_FS_FILE`]、[`SCAN_DELETED`] 与 [`CANCEL_SCAN`]。只读源盘。
 pub const BROWSE_OPEN: &str = "repair.open";
 /// 列出浏览中的一个目录的一页：参数 [`ListFilesParams`]，结果是 [`FileListPage`]。目录第一次被列出时整份读出、排好序缓存。
 pub const LIST_FILES: &str = "repair.listFiles";
 /// 预览浏览中的一个文件：参数 [`PreviewFsParams`]，结果是 [`FilePreview`]，规则与 [`PREVIEW_FILE`] 相同。
 pub const PREVIEW_FS_FILE: &str = "repair.previewFile";
+/// 找出浏览中的一个分区里已删除的项（NTFS 要扫一遍 MFT，其他文件系统立即答复）：参数 [`ScanParams`]，
+/// 扫完答复 [`ScanResult`]。扫描期间浏览任务发 [`PROGRESS`]（`stage` 为 `scanMft`）。同一个分区扫过之后直接答复上次的结果。
+pub const SCAN_DELETED: &str = "repair.scanDeleted";
+/// 停止正在进行的 [`SCAN_DELETED`]：参数 [`ScanParams`]，立即返回空对象；那次扫描答复 `cancelled: true`。
+pub const CANCEL_SCAN: &str = "repair.cancelScan";
 /// 把分区里选中的文件与目录复制到另一块盘（任务）：参数 [`CopyParams`]，立即返回 [`CopyStarted`]；
 /// 复制好的文件经 [`COPIED`] 通知分批送达，结果是 [`CopySummary`]。源为物理磁盘时，输出目录必须在另一块盘上，
 /// 否则答复 [`error_code::OUTPUT_ON_SOURCE`]。
@@ -44,7 +49,7 @@ pub const COPY_FILES: &str = "repair.copyFiles";
 
 /// 引擎每隔 [`HEARTBEAT_INTERVAL`] 发一次，没有参数。
 pub const HEARTBEAT: &str = "engine.heartbeat";
-/// 参数 [`Progress`]，每秒最多 10 次。
+/// 参数 [`Progress`]，每秒最多 10 次（各阶段的最后一次总会发出）。
 pub const PROGRESS: &str = "job.progress";
 /// 参数 [`JobFound`]：一批新找到的文件，攒满 100 个或距上一批 250 毫秒时发出。
 pub const FOUND: &str = "job.found";
@@ -139,6 +144,9 @@ pub struct Progress {
     pub job_id: String,
     pub done: u64,
     pub total: u64,
+    /// 任务里的哪个阶段；只有一个阶段的任务不给。目前只有 `scanMft`（扫描 MFT，单位是字节）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -354,8 +362,14 @@ pub struct PartitionInfo {
     /// fat12、fat16、fat32、exfat、ntfs、bitlocker、ext、unknown 之一；读不出引导扇区时为 unreadable。
     pub filesystem: String,
     pub label: Option<String>,
-    /// 能不能浏览目录（目前是 FAT 与 exFAT）。
+    /// 能不能浏览目录（FAT、exFAT、NTFS）。
     pub browsable: bool,
+    /// 列出已删除的项之前要先 [`SCAN_DELETED`]（NTFS）。
+    #[serde(default)]
+    pub needs_scan: bool,
+    /// 卷上的时间是 UTC（NTFS）；否则是写入时的本地时间（FAT、exFAT）。
+    #[serde(default)]
+    pub times_utc: bool,
 }
 
 /// 一页最多这么多项；名字很长时引擎会少给一些，保证一条答复不超过消息大小上限。
@@ -404,8 +418,43 @@ pub struct FsEntry {
     pub state: String,
     /// 定位信息，原样传回给 [`LIST_FILES`]、[`PREVIEW_FS_FILE`]、[`COPY_FILES`]。
     pub file: String,
-    /// 数据在源上的起始字节偏移；没有数据时为空。
+    /// 数据在源上的起始字节偏移；没有数据、或还不知道时为空。
     pub position: Option<u64>,
+    /// 存放方式暂不支持读出：compressed、encrypted、systemCompressed、reparse 之一。
+    #[serde(default)]
+    pub unsupported: Option<String>,
+    /// NTFS 的 MFT 记录号。
+    #[serde(default)]
+    pub record: Option<u64>,
+    /// 不在卷上的虚拟目录：`orphans` 是「找不到原目录的文件」。
+    #[serde(default)]
+    pub virtual_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanParams {
+    pub job_id: String,
+    pub partition: u32,
+}
+
+/// 扫描结果。不需要扫描的文件系统各项为 0。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanResult {
+    /// 被 [`CANCEL_SCAN`] 或关闭浏览停下了；其余各项为 0，下次重新扫。
+    pub cancelled: bool,
+    /// MFT 里的记录数、在用的记录数。
+    pub records: u64,
+    pub in_use: u64,
+    /// 已删除、还留着内容的文件与目录记录数，以及它们的名字数（有硬链接的文件有几个名字）。
+    pub deleted: u64,
+    pub deleted_names: u64,
+    /// 原来的目录已找不到、列在「找不到原目录的文件」里的名字数。
+    pub orphans: u64,
+    /// 读不出的记录数。
+    pub unreadable: u64,
+    pub elapsed_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -467,6 +516,9 @@ pub struct CopiedFile {
     pub size: u64,
     /// 复制失败的原因；成功时为空。
     pub error: Option<String>,
+    /// 复制出的内容全是 0：固态硬盘开了 TRIM 时，删除文件的簇常常已被清零，这样的文件多半找不回来了。
+    #[serde(default)]
+    pub all_zero: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

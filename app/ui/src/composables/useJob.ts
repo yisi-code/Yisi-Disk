@@ -34,6 +34,8 @@ export function useJob<TResult>(handlers: JobHandlers<TResult>) {
   const status = ref<JobStatus>('idle')
   const done = ref(0)
   const total = ref(0)
+  /** 进度所属的阶段（例如复制前先扫描 MFT 的 scanMft）；只有一个阶段的任务为 null */
+  const stage = ref<string | null>(null)
   const bytesPerSecond = ref<number | null>(null)
   const failure = ref<HostError | null>(null)
   const isUnresponsive = ref(false)
@@ -77,6 +79,7 @@ export function useJob<TResult>(handlers: JobHandlers<TResult>) {
     status.value = 'starting'
     done.value = 0
     total.value = 0
+    stage.value = null
     bytesPerSecond.value = null
     failure.value = null
     isUnresponsive.value = false
@@ -115,10 +118,12 @@ export function useJob<TResult>(handlers: JobHandlers<TResult>) {
     }
     switch (event.kind) {
       case 'progress': {
-        // 物理磁盘可能先等了一段 UAC，速度从第一次进度算起
-        if (event.data.done === 0) {
+        const eventStage = event.data.stage ?? null
+        // 物理磁盘可能先等了一段 UAC，换了阶段也要重算；速度从这一阶段的第一次进度算起
+        if (event.data.done === 0 || eventStage !== stage.value) {
           startedAt = performance.now()
         }
+        stage.value = eventStage
         const seconds = (performance.now() - startedAt) / 1000
         done.value = event.data.done
         total.value = event.data.total
@@ -167,6 +172,7 @@ export function useJob<TResult>(handlers: JobHandlers<TResult>) {
     status,
     done,
     total,
+    stage,
     percent,
     bytesPerSecond,
     failure,

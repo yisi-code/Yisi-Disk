@@ -3,7 +3,7 @@
 use yisi_part::bytes::{le16, le32};
 
 use crate::clusters::{Clusters, FatWidth, Link};
-use crate::entry::{Entry, FileRef, Listing, State, dos_time};
+use crate::entry::{ClusterRef, Entry, FileRef, Listing, Location, State, dos_time};
 use crate::reader::FileReader;
 use crate::region::{ChunkCache, Region};
 use crate::{FsError, FsKind, MAX_DIR_BYTES, MAX_ENTRIES};
@@ -213,21 +213,19 @@ impl Fat {
 
     pub fn root(&self) -> FileRef {
         FileRef {
-            first_cluster: if self.fixed_root.is_some() {
-                0
-            } else {
-                self.root_cluster
-            },
             size: 0,
-            valid_size: 0,
             is_dir: true,
             deleted: false,
-            contiguous: false,
+            location: Location::Clusters(ClusterRef {
+                first_cluster: if self.fixed_root.is_some() {
+                    0
+                } else {
+                    self.root_cluster
+                },
+                valid_size: 0,
+                contiguous: false,
+            }),
         }
-    }
-
-    pub fn cluster_offset(&self, cluster: u32) -> Option<u64> {
-        self.clusters.offset(cluster)
     }
 
     pub fn list(&self, dir: &FileRef) -> Result<Listing, FsError> {
@@ -251,11 +249,12 @@ impl Fat {
         if file.is_dir {
             return Err(FsError::BadRef);
         }
+        let at = file.clusters()?;
         let needed = self.clusters.clusters_for(file.size);
-        let runs = if file.contiguous {
-            self.clusters.contiguous(file.first_cluster, needed).0
+        let runs = if at.contiguous {
+            self.clusters.contiguous(at.first_cluster, needed).0
         } else {
-            self.clusters.chain(file.first_cluster, needed)?.runs
+            self.clusters.chain(at.first_cluster, needed)?.runs
         };
         Ok(FileReader::new(&self.clusters, &runs, file.size, file.size))
     }
@@ -270,20 +269,21 @@ impl Fat {
             self.clusters.region.read_exact(offset, &mut bytes)?;
             return Ok((bytes, false));
         }
+        let first = dir.clusters()?.first_cluster;
         let cs = self.clusters.cluster_size;
         let max_clusters = (MAX_DIR_BYTES / cs).max(1);
         if !dir.deleted {
-            let chain = self.clusters.chain(dir.first_cluster, max_clusters)?;
+            let chain = self.clusters.chain(first, max_clusters)?;
             return Ok((self.clusters.read_runs(&chain.runs, MAX_DIR_BYTES)?, false));
         }
 
         // 已删除的目录：簇链已清零，只能从首簇起往后找连续的空闲簇，
         // 直到遇到目录结束标记或已被占用的簇。首簇开头必须还是 `.` 与 `..`，否则已被覆盖。
-        let mut bytes = self.first_cluster(dir.first_cluster)?;
+        let mut bytes = self.first_cluster(first)?;
         if !starts_with_dots(&bytes) {
             return Ok((Vec::new(), true));
         }
-        let mut cluster = dir.first_cluster;
+        let mut cluster = first;
         let mut count = 1u64;
         while count < max_clusters && !has_end_marker(&bytes) {
             let Some(next) = cluster
@@ -305,13 +305,16 @@ impl Fat {
 
     fn entry(&self, raw: RawEntry) -> Result<Entry, FsError> {
         let deleted = raw.deleted;
+        let size = if raw.is_dir { 0 } else { raw.size };
         let file = FileRef {
-            first_cluster: raw.first_cluster,
-            size: if raw.is_dir { 0 } else { raw.size },
-            valid_size: if raw.is_dir { 0 } else { raw.size },
+            size,
             is_dir: raw.is_dir,
             deleted,
-            contiguous: deleted,
+            location: Location::Clusters(ClusterRef {
+                first_cluster: raw.first_cluster,
+                valid_size: size,
+                contiguous: deleted,
+            }),
         };
         let state = if deleted {
             // 早年的 Windows 删除 FAT32 文件时会清掉首簇的高 16 位。高位为 0、簇数又超过 16 位时，
@@ -319,7 +322,7 @@ impl Fat {
             let ambiguous = self.kind == FsKind::Fat32
                 && raw.cluster_high == 0
                 && u64::from(self.clusters.count) + 2 > 0xFFFF;
-            match self.deleted_state(&file)? {
+            match self.deleted_state(&file, raw.first_cluster)? {
                 State::Overwritten if ambiguous => State::Unknown,
                 state => state,
             }
@@ -334,11 +337,15 @@ impl Fat {
             modified: raw.modified,
             created: raw.created,
             state,
+            position: (raw.is_dir || size > 0)
+                .then(|| self.clusters.offset(raw.first_cluster))
+                .flatten(),
+            unsupported: None,
             file,
         })
     }
 
-    fn deleted_state(&self, file: &FileRef) -> Result<State, FsError> {
+    fn deleted_state(&self, file: &FileRef, first: u32) -> Result<State, FsError> {
         if !file.is_dir && file.size == 0 {
             return Ok(State::Intact);
         }
@@ -347,7 +354,7 @@ impl Fat {
         } else {
             self.clusters.clusters_for(file.size)
         };
-        let (runs, complete) = self.clusters.contiguous(file.first_cluster, needed);
+        let (runs, complete) = self.clusters.contiguous(first, needed);
         if !complete {
             return Ok(State::Unknown);
         }
@@ -359,7 +366,7 @@ impl Fat {
             }
         }
         // 目录的簇虽然空闲，开头却已不是 `.` 与 `..`：内容已不在（被覆盖，或删除前就没写到盘上）
-        if file.is_dir && !starts_with_dots(&self.first_cluster(file.first_cluster)?) {
+        if file.is_dir && !starts_with_dots(&self.first_cluster(first)?) {
             return Ok(State::Overwritten);
         }
         Ok(State::Intact)
