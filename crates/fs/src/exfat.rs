@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use yisi_part::bytes::{le16, le32, le64};
 
 use crate::clusters::{Chain, Clusters, FatWidth, Run};
-use crate::entry::{Entry, FileRef, Listing, State, dos_time};
+use crate::entry::{ClusterRef, Entry, FileRef, Listing, Location, State, dos_time};
 use crate::reader::FileReader;
 use crate::region::{ChunkCache, Region};
 use crate::{FsError, MAX_DIR_BYTES, MAX_ENTRIES};
@@ -169,18 +169,16 @@ impl Exfat {
         self.clusters.cluster_size
     }
 
-    pub fn cluster_offset(&self, cluster: u32) -> Option<u64> {
-        self.clusters.offset(cluster)
-    }
-
     pub fn root(&self) -> FileRef {
         FileRef {
-            first_cluster: self.root_cluster,
             size: 0,
-            valid_size: 0,
             is_dir: true,
             deleted: false,
-            contiguous: false,
+            location: Location::Clusters(ClusterRef {
+                first_cluster: self.root_cluster,
+                valid_size: 0,
+                contiguous: false,
+            }),
         }
     }
 
@@ -188,7 +186,7 @@ impl Exfat {
         if !dir.is_dir {
             return Err(FsError::BadRef);
         }
-        let overwritten = dir.deleted && self.is_allocated(dir.first_cluster)?;
+        let overwritten = dir.deleted && self.is_allocated(dir.clusters()?.first_cluster)?;
         if overwritten {
             return Ok(Listing {
                 entries: Vec::new(),
@@ -241,17 +239,18 @@ impl Exfat {
             &self.clusters,
             &runs,
             file.size,
-            file.valid_size,
+            file.clusters()?.valid_size,
         ))
     }
 
     /// 文件或目录占用的簇：连续存放的直接算，否则沿 FAT 链找。
     fn runs(&self, file: &FileRef) -> Result<Vec<Run>, FsError> {
+        let at = file.clusters()?;
         let needed = self.clusters.clusters_for(file.size);
-        Ok(if file.contiguous {
-            self.clusters.contiguous(file.first_cluster, needed).0
+        Ok(if at.contiguous {
+            self.clusters.contiguous(at.first_cluster, needed).0
         } else {
-            self.clusters.chain(file.first_cluster, needed)?.runs
+            self.clusters.chain(at.first_cluster, needed)?.runs
         })
     }
 
@@ -262,11 +261,12 @@ impl Exfat {
         } else {
             dir.size.min(MAX_DIR_BYTES)
         };
+        let at = dir.clusters()?;
         let needed = self.clusters.clusters_for(limit);
-        let runs = if dir.contiguous {
-            self.clusters.contiguous(dir.first_cluster, needed).0
+        let runs = if at.contiguous {
+            self.clusters.contiguous(at.first_cluster, needed).0
         } else {
-            self.clusters.chain(dir.first_cluster, needed)?.runs
+            self.clusters.chain(at.first_cluster, needed)?.runs
         };
         self.clusters.read_runs(&runs, limit)
     }
@@ -274,20 +274,23 @@ impl Exfat {
     fn entry(&self, set: FileSet, parent_deleted: bool) -> Result<Entry, FsError> {
         let deleted = set.deleted || parent_deleted;
         let is_dir = set.attributes & ATTR_DIRECTORY != 0;
-        let mut file = FileRef {
+        let mut at = ClusterRef {
             first_cluster: set.first_cluster,
-            size: set.data_length,
             valid_size: set.valid_length.min(set.data_length),
-            is_dir,
-            deleted,
             contiguous: set.no_fat_chain,
         };
         let state = if deleted {
-            let (state, contiguous) = self.deleted_state(&file)?;
-            file.contiguous = contiguous;
+            let (state, contiguous) = self.deleted_state(set.data_length, at)?;
+            at.contiguous = contiguous;
             state
         } else {
             State::Live
+        };
+        let file = FileRef {
+            size: set.data_length,
+            is_dir,
+            deleted,
+            location: Location::Clusters(at),
         };
         Ok(Entry {
             name: set.name,
@@ -297,6 +300,10 @@ impl Exfat {
             modified: set.modified,
             created: set.created,
             state,
+            position: (is_dir || file.size > 0)
+                .then(|| self.clusters.offset(at.first_cluster))
+                .flatten(),
+            unsupported: None,
             file,
         })
     }
@@ -305,20 +312,20 @@ impl Exfat {
     ///
     /// 删除只清分配位图，FAT 表项一般还在：走 FAT 链的文件先沿链找，链完整就照链读；
     /// 链断了只能假设连续存放，判为无法判断。
-    fn deleted_state(&self, file: &FileRef) -> Result<(State, bool), FsError> {
-        if file.size == 0 {
-            return Ok((State::Intact, file.contiguous));
+    fn deleted_state(&self, size: u64, at: ClusterRef) -> Result<(State, bool), FsError> {
+        if size == 0 {
+            return Ok((State::Intact, at.contiguous));
         }
-        let needed = self.clusters.clusters_for(file.size);
-        let (chain, contiguous, trusted) = if file.contiguous {
-            let (runs, complete) = self.clusters.contiguous(file.first_cluster, needed);
+        let needed = self.clusters.clusters_for(size);
+        let (chain, contiguous, trusted) = if at.contiguous {
+            let (runs, complete) = self.clusters.contiguous(at.first_cluster, needed);
             (Chain { runs, complete }, true, true)
         } else {
-            let chain = self.clusters.chain(file.first_cluster, needed)?;
+            let chain = self.clusters.chain(at.first_cluster, needed)?;
             if chain.complete && chain.len() == needed {
                 (chain, false, true)
             } else {
-                let (runs, complete) = self.clusters.contiguous(file.first_cluster, needed);
+                let (runs, complete) = self.clusters.contiguous(at.first_cluster, needed);
                 (Chain { runs, complete }, true, false)
             }
         };

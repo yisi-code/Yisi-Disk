@@ -294,15 +294,27 @@ const enUS: typeof zhCN = {
       role: 'Type',
       start: 'Start',
       size: 'Size',
-      none: 'No partition can be browsed. FAT12/16/32 and exFAT are supported now and NTFS comes next; otherwise try deep recovery by file type.',
+      none: 'No partition can be browsed. FAT12/16/32, exFAT and NTFS are supported; otherwise try deep recovery by file type.',
+      scanHint:
+        'For an NTFS partition, Next first scans the MFT (master file table) for deleted files. A large partition may take from tens of seconds to minutes; you can cancel at any time.',
       reason: {
-        ntfs: 'not supported yet (coming next)',
+        ntfs: 'the $MFT (master file table) cannot be read',
         bitlocker: 'encrypted; contents cannot be read',
         ext: 'not supported yet',
         unknown: 'file system not recognised',
         unreadable: 'boot sector unreadable',
         invalid: 'boot sector parameters are invalid',
       },
+    },
+    scan: {
+      running: 'Scanning the MFT for deleted files: {done} / {total} ({percent}%)',
+      starting: 'Scanning the MFT for deleted files…',
+      cancel: 'Cancel scan',
+      cancelling: 'Cancelling…',
+      failed: 'Scanning the MFT failed: {reason}',
+      summary: 'The MFT has {records} records; {deleted} deleted files and folders were found.',
+      orphans: '{count} of them have lost their original folder and are listed under "Files without their folder".',
+      unreadable: '{count} MFT records could not be read; files in them cannot be found.',
     },
     browse: {
       source: 'Source',
@@ -312,12 +324,14 @@ const enUS: typeof zhCN = {
       liveHint:
         'This reads what is on the disk right now. While a partition is in use, recently written files may not have reached the disk yet; to recover deleted files, stop writing to this disk first.',
       stateHint:
-        '"Likely intact" only means the space it used has not been taken by another file; it does not guarantee the contents. Open the copies to check them. Files whose parent folder was overwritten cannot be found here; try deep recovery by file type.',
+        '"Likely intact" only means the space it used has not been taken by another file; it does not guarantee the contents. Open the copies to check them. On an SSD with TRIM, deleted files are often already zeroed. For files you cannot find here, try deep recovery by file type.',
+      timesUtc: 'This partition records times in UTC, which may differ by some hours from the local times shown by File Explorer.',
     },
     browser: {
       title: 'Files in the partition',
       check: 'Select {name}',
       nameUncertain: 'Incomplete name: the first letter was lost when it was deleted',
+      orphans: 'Files without their folder',
       hint: 'Click a folder to expand or collapse it, click a file to see its details, double-click a file to open it with its default app. Arrow keys move, Space selects.',
       status: {
         loading: 'Reading…',
@@ -334,7 +348,21 @@ const enUS: typeof zhCN = {
       overwritten: 'Deleted · overwritten',
       unknown: 'Deleted · uncertain',
     },
+    unsupported: {
+      compressed: 'NTFS compressed · not supported',
+      encrypted: 'Encrypted · not supported',
+      systemCompressed: 'System compressed · not supported',
+      reparse: 'Link · not supported',
+    },
+    unsupportedDetail: {
+      compressed: 'Stored with NTFS compression, which cannot be decompressed yet; the original contents cannot be read.',
+      encrypted: 'Encrypted with EFS; what can be read is ciphertext.',
+      systemCompressed: 'Stored with Windows system compression (WOF / CompactOS); the contents are in a compressed stream that cannot be read yet.',
+      reparse: 'A symbolic link, junction or cloud placeholder; the contents are not here.',
+    },
     stateDetail: {
+      orphans:
+        'Virtual folder, not on the volume: the folders these deleted files were in are gone (their MFT records were reused by other files), so they are collected here',
       live: 'Not deleted',
       intact: 'Deleted. The space it used is not taken by another file, so it is likely intact',
       overwritten: 'Deleted. Part of the space it used now belongs to another file; its contents are at least partly overwritten',
@@ -352,6 +380,9 @@ const enUS: typeof zhCN = {
       modified: 'Modified',
       created: 'Created',
       position: 'Data location',
+      record: 'MFT record',
+      storage: 'Storage',
+      utcTime: '{time} (UTC)',
       positionValue: '{position} (offset {offset}, sector {sector})',
       open: 'Open with default app',
       openHint: 'It is copied to the destination below before it is opened.',
@@ -365,10 +396,12 @@ const enUS: typeof zhCN = {
       start: 'Copy {count} selected items',
       failedCount: '{count} files could not be copied',
       failedItem: '{path}: {reason}',
+      allZero: '{count} copied files contain only zeros: they were most likely wiped (for example by SSD TRIM) and cannot be recovered.',
       reveal: 'Show in folder',
       status: {
         starting: 'Starting the copy…',
         running: 'Copied {done} / {total} ({percent}%), {count} files',
+        scanning: 'Scanning the MFT for deleted files in the folders ({percent}%)…',
         completed: 'Copy finished',
         failed: 'Copy failed',
         cancelled: 'Cancelled; files already copied stay in the destination',

@@ -11,11 +11,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use yisi_carve::{DirectorySink, ScanOnlySink, Sink};
 use yisi_engine::protocol::{
-    self, BROWSE_OPEN, BrowseParams, CANCEL, CAPABILITIES, CARVE_EXTRACT, CARVE_START, COPY_FILES,
-    Capabilities, CarveParams, CarveStarted, CopyParams, CopyStarted, ExtractParams, HEARTBEAT,
-    HEARTBEAT_INTERVAL, JobRef, LIST_DISKS, LIST_FILE_TYPES, LIST_FILES, ListFilesParams,
-    PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PreviewFsParams, PreviewParams,
-    PreviewRangeParams, READ_SCAN, ReadScanParams, Source,
+    self, BROWSE_OPEN, BrowseParams, CANCEL, CANCEL_SCAN, CAPABILITIES, CARVE_EXTRACT, CARVE_START,
+    COPY_FILES, Capabilities, CarveParams, CarveStarted, CopyParams, CopyStarted, ExtractParams,
+    HEARTBEAT, HEARTBEAT_INTERVAL, JobRef, LIST_DISKS, LIST_FILE_TYPES, LIST_FILES,
+    ListFilesParams, PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PreviewFsParams, PreviewParams,
+    PreviewRangeParams, READ_SCAN, ReadScanParams, SCAN_DELETED, ScanParams, Source,
 };
 #[cfg(windows)]
 use yisi_engine::protocol::{DiskList, DiskSummary};
@@ -28,7 +28,7 @@ use yisi_rpc::{
 
 use crate::browse::{self, Session};
 use crate::copy_job::{self, Planned};
-use crate::job::{self, JobOutcome, RunningJob};
+use crate::job::{self, JobOutcome, ProgressSender, RunningJob};
 use crate::{carve_job, extract_job, preview, read_scan};
 
 /// 浏览任务每隔这么久看一次有没有被取消。
@@ -107,7 +107,7 @@ struct State {
     session: Option<Arc<Session>>,
 }
 
-/// 处理一个请求。返回 `None` 表示答复由后台线程稍后发出：列目录、预览可能要读很多数据，不能挡住取消请求。
+/// 处理一个请求。返回 `None` 表示答复由后台线程稍后发出：列目录、预览、扫描可能要读很多数据，不能挡住取消请求。
 fn dispatch(
     request: &Request,
     state: &mut State,
@@ -115,7 +115,7 @@ fn dispatch(
     events: &Sender<Event>,
 ) -> Option<Result<Value, ErrorObject>> {
     match request.method.as_str() {
-        LIST_FILES | PREVIEW_FS_FILE => {
+        LIST_FILES | PREVIEW_FS_FILE | SCAN_DELETED => {
             let session = match session_for(request, state) {
                 Ok(session) => session,
                 Err(error) => return Some(Err(error)),
@@ -123,16 +123,19 @@ fn dispatch(
             let request = request.clone();
             let outbox = Arc::clone(outbox);
             thread::spawn(move || {
-                let outcome = if request.method == LIST_FILES {
-                    request
+                let outcome = match request.method.as_str() {
+                    LIST_FILES => request
                         .params::<ListFilesParams>()
                         .and_then(|params| session.list(&params))
-                        .and_then(|page| to_result(&page))
-                } else {
-                    request
+                        .and_then(|page| to_result(&page)),
+                    SCAN_DELETED => request
+                        .params::<ScanParams>()
+                        .and_then(|params| session.scan(params.partition))
+                        .and_then(|result| to_result(&result)),
+                    _ => request
                         .params::<PreviewFsParams>()
                         .and_then(|params| session.preview(params.partition, &params.file))
-                        .and_then(|preview| to_result(&preview))
+                        .and_then(|preview| to_result(&preview)),
                 };
                 outbox.send(&Message::Response(Response {
                     id: request.id,
@@ -141,11 +144,16 @@ fn dispatch(
             });
             None
         }
+        CANCEL_SCAN => Some(session_for(request, state).and_then(|session| {
+            let ScanParams { partition, .. } = request.params()?;
+            session.cancel_scan(partition);
+            Ok(json!({}))
+        })),
         _ => Some(dispatch_now(request, state, outbox, events)),
     }
 }
 
-/// 列目录、预览请求所属的浏览会话：任务 ID 要与正在运行的浏览任务一致。
+/// 列目录、预览、扫描请求所属的浏览会话：任务 ID 要与正在运行的浏览任务一致。
 fn session_for(request: &Request, state: &State) -> Result<Arc<Session>, ErrorObject> {
     let JobRef { job_id } = request.params()?;
     match (&state.job, &state.session) {
@@ -176,6 +184,8 @@ fn dispatch_now(
                 BROWSE_OPEN.to_owned(),
                 LIST_FILES.to_owned(),
                 PREVIEW_FS_FILE.to_owned(),
+                SCAN_DELETED.to_owned(),
+                CANCEL_SCAN.to_owned(),
                 COPY_FILES.to_owned(),
             ];
             if cfg!(windows) {
@@ -320,17 +330,20 @@ fn dispatch_now(
             }
             let params: BrowseParams = request.params()?;
             let device: Arc<dyn BlockDevice> = Arc::from(open_source(&params.source)?);
-            let (session, opened) = Session::open(device)?;
-            state.session = Some(Arc::new(session));
+            let progress = ProgressSender::new(params.job_id.clone(), Arc::clone(outbox));
+            let (session, opened) = Session::open(device, progress)?;
+            let session = Arc::new(session);
+            state.session = Some(Arc::clone(&session));
             let finished = events.clone();
-            // 浏览任务本身只等取消或宿主断开；列目录、预览由会话在别的线程里答复
+            // 浏览任务本身只等取消或宿主断开；列目录、预览、扫描由会话在别的线程里答复
             state.job = Some(job::start(
                 params.job_id,
                 Arc::clone(outbox),
-                |context| {
+                move |context| {
                     while !context.is_cancelled() {
                         thread::sleep(BROWSE_POLL);
                     }
+                    session.close();
                     Ok(JobOutcome::Cancelled)
                 },
                 move || {

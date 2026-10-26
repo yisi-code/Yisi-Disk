@@ -1,4 +1,4 @@
-//! 测试样本：按微软规范拼出的 FAT12/16/32 与 exFAT 镜像，可以建目录、写文件（连续或碎片）、删除、
+//! 测试样本：按微软规范拼出的 FAT12/16/32 与 exFAT 镜像（NTFS 的在 `ntfs` 子模块），可以建目录、写文件（连续或碎片）、删除、
 //! 在删除的文件原来的位置写新文件。只在测试里使用，越界时直接 panic。
 #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::expect_used)]
 
@@ -7,6 +7,9 @@ use std::collections::BTreeSet;
 pub use yisi_part::samples::{MemoryDisk, Noise};
 
 use crate::fat::short_checksum;
+
+mod ntfs;
+pub use ntfs::{NtfsImage, ROOT as NTFS_ROOT, TAG_WOF};
 
 const SECTOR: usize = 512;
 /// 样本里所有时间戳：2024-03-05 13:45:30。

@@ -14,13 +14,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter};
 use yisi_engine::protocol::{
-    BROWSE_OPEN, BrowseOpened, BrowseParams, CANCEL, CANCELLED, CAPABILITIES, CARVE_EXTRACT,
-    CARVE_START, COMPLETED, COPIED, COPY_FILES, Capabilities, CarveParams, CarveStarted, CopyItem,
-    CopyParams, CopyStarted, DiskList, ExtractItem, ExtractParams, FAILED, FOUND, FileListPage,
-    FilePreview, FileTypeList, HEARTBEAT, JobRef, LIST_DISKS, LIST_FILE_TYPES, LIST_FILES, LOG,
-    ListFilesParams, PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS, PartitionRef,
-    PreviewFsParams, PreviewParams, PreviewRangeParams, READ_SCAN, ReadScanParams, Source,
-    error_code,
+    BROWSE_OPEN, BrowseOpened, BrowseParams, CANCEL, CANCEL_SCAN, CANCELLED, CAPABILITIES,
+    CARVE_EXTRACT, CARVE_START, COMPLETED, COPIED, COPY_FILES, Capabilities, CarveParams,
+    CarveStarted, CopyItem, CopyParams, CopyStarted, DiskList, ExtractItem, ExtractParams, FAILED,
+    FOUND, FileListPage, FilePreview, FileTypeList, HEARTBEAT, JobRef, LIST_DISKS, LIST_FILE_TYPES,
+    LIST_FILES, LOG, ListFilesParams, PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS,
+    PartitionRef, PreviewFsParams, PreviewParams, PreviewRangeParams, READ_SCAN, ReadScanParams,
+    SCAN_DELETED, ScanParams, ScanResult, Source, error_code,
 };
 
 use crate::broker::BrokerSession;
@@ -31,6 +31,8 @@ pub const JOB_EVENT: &str = "job-event";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// 打开分区表、列目录、预览可能要读很多数据（十万级的目录、慢速的 USB 盘），等得久一些。
 const BROWSE_TIMEOUT: Duration = Duration::from_secs(120);
+/// 扫描 MFT 有进度、可以随时停下，不设实际的上限（大盘、慢盘、读错误重试都可能很久）。
+const SCAN_TIMEOUT: Duration = Duration::from_secs(24 * 3600);
 /// 引擎每 2 秒一次心跳，超过这么久没有心跳就标为无响应。
 const UNRESPONSIVE_AFTER: Duration = Duration::from_secs(10);
 /// 发出取消后等这么久，引擎还没退出就强制结束它。
@@ -332,6 +334,29 @@ impl Engines {
             self.running(&job_id)?
                 .request(PREVIEW_FS_FILE, params, BROWSE_TIMEOUT)?,
         )
+    }
+
+    /// 找出浏览中的一个分区里已删除的项（NTFS 扫一遍 MFT），扫完才答复；进度经任务事件送到界面。
+    pub fn scan_deleted(&self, job_id: String, partition: u32) -> Result<ScanResult, HostError> {
+        let params = to_params(&ScanParams {
+            job_id: job_id.clone(),
+            partition,
+        })?;
+        from_value(
+            self.running(&job_id)?
+                .request(SCAN_DELETED, params, SCAN_TIMEOUT)?,
+        )
+    }
+
+    /// 停下正在进行的扫描；那次扫描答复 `cancelled`。
+    pub fn cancel_scan(&self, job_id: String, partition: u32) -> Result<(), HostError> {
+        let params = to_params(&ScanParams {
+            job_id: job_id.clone(),
+            partition,
+        })?;
+        self.running(&job_id)?
+            .request(CANCEL_SCAN, params, REQUEST_TIMEOUT)?;
+        Ok(())
     }
 
     /// 把分区里选中的项复制到另一块盘。源为物理磁盘时，引擎在开始前核对输出目录不在这块盘上。

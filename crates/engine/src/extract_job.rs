@@ -44,6 +44,8 @@ pub fn run(
                     path: name,
                     size: item.length,
                     error: None,
+                    // 深度恢复的文件由格式插件确认过结构，不会整份是 0
+                    all_zero: false,
                 });
             }
             Ok(Some(Err(reason))) => {
@@ -52,6 +54,7 @@ pub fn run(
                     path: name,
                     size: item.length,
                     error: Some(reason),
+                    all_zero: false,
                 });
             }
             Ok(None) => {

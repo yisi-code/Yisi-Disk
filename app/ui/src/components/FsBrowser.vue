@@ -195,7 +195,7 @@ async function loadMore(dirId: string) {
       return
     }
     updateDir(dirId, {
-      entries: before.entries.concat(page.entries),
+      entries: before.entries.concat(page.entries.map(withShownName)),
       // 引擎一项也没给时按已加载完处理，免得反复请求
       total: page.entries.length === 0 ? before.entries.length : page.total,
       isLoading: false,
@@ -381,6 +381,11 @@ function statusText(row: StatusRow): string {
 function entryBadge(entry: FsEntry): string | null {
   return entry.deleted ? t(`undelete.state.${entry.state}`) : null
 }
+
+/** 虚拟目录的名字由界面给出；复制时它也是输出目录里的文件夹名 */
+function withShownName(entry: FsEntry): FsEntry {
+  return entry.virtualDir === 'orphans' ? { ...entry, name: t('undelete.browser.orphans') } : entry
+}
 </script>
 
 <template>
@@ -438,7 +443,10 @@ function entryBadge(entry: FsEntry): string | null {
             </span>
             <span
               class="fs-browser__name"
-              :class="{ 'fs-browser__name--dir': row.entry.isDir }"
+              :class="{
+                'fs-browser__name--dir': row.entry.isDir,
+                'fs-browser__name--virtual': row.entry.virtualDir !== null,
+              }"
               :title="row.entry.nameUncertain ? t('undelete.browser.nameUncertain') : undefined"
             >
               {{ row.entry.name }}
@@ -449,6 +457,12 @@ function entryBadge(entry: FsEntry): string | null {
               :class="`fs-browser__badge--${row.entry.state}`"
             >
               {{ entryBadge(row.entry) }}
+            </span>
+            <span
+              v-if="row.entry.unsupported"
+              class="fs-browser__badge fs-browser__badge--unsupported"
+            >
+              {{ t(`undelete.unsupported.${row.entry.unsupported}`) }}
             </span>
             <span class="fs-browser__size">
               {{ row.entry.isDir ? '' : formatBytes(row.entry.size) }}
@@ -536,6 +550,11 @@ function entryBadge(entry: FsEntry): string | null {
   font-weight: 600;
 }
 
+/* 虚拟目录（找不到原目录的文件）不在卷上 */
+.fs-browser__name--virtual {
+  font-style: italic;
+}
+
 /* 已删除：名字划线、变淡，旁边另有文字标签，不只靠颜色区分 */
 .fs-browser__row--deleted .fs-browser__name {
   color: var(--color-text-muted);
@@ -558,6 +577,11 @@ function entryBadge(entry: FsEntry): string | null {
 .fs-browser__badge--overwritten {
   color: var(--color-danger);
   border-color: var(--color-danger);
+}
+
+.fs-browser__badge--unsupported {
+  color: var(--color-text-muted);
+  border-style: dashed;
 }
 
 .fs-browser__size,

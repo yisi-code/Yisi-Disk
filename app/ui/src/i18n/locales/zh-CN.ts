@@ -287,15 +287,27 @@ export default {
       role: '用途',
       start: '起始位置',
       size: '大小',
-      none: '没有能浏览的分区。目前支持 FAT12/16/32 与 exFAT，NTFS 在下一阶段加入；其他情况可以用「按文件类型深度恢复」。',
+      none: '没有能浏览的分区。目前支持 FAT12/16/32、exFAT 与 NTFS；其他情况可以用「按文件类型深度恢复」。',
+      scanHint:
+        'NTFS 分区点「下一步」时，先扫描一遍 MFT（主文件表）找出已删除的文件：大分区可能要几十秒到几分钟，可以随时取消。',
       reason: {
-        ntfs: '暂不支持浏览（下一阶段加入）',
+        ntfs: '读不出 $MFT（主文件表），无法浏览',
         bitlocker: '已加密，无法读取内容',
         ext: '暂不支持浏览',
         unknown: '认不出文件系统',
         unreadable: '读不出引导扇区',
         invalid: '引导扇区的参数不对，无法打开',
       },
+    },
+    scan: {
+      running: '正在扫描 MFT，找出已删除的文件：{done} / {total}（{percent}%）',
+      starting: '正在扫描 MFT，找出已删除的文件…',
+      cancel: '取消扫描',
+      cancelling: '正在取消…',
+      failed: '扫描 MFT 失败：{reason}',
+      summary: 'MFT 共 {records} 条记录，找到 {deleted} 个已删除的文件和文件夹。',
+      orphans: '其中 {count} 个原来所在的文件夹已不在，列在「找不到原目录的文件」里。',
+      unreadable: '有 {count} 条 MFT 记录读不出，其中的文件找不到。',
     },
     browse: {
       source: '来源',
@@ -305,12 +317,14 @@ export default {
       liveHint:
         '读的是磁盘上此刻的内容。分区正在使用时，刚写入的文件可能还没落盘；要找回删除的文件，请先停止往这块盘写东西。',
       stateHint:
-        '「可能完整」只表示存放它的位置还没被别的文件占用，不保证内容一定对；复制出来后请打开核对。父目录已被覆盖的文件在这里找不到，可以试试「按文件类型深度恢复」。',
+        '「可能完整」只表示存放它的位置还没被别的文件占用，不保证内容一定对；复制出来后请打开核对。固态硬盘开了 TRIM 时，删除的文件常常已被清零。在这里找不到的文件，可以试试「按文件类型深度恢复」。',
+      timesUtc: '这个分区记录的是 UTC 时间，与资源管理器里显示的本地时间可能差几个小时。',
     },
     browser: {
       title: '分区里的文件',
       check: '选择 {name}',
       nameUncertain: '名字不完整：删除时丢了首字母',
+      orphans: '找不到原目录的文件',
       hint: '单击文件夹展开或收起，单击文件查看详情，双击文件用默认程序打开；方向键移动，空格勾选。',
       status: {
         loading: '正在读取…',
@@ -327,7 +341,21 @@ export default {
       overwritten: '已删除 · 已被覆盖',
       unknown: '已删除 · 无法判断',
     },
+    unsupported: {
+      compressed: 'NTFS 压缩 · 暂不支持',
+      encrypted: '已加密 · 暂不支持',
+      systemCompressed: '系统压缩 · 暂不支持',
+      reparse: '链接 · 暂不支持',
+    },
+    unsupportedDetail: {
+      compressed: '用 NTFS 压缩存放，暂不支持解压，读不出原内容。',
+      encrypted: '用 EFS 加密存放，读出来是密文，无法打开。',
+      systemCompressed: '用 Windows 的系统压缩（WOF / CompactOS）存放，内容在压缩流里，暂不支持读出。',
+      reparse: '这是符号链接、目录联接或云端占位文件，内容不在这里。',
+    },
     stateDetail: {
+      orphans:
+        '虚拟文件夹，不在卷上：这些已删除的文件原来所在的文件夹已不在（它的 MFT 记录已被别的文件重用），集中列在这里',
       live: '未删除',
       intact: '已删除。存放它的位置目前没有被别的文件占用，很可能完整',
       overwritten: '已删除。存放它的位置已经有一部分分给了别的文件，内容至少部分被覆盖',
@@ -345,6 +373,9 @@ export default {
       modified: '修改时间',
       created: '创建时间',
       position: '数据位置',
+      record: 'MFT 记录',
+      storage: '存放方式',
+      utcTime: '{time}（UTC）',
       positionValue: '{position}（偏移 {offset}，扇区 {sector}）',
       open: '用默认程序打开',
       openHint: '打开前会先把它复制到下方的保存位置。',
@@ -358,10 +389,12 @@ export default {
       start: '复制选中的 {count} 项',
       failedCount: '{count} 个文件没能复制',
       failedItem: '{path}：{reason}',
+      allZero: '{count} 个文件复制出来全是 0：多半已被清除（例如固态硬盘的 TRIM），内容找不回来了。',
       reveal: '在文件夹中显示',
       status: {
         starting: '正在启动复制…',
         running: '已复制 {done} / {total}（{percent}%），{count} 个文件',
+        scanning: '正在扫描 MFT，找出文件夹里已删除的文件（{percent}%）…',
         completed: '复制完成',
         failed: '复制失败',
         cancelled: '已取消；已经复制好的文件仍保留在保存位置',

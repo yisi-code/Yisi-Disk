@@ -1,17 +1,21 @@
-//! 浏览分区：读分区表、按需打开卷、列目录（排好序缓存、分页给出）、预览文件。只读源盘。
+//! 浏览分区：读分区表、按需打开卷、扫描已删除的项（NTFS 扫 MFT）、列目录（排好序缓存、分页给出）、
+//! 预览文件。只读源盘。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Instant;
 
 use yisi_engine::protocol::{
     self, BrowseOpened, FileListPage, FilePreview, FsEntry, ListFilesParams, MAX_PAGE,
-    PartitionInfo,
+    PartitionInfo, ScanResult,
 };
-use yisi_fs::{FileRef, FsKind, State, Volume};
+use yisi_fs::{FileRef, FsKind, State, Unsupported, Volume};
 use yisi_io::BlockDevice;
 use yisi_part::{Note, Partition, PartitionKind, PartitionTable, Role, Scheme};
 use yisi_rpc::{ErrorObject, error_code};
 
+use crate::job::ProgressSender;
 use crate::preview;
 use crate::runtime::error_chain;
 
@@ -19,12 +23,19 @@ use crate::runtime::error_chain;
 const PAGE_BYTES: usize = 768 * 1024;
 /// 最多缓存这么多个目录的排序结果，满了整个清空。
 const MAX_CACHED_DIRS: usize = 64;
+/// 扫描进度里的阶段名。
+pub const STAGE_SCAN_MFT: &str = "scanMft";
 
 pub struct Session {
     device: Arc<dyn BlockDevice>,
     table: PartitionTable,
     volumes: Mutex<HashMap<u32, Arc<Volume>>>,
     listings: Mutex<HashMap<(u32, String), Arc<SortedDir>>>,
+    progress: ProgressSender,
+    /// 正在扫描的分区各自的停止标记。
+    scans: Mutex<HashMap<u32, Arc<AtomicBool>>>,
+    /// 浏览任务已取消：正在进行的扫描都停下。
+    closing: AtomicBool,
 }
 
 struct SortedDir {
@@ -34,8 +45,11 @@ struct SortedDir {
 }
 
 impl Session {
-    /// 读分区表，识别每个分区的文件系统；能浏览的分区顺便打开，取出卷标。
-    pub fn open(device: Arc<dyn BlockDevice>) -> Result<(Self, BrowseOpened), ErrorObject> {
+    /// 读分区表，识别每个分区的文件系统；能浏览的分区顺便打开，取出卷标。扫描的进度经 `progress` 发出。
+    pub fn open(
+        device: Arc<dyn BlockDevice>,
+        progress: ProgressSender,
+    ) -> Result<(Self, BrowseOpened), ErrorObject> {
         let table = yisi_part::read_table(device.as_ref()).map_err(|error| {
             ErrorObject::new(
                 protocol::error_code::SOURCE_UNAVAILABLE,
@@ -47,6 +61,9 @@ impl Session {
             table,
             volumes: Mutex::new(HashMap::new()),
             listings: Mutex::new(HashMap::new()),
+            progress,
+            scans: Mutex::new(HashMap::new()),
+            closing: AtomicBool::new(false),
         };
         let partitions = session
             .table
@@ -71,11 +88,8 @@ impl Session {
 
     fn describe(&self, partition: &Partition) -> PartitionInfo {
         let detected = yisi_fs::detect(self.device.as_ref(), partition.offset, partition.length);
-        let label = match detected {
-            Ok(kind) if kind.is_browsable() => self
-                .volume(partition.number)
-                .ok()
-                .and_then(|volume| volume.label().map(str::to_owned)),
+        let volume = match detected {
+            Ok(kind) if kind.is_browsable() => self.volume(partition.number).ok(),
             _ => None,
         };
         let (type_id, name, bootable, logical) = match &partition.kind {
@@ -108,10 +122,75 @@ impl Session {
                 Err(_) => "unreadable",
             }
             .to_owned(),
-            label,
-            browsable: detected.is_ok_and(FsKind::is_browsable)
-                && self.volume(partition.number).is_ok(),
+            label: volume
+                .as_ref()
+                .and_then(|volume| volume.label().map(str::to_owned)),
+            browsable: volume.is_some(),
+            needs_scan: volume.as_ref().is_some_and(|volume| volume.needs_scan()),
+            times_utc: volume.as_ref().is_some_and(|volume| volume.times_utc()),
         }
+    }
+
+    /// 找出分区里已删除的项：NTFS 扫一遍 MFT，期间发进度；被停下时答复 `cancelled`。
+    /// 扫完清掉这个分区已缓存的目录，之后列目录才带上已删除的项。
+    pub fn scan(&self, partition: u32) -> Result<ScanResult, ErrorObject> {
+        let volume = self.volume(partition)?;
+        let stop = Arc::clone(
+            lock(&self.scans)
+                .entry(partition)
+                .or_insert_with(|| Arc::new(AtomicBool::new(false))),
+        );
+        let started = Instant::now();
+        let outcome = volume.scan(&mut |done, total| {
+            self.progress.send(Some(STAGE_SCAN_MFT), done, total);
+            !stop.load(Ordering::Relaxed) && !self.closing.load(Ordering::Relaxed)
+        });
+        {
+            let mut scans = lock(&self.scans);
+            if scans
+                .get(&partition)
+                .is_some_and(|current| Arc::ptr_eq(current, &stop))
+            {
+                scans.remove(&partition);
+            }
+        }
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let summary = outcome.map_err(|error| fs_error(error_chain(&error)))?;
+        let Some(summary) = summary else {
+            return Ok(ScanResult {
+                cancelled: true,
+                records: 0,
+                in_use: 0,
+                deleted: 0,
+                deleted_names: 0,
+                orphans: 0,
+                unreadable: 0,
+                elapsed_ms,
+            });
+        };
+        lock(&self.listings).retain(|(number, _), _| *number != partition);
+        Ok(ScanResult {
+            cancelled: false,
+            records: summary.records,
+            in_use: summary.in_use,
+            deleted: summary.deleted,
+            deleted_names: summary.deleted_names,
+            orphans: summary.orphans,
+            unreadable: summary.unreadable,
+            elapsed_ms,
+        })
+    }
+
+    /// 停下分区 `partition` 正在进行的扫描；没有在扫时什么也不做。
+    pub fn cancel_scan(&self, partition: u32) {
+        if let Some(stop) = lock(&self.scans).get(&partition) {
+            stop.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// 浏览任务结束：停下全部扫描。
+    pub fn close(&self) {
+        self.closing.store(true, Ordering::Relaxed);
     }
 
     /// 打开（或取出已打开的）分区 `number` 上的卷。
@@ -199,10 +278,12 @@ impl Session {
             .entries
             .into_iter()
             .map(|entry| FsEntry {
-                position: (entry.is_dir() || entry.size > 0)
-                    .then(|| volume.first_offset(&entry.file))
-                    .flatten()
-                    .and_then(|offset| offset.checked_add(base)),
+                position: entry.position.and_then(|offset| offset.checked_add(base)),
+                unsupported: entry
+                    .unsupported
+                    .map(|reason| unsupported_key(reason).to_owned()),
+                record: entry.file.record(),
+                virtual_dir: entry.file.is_orphans().then(|| "orphans".to_owned()),
                 name: entry.name,
                 short_name: entry.short_name,
                 name_uncertain: entry.name_uncertain,
@@ -261,6 +342,15 @@ fn state_key(state: State) -> &'static str {
         State::Intact => "intact",
         State::Overwritten => "overwritten",
         State::Unknown => "unknown",
+    }
+}
+
+fn unsupported_key(reason: Unsupported) -> &'static str {
+    match reason {
+        Unsupported::Compressed => "compressed",
+        Unsupported::Encrypted => "encrypted",
+        Unsupported::SystemCompressed => "systemCompressed",
+        Unsupported::Reparse => "reparse",
     }
 }
 

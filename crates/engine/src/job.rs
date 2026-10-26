@@ -43,7 +43,44 @@ pub struct JobContext {
     id: String,
     outbox: Arc<Outbox>,
     cancel: Arc<AtomicBool>,
-    last_progress: Mutex<Option<Instant>>,
+    progress: ProgressSender,
+}
+
+/// 一个任务的进度通知，节流到每秒最多 10 次。浏览任务的扫描在会话的线程里报进度，也用它。
+pub struct ProgressSender {
+    id: String,
+    outbox: Arc<Outbox>,
+    last: Mutex<Option<Instant>>,
+}
+
+impl ProgressSender {
+    pub fn new(id: String, outbox: Arc<Outbox>) -> Self {
+        Self {
+            id,
+            outbox,
+            last: Mutex::new(None),
+        }
+    }
+
+    /// 距上次不足 [`PROGRESS_INTERVAL`] 时丢弃，但完成那一次（`done == total`）总会发出。
+    pub fn send(&self, stage: Option<&str>, done: u64, total: u64) {
+        let now = Instant::now();
+        let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        let due = last.is_none_or(|sent| now.duration_since(sent) >= PROGRESS_INTERVAL);
+        if !due && done != total {
+            return;
+        }
+        *last = Some(now);
+        self.outbox.notify(
+            PROGRESS,
+            Progress {
+                job_id: self.id.clone(),
+                done,
+                total,
+                stage: stage.map(str::to_owned),
+            },
+        );
+    }
 }
 
 impl JobContext {
@@ -62,24 +99,12 @@ impl JobContext {
 
     /// 报告进度。距上次不足 [`PROGRESS_INTERVAL`] 时丢弃，但完成那一次（`done == total`）总会发出。
     pub fn progress(&self, done: u64, total: u64) {
-        let now = Instant::now();
-        let mut last = self
-            .last_progress
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let due = last.is_none_or(|sent| now.duration_since(sent) >= PROGRESS_INTERVAL);
-        if !due && done != total {
-            return;
-        }
-        *last = Some(now);
-        self.outbox.notify(
-            PROGRESS,
-            Progress {
-                job_id: self.id.clone(),
-                done,
-                total,
-            },
-        );
+        self.progress.send(None, done, total);
+    }
+
+    /// 报告任务里某个阶段的进度，规则同 [`progress`](Self::progress)。
+    pub fn stage_progress(&self, stage: &str, done: u64, total: u64) {
+        self.progress.send(Some(stage), done, total);
     }
 }
 
@@ -92,9 +117,9 @@ where
     let cancel = Arc::new(AtomicBool::new(false));
     let context = JobContext {
         id: id.clone(),
+        progress: ProgressSender::new(id.clone(), Arc::clone(&outbox)),
         outbox,
         cancel: Arc::clone(&cancel),
-        last_progress: Mutex::new(None),
     };
     thread::spawn(move || {
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| work(&context)));

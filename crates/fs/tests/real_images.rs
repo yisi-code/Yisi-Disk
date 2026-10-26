@@ -1,5 +1,6 @@
 //! 对照 Windows 自己格式化、写入、删除过的镜像（由 `make-test-images.ps1` 生成）：
 //! 按清单逐个找到文件，未删除的内容必须一致，已删除的报告判断结果与内容是否一致。
+//! NTFS 卷先扫一遍 MFT，已删除的项才列得出。
 //!
 //! 手动运行（PowerShell）：
 //! `$env:YISI_FS_TEST_IMAGES = '<镜像目录>'; cargo test -p yisi-fs --test real_images -- --ignored --nocapture`
@@ -9,8 +10,9 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
-use yisi_fs::{Entry, FileRef, State, Volume};
+use yisi_fs::{Entry, FileRef, FsKind, State, Unsupported, Volume};
 use yisi_io::{BlockDevice, RawImage};
 
 struct Expected {
@@ -54,6 +56,11 @@ fn check_image(image: &Path, failures: &mut Vec<String>) {
         if let Ok(volume) = Volume::open(Arc::clone(&device), partition.offset, partition.length) {
             let label = volume.label().unwrap_or_default().to_owned();
             println!("    卷标 {label}，簇 {} 字节", volume.cluster_size());
+            if volume.needs_scan() {
+                let started = Instant::now();
+                let summary = volume.scan(&mut |_, _| true).unwrap().unwrap();
+                println!("    扫描 MFT {:?}：{summary:?}", started.elapsed());
+            }
             volumes.insert(label, volume);
         }
     }
@@ -89,9 +96,13 @@ fn check_file(volume: &Volume, expected: &Expected, failures: &mut Vec<String>) 
         .is_ok_and(|data| data.len() as u64 == expected.length && sha256_hex(data) == expected.sha);
     if !expected.path.starts_with("many/") || !matches {
         println!(
-            "  {shown:<90} {:<20} {:?} 名字 {:?}{} 内容{}",
+            "  {shown:<90} {:<20} {:?}{} 名字 {:?}{} 内容{}",
             expected.kind,
             entry.state,
+            entry
+                .unsupported
+                .map(|reason| format!("（{reason}）"))
+                .unwrap_or_default(),
             entry.name,
             if entry.name_uncertain {
                 "（不确定）"
@@ -108,7 +119,8 @@ fn check_file(volume: &Volume, expected: &Expected, failures: &mut Vec<String>) 
     if entry.deleted() != want_deleted {
         failures.push(format!("{shown}：删除标记为 {}", entry.deleted()));
     }
-    if entry.size != expected.length {
+    // 判为无法判断的已删除文件，长度本身也可能已不可知（NTFS 删除时截成 0 字节的文件）
+    if entry.size != expected.length && !(entry.deleted() && entry.state == State::Unknown) {
         failures.push(format!(
             "{shown}：长度 {} 应为 {}",
             entry.size, expected.length
@@ -116,10 +128,18 @@ fn check_file(volume: &Volume, expected: &Expected, failures: &mut Vec<String>) 
     }
     let must_match = match expected.kind.as_str() {
         "live" | "live-fragmented" => true,
+        // NTFS 压缩暂不支持读出，要明确标出来
+        "live-compressed" => {
+            if entry.unsupported != Some(Unsupported::Compressed) {
+                failures.push(format!("{shown}：没有标为 NTFS 压缩"));
+            }
+            false
+        }
         // 已删除且判为「可能完整」的连续文件，内容应当对得上
         "deleted" | "deleted-shortname" => entry.state == State::Intact,
-        // 碎片文件删除后：FAT 的簇链已清零，读不对是已知局限；exFAT 的 FAT 链还在，应当对得上
-        _ => false,
+        // 碎片文件删除后：FAT 的簇链已清零，读不对是已知局限；exFAT 的 FAT 链一般还在（只打印结果）；
+        // NTFS 删除时不清运行表，判为「可能完整」的应当对得上
+        _ => volume.kind() == FsKind::Ntfs && entry.state == State::Intact,
     };
     if must_match && !matches {
         failures.push(format!("{shown}：内容不一致（{:?}）", entry.state));

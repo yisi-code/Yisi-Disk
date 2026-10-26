@@ -27,7 +27,7 @@ const MAX_LISTED_FAILURES = 20
 
 const emit = defineEmits<{ exit: [] }>()
 
-const { t, te } = useI18n()
+const { t, te, locale } = useI18n()
 const { formatHostError } = useHostErrorText()
 const browse = useBrowse()
 const copy = useCopy()
@@ -70,7 +70,7 @@ const canGoNext = computed(() => {
     case 'source':
       return target.value !== null && !browse.isTransitioning.value
     case 'partition':
-      return currentPartition.value?.browsable === true
+      return currentPartition.value?.browsable === true && !browse.isScanning.value
     case 'browse':
       return false
   }
@@ -84,6 +84,27 @@ const copyItems = computed<CopyItem[]>(() => {
     .filter((item) => !ids.some((other) => other !== item.id && item.id.startsWith(`${other}/`)))
     .map((item) => ({ file: item.entry.file, path: item.path }))
 })
+
+/** 当前分区扫描已删除项的结果（只有 NTFS 有） */
+const currentScan = computed(() =>
+  currentPartition.value === null
+    ? null
+    : (browse.scanResults.value.get(currentPartition.value.number) ?? null),
+)
+const needsScanHint = computed(() => partitions.value.some((partition) => partition.needsScan))
+
+const scanStatusText = computed(() =>
+  browse.scanTotal.value > 0
+    ? t('undelete.scan.running', {
+        done: formatBytes(browse.scanDone.value),
+        total: formatBytes(browse.scanTotal.value),
+        percent: browse.scanPercent.value,
+      })
+    : t('undelete.scan.starting'),
+)
+
+/** 复制出来全是 0 的文件 */
+const zeroFiles = computed(() => copy.succeeded.value.filter((file) => file.allZero))
 
 const canCopy = computed(
   () => copyItems.value.length > 0 && !copy.isBusy.value && browse.isOpen.value,
@@ -109,6 +130,9 @@ const copyStatusText = computed(() => {
       return t('undelete.copy.status.starting')
     case 'running':
     case 'cancelling':
+      if (copy.stage.value === 'scanMft') {
+        return t('undelete.copy.status.scanning', { percent: copy.percent.value })
+      }
       return t('undelete.copy.status.running', {
         done: formatBytes(copy.done.value),
         total: formatBytes(copy.total.value),
@@ -183,7 +207,7 @@ async function handleExit() {
 
 async function goBack() {
   const previous = STEPS[stepIndex.value - 1]
-  if (previous === undefined || copy.isBusy.value) {
+  if (previous === undefined || copy.isBusy.value || browse.isScanning.value) {
     return
   }
   dialogError.value = null
@@ -198,8 +222,23 @@ async function handleSubmit() {
   if (step.value === 'source') {
     await openSource()
   } else if (step.value === 'partition' && canGoNext.value) {
-    step.value = 'browse'
+    await enterPartition()
   }
+}
+
+/** NTFS 分区先扫一遍 MFT 找出已删除的项（扫过的直接进入），被取消或失败时留在分区这一步 */
+async function enterPartition() {
+  const partition = currentPartition.value
+  if (partition === null) {
+    return
+  }
+  if (partition.needsScan && !browse.scanResults.value.has(partition.number)) {
+    const result = await browse.scan(partition.number)
+    if (result === null || step.value !== 'partition') {
+      return
+    }
+  }
+  step.value = 'browse'
 }
 
 async function openSource() {
@@ -258,7 +297,7 @@ async function handleCopy() {
 
 /** 双击文件或点「用默认程序打开」：先把它复制到保存位置，复制好再交给系统打开 */
 async function openItem(item: TreeItem) {
-  if (item.entry.isDir || copy.isBusy.value) {
+  if (item.entry.isDir || item.entry.unsupported !== null || copy.isBusy.value) {
     return
   }
   selectedItem.value = item
@@ -412,7 +451,7 @@ function noteText(note: string): string {
                   type="radio"
                   name="undelete-partition"
                   :value="partition.number"
-                  :disabled="!partition.browsable"
+                  :disabled="!partition.browsable || browse.isScanning.value"
                 />
               </td>
               <th scope="row">
@@ -436,6 +475,28 @@ function noteText(note: string): string {
         <p v-if="!partitions.some((partition) => partition.browsable)" class="wizard__note">
           {{ t('undelete.partition.none') }}
         </p>
+        <p v-if="needsScanHint" class="wizard__hint">{{ t('undelete.partition.scanHint') }}</p>
+        <div v-if="browse.isScanning.value" class="wizard__job" aria-live="polite">
+          <progress
+            class="wizard__progress"
+            :value="browse.scanDone.value"
+            :max="browse.scanTotal.value || 1"
+          ></progress>
+          <p class="wizard__status">{{ scanStatusText }}</p>
+          <div>
+            <button
+              class="wizard__button wizard__button--secondary"
+              type="button"
+              :disabled="browse.isCancellingScan.value"
+              @click="browse.stopScan"
+            >
+              {{ browse.isCancellingScan.value ? t('undelete.scan.cancelling') : t('undelete.scan.cancel') }}
+            </button>
+          </div>
+        </div>
+        <p v-if="browse.scanFailure.value" class="wizard__error" role="alert">
+          {{ t('undelete.scan.failed', { reason: formatHostError(browse.scanFailure.value) }) }}
+        </p>
       </div>
 
       <div v-else-if="currentPartition && browse.jobId.value" class="wizard__panel">
@@ -454,6 +515,20 @@ function noteText(note: string): string {
             }}
           </dd>
         </dl>
+        <p v-if="currentScan" class="wizard__note">
+          {{
+            t('undelete.scan.summary', {
+              records: currentScan.records.toLocaleString(locale),
+              deleted: currentScan.deleted.toLocaleString(locale),
+            })
+          }}
+          <template v-if="currentScan.orphans > 0">
+            {{ t('undelete.scan.orphans', { count: currentScan.orphans.toLocaleString(locale) }) }}
+          </template>
+          <template v-if="currentScan.unreadable > 0">
+            {{ t('undelete.scan.unreadable', { count: currentScan.unreadable.toLocaleString(locale) }) }}
+          </template>
+        </p>
         <p v-if="isSourceDisk" class="wizard__hint">{{ t('undelete.browse.liveHint') }}</p>
         <p v-if="browse.isUnresponsive.value" class="wizard__error" role="alert">
           {{ t('carve.run.unresponsive') }}
@@ -480,6 +555,7 @@ function noteText(note: string): string {
             :partition="currentPartition.number"
             :item="selectedItem"
             :sector-size="browse.opened.value?.sectorSize ?? 512"
+            :times-utc="currentPartition.timesUtc"
             :can-open="!copy.isBusy.value && browse.isOpen.value"
             :action-error="fileActionError"
             :action-note="fileActionNote"
@@ -487,6 +563,9 @@ function noteText(note: string): string {
           />
         </div>
         <p class="wizard__hint">{{ t('undelete.browse.stateHint') }}</p>
+        <p v-if="currentPartition.timesUtc" class="wizard__hint">
+          {{ t('undelete.browse.timesUtc') }}
+        </p>
 
         <div class="wizard__path">
           <label class="wizard__label" for="undelete-output-dir">{{ t('undelete.copy.label') }}</label>
@@ -536,6 +615,16 @@ function noteText(note: string): string {
           <p v-if="copy.failure.value" class="wizard__error" role="alert">
             {{ formatHostError(copy.failure.value) }}
           </p>
+          <template v-if="zeroFiles.length > 0">
+            <p class="wizard__hint wizard__hint--warning">
+              {{ t('undelete.copy.allZero', { count: zeroFiles.length }) }}
+            </p>
+            <ul class="undelete-wizard__failures">
+              <li v-for="file in zeroFiles.slice(0, MAX_LISTED_FAILURES)" :key="file.path">
+                {{ file.path }}
+              </li>
+            </ul>
+          </template>
           <template v-if="copy.failures.value.length > 0">
             <p class="wizard__error">
               {{ t('undelete.copy.failedCount', { count: copy.failures.value.length }) }}
@@ -591,7 +680,7 @@ function noteText(note: string): string {
           v-if="stepIndex > 0"
           class="wizard__button wizard__button--secondary"
           type="button"
-          :disabled="copy.isBusy.value"
+          :disabled="copy.isBusy.value || browse.isScanning.value"
           @click="goBack"
         >
           {{ t('carve.previous') }}
