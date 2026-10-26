@@ -12,8 +12,16 @@ fn main() {
         "recovered_preview",
         "recovered_open",
         "recovered_reveal",
+        "carve_preview_range",
+        "job_start_extract",
+        "browse_open",
+        "browse_list",
+        "browse_preview",
         "browse_scan",
         "browse_cancel_scan",
+        "job_start_copy",
+        "copied_open",
+        "copied_reveal",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("tauri-build 执行失败");

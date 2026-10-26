@@ -42,6 +42,7 @@ cargo test --workspace
 - 界面只运行在 Tauri 桌面窗口中，不考虑浏览器与移动端；窗口最小 960×640。开发服务器只绑定 `127.0.0.1`。
 - TypeScript `strict`；组件一律 `<script setup lang="ts">` 加组合式 API。
 - 与宿主的通信集中在一个服务层，组件不直接调用 Tauri 命令。宿主返回的错误是 `{code, detail}`，界面按 `code` 取 `errors.*` 文案显示，不直接展示宿主给出的句子。
+- 新增宿主命令要同时登记三处：`main.rs` 的 `generate_handler!`、`build.rs` 的 `AppManifest::commands`、`capabilities/default.json` 的 `allow-*`（下划线换成连字符）。漏掉后两处不会编译失败，但运行时界面调用会被 ACL 拒绝（`Command xxx not allowed by ACL`）。
 - 用户可见文案全部走国际化资源，不在组件里硬编码。被多处使用的组件，文案放在它自己的命名空间下（例如磁盘列表用 `disk.*`），不挂在某个使用方名下。
 - 任务（读取扫描、深度恢复等）的发起、取消、进度、无响应与终结统一用 `composables/useJob`，任务 ID 在调用宿主之前生成；各类任务的组合函数只处理自己的结果。
 - 恢复出的文件内容不得用 `v-html` 或 `<iframe>` 渲染。
