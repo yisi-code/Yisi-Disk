@@ -17,8 +17,16 @@ pub const LIST_DISKS: &str = "disk.list";
 /// 列出深度恢复支持的格式：没有参数，结果是 [`FileTypeList`]。
 pub const LIST_FILE_TYPES: &str = "carve.listFileTypes";
 /// 深度恢复（任务）：参数 [`CarveParams`]，立即返回 [`CarveStarted`]；找到的文件经 [`FOUND`] 通知分批送达，结果是 [`CarveSummary`]。
-/// 源为物理磁盘时，输出目录必须在另一块盘上，否则答复 [`error_code::OUTPUT_ON_SOURCE`]。
+/// 给了输出目录时边扫边保存，源为物理磁盘时输出目录必须在另一块盘上，否则答复 [`error_code::OUTPUT_ON_SOURCE`]；
+/// 不给时只扫描、什么都不写，之后用 [`CARVE_EXTRACT`] 保存选中的文件。
 pub const CARVE_START: &str = "carve.start";
+/// 保存「只扫描」时找到的文件（任务）：参数 [`ExtractParams`]，立即返回 [`CopyStarted`]；
+/// 每个文件在源上那一段重新跑一遍深度恢复，起点与长度和扫描时一致才保存。保存结果经 [`COPIED`] 分批通知
+/// （路径即文件名），结果是 [`CopySummary`]。输出目录的规则同 [`CARVE_START`]。
+pub const CARVE_EXTRACT: &str = "carve.extract";
+/// 预览源上的一段：参数 [`PreviewRangeParams`]，结果是 [`FilePreview`]，规则同 [`PREVIEW_FILE`]。
+/// 用来预览只扫描、还没保存的文件。
+pub const PREVIEW_RANGE: &str = "preview.range";
 /// 预览一个文件：参数 [`PreviewParams`]，结果是 [`FilePreview`]。只读打开；JPEG、PNG 在引擎里解码、缩小后重新编码成 PNG，
 /// 界面只显示这份缩略图，不直接渲染恢复出的文件。打不开时答复 [`error_code::PREVIEW_UNAVAILABLE`]。
 pub const PREVIEW_FILE: &str = "preview.file";
@@ -193,8 +201,9 @@ pub struct FileType {
 pub struct CarveParams {
     pub job_id: String,
     pub source: Source,
-    /// 在这个目录下新建 `recovered-<任务 ID 前 8 位>` 子目录存放结果。
-    pub output_dir: String,
+    /// 在这个目录下新建 `recovered-<任务 ID 前 8 位>` 子目录，边扫边保存；不给时只扫描、什么都不写。
+    #[serde(default)]
+    pub output_dir: Option<String>,
     /// 要恢复的格式（扩展名）；不给时用各格式的默认设置。
     #[serde(default)]
     pub extensions: Option<Vec<String>>,
@@ -203,8 +212,8 @@ pub struct CarveParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CarveStarted {
-    /// 实际存放结果的目录（[`CarveParams::output_dir`] 下新建的子目录）。
-    pub output_dir: String,
+    /// 实际存放结果的目录（[`CarveParams::output_dir`] 下新建的子目录）；只扫描时为空。
+    pub output_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,8 +238,8 @@ pub struct FoundFile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CarveSummary {
-    /// 实际存放结果的目录。
-    pub output_dir: String,
+    /// 实际存放结果的目录；只扫描时为空。
+    pub output_dir: Option<String>,
     pub files: u64,
     pub bytes: u64,
     /// 按扩展名统计。
@@ -244,6 +253,34 @@ pub struct CarveSummary {
 pub struct TypeTotal {
     pub count: u64,
     pub bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractParams {
+    pub job_id: String,
+    /// 扫描时的源。
+    pub source: Source,
+    pub items: Vec<ExtractItem>,
+    /// 在这个目录下新建 `recovered-<任务 ID 前 8 位>` 子目录存放结果。
+    pub output_dir: String,
+}
+
+/// 只扫描时找到的一个文件（[`FoundFile`] 的位置、长度与格式）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractItem {
+    pub offset: u64,
+    pub length: u64,
+    pub extension: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewRangeParams {
+    pub source: Source,
+    pub offset: u64,
+    pub length: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

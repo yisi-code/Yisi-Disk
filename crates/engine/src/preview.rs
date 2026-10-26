@@ -7,12 +7,47 @@ use std::path::Path;
 
 use image::{ImageFormat, ImageReader, Limits};
 use yisi_engine::protocol::{FilePreview, ImagePreview, PREVIEW_HEAD_BYTES, THUMBNAIL_EDGE};
+use yisi_io::{BlockDevice, Window};
 
 /// 超过这个大小的图片不解码，只给十六进制视图。
 const MAX_IMAGE_FILE: u64 = 64 << 20;
 /// 解码时允许分配的内存上限，挡住尺寸字段离谱的图片。
 const MAX_DECODE_ALLOC: u64 = 256 << 20;
 const MAX_IMAGE_EDGE: u32 = 16_384;
+
+/// 预览源上从 `offset` 起 `length` 字节（只扫描、还没保存的文件）。超出源末尾的部分截掉。
+pub fn preview_range(
+    device: &dyn BlockDevice,
+    offset: u64,
+    length: u64,
+) -> io::Result<FilePreview> {
+    let window = Window::new(device, offset, length);
+    let length = window.size();
+    preview_from(
+        DeviceReader {
+            device: &window,
+            position: 0,
+        },
+        length,
+    )
+}
+
+/// 从块设备开头顺序读。
+struct DeviceReader<'d> {
+    device: &'d dyn BlockDevice,
+    position: u64,
+}
+
+impl Read for DeviceReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = self
+            .device
+            .read_at(self.position, buf)
+            .map_err(io::Error::other)?;
+        self.position += read as u64;
+        Ok(read)
+    }
+}
 
 pub fn preview(path: &Path) -> io::Result<FilePreview> {
     let file = File::open(path)?;

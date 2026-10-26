@@ -9,12 +9,13 @@ use std::thread;
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use yisi_carve::DirectorySink;
+use yisi_carve::{DirectorySink, ScanOnlySink, Sink};
 use yisi_engine::protocol::{
-    self, BROWSE_OPEN, BrowseParams, CANCEL, CAPABILITIES, CARVE_START, COPY_FILES, Capabilities,
-    CarveParams, CarveStarted, CopyParams, CopyStarted, HEARTBEAT, HEARTBEAT_INTERVAL, JobRef,
-    LIST_DISKS, LIST_FILE_TYPES, LIST_FILES, ListFilesParams, PREVIEW_FILE, PREVIEW_FS_FILE,
-    PreviewFsParams, PreviewParams, READ_SCAN, ReadScanParams, Source,
+    self, BROWSE_OPEN, BrowseParams, CANCEL, CAPABILITIES, CARVE_EXTRACT, CARVE_START, COPY_FILES,
+    Capabilities, CarveParams, CarveStarted, CopyParams, CopyStarted, ExtractParams, HEARTBEAT,
+    HEARTBEAT_INTERVAL, JobRef, LIST_DISKS, LIST_FILE_TYPES, LIST_FILES, ListFilesParams,
+    PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PreviewFsParams, PreviewParams,
+    PreviewRangeParams, READ_SCAN, ReadScanParams, Source,
 };
 #[cfg(windows)]
 use yisi_engine::protocol::{DiskList, DiskSummary};
@@ -28,7 +29,7 @@ use yisi_rpc::{
 use crate::browse::{self, Session};
 use crate::copy_job::{self, Planned};
 use crate::job::{self, JobOutcome, RunningJob};
-use crate::{carve_job, preview, read_scan};
+use crate::{carve_job, extract_job, preview, read_scan};
 
 /// 浏览任务每隔这么久看一次有没有被取消。
 const BROWSE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
@@ -170,6 +171,8 @@ fn dispatch_now(
                 LIST_FILE_TYPES.to_owned(),
                 CARVE_START.to_owned(),
                 PREVIEW_FILE.to_owned(),
+                CARVE_EXTRACT.to_owned(),
+                PREVIEW_RANGE.to_owned(),
                 BROWSE_OPEN.to_owned(),
                 LIST_FILES.to_owned(),
                 PREVIEW_FS_FILE.to_owned(),
@@ -222,17 +225,27 @@ fn dispatch_now(
                         format!("不认识的格式 {extension}"),
                     )
                 })?;
-            let output_dir = Path::new(&params.output_dir)
-                .join(format!("recovered-{}", short_id(&params.job_id)));
-            let device = open_source_for_output(&params.source, &output_dir)?;
-            let sink = DirectorySink::new(&output_dir).map_err(|error| {
-                ErrorObject::new(
-                    protocol::error_code::OUTPUT_UNAVAILABLE,
-                    format!("无法创建输出目录 {}：{error}", output_dir.display()),
-                )
-            })?;
+            // 不给输出目录时只扫描：什么都不写，也就不用核对输出盘
+            let output_dir = params
+                .output_dir
+                .as_ref()
+                .map(|dir| Path::new(dir).join(format!("recovered-{}", short_id(&params.job_id))));
+            let (device, mut sink): (Box<dyn BlockDevice>, Box<dyn Sink + Send>) = match &output_dir
+            {
+                Some(dir) => {
+                    let device = open_source_for_output(&params.source, dir)?;
+                    (
+                        device,
+                        Box::new(
+                            DirectorySink::new(dir)
+                                .map_err(|error| output_unavailable(dir, &error))?,
+                        ),
+                    )
+                }
+                None => (open_source(&params.source)?, Box::new(ScanOnlySink)),
+            };
             let started = CarveStarted {
-                output_dir: output_dir.display().to_string(),
+                output_dir: output_dir.as_ref().map(|dir| dir.display().to_string()),
             };
             let finished = events.clone();
             state.job = Some(job::start(
@@ -243,8 +256,8 @@ fn dispatch_now(
                         device.as_ref(),
                         &registry,
                         enabled,
-                        sink,
-                        &output_dir,
+                        sink.as_mut(),
+                        output_dir.as_deref(),
                         context,
                     )
                 },
@@ -253,6 +266,50 @@ fn dispatch_now(
                 },
             ));
             to_result(&started)
+        }
+        CARVE_EXTRACT => {
+            if state.job.is_some() {
+                return Err(ErrorObject::new(
+                    protocol::error_code::JOB_ALREADY_RUNNING,
+                    "每个引擎进程只运行一个任务",
+                ));
+            }
+            let params: ExtractParams = request.params()?;
+            let registry = Registry::builtin();
+            check_extract_items(&registry, &params)?;
+            let output_dir = Path::new(&params.output_dir)
+                .join(format!("recovered-{}", short_id(&params.job_id)));
+            let device = open_source_for_output(&params.source, &output_dir)?;
+            std::fs::create_dir_all(&output_dir)
+                .map_err(|error| output_unavailable(&output_dir, &error))?;
+            let started = CopyStarted {
+                output_dir: output_dir.display().to_string(),
+            };
+            let finished = events.clone();
+            let items = params.items;
+            state.job = Some(job::start(
+                params.job_id,
+                Arc::clone(outbox),
+                move |context| {
+                    extract_job::run(device.as_ref(), &registry, items, &output_dir, context)
+                },
+                move || {
+                    let _ = finished.send(Event::JobFinished);
+                },
+            ));
+            to_result(&started)
+        }
+        PREVIEW_RANGE => {
+            let params: PreviewRangeParams = request.params()?;
+            let device = open_source(&params.source)?;
+            let preview = preview::preview_range(device.as_ref(), params.offset, params.length)
+                .map_err(|error| {
+                    ErrorObject::new(
+                        protocol::error_code::PREVIEW_UNAVAILABLE,
+                        format!("无法读取偏移 {} 处的文件：{error}", params.offset),
+                    )
+                })?;
+            to_result(&preview)
         }
         BROWSE_OPEN => {
             if state.job.is_some() {
@@ -296,12 +353,8 @@ fn dispatch_now(
             let device: Arc<dyn BlockDevice> =
                 Arc::from(open_source_for_output(&params.source, &output_dir)?);
             let volume = copy_volume(device, params.partition)?;
-            std::fs::create_dir_all(&output_dir).map_err(|error| {
-                ErrorObject::new(
-                    protocol::error_code::OUTPUT_UNAVAILABLE,
-                    format!("无法创建输出目录 {}：{error}", output_dir.display()),
-                )
-            })?;
+            std::fs::create_dir_all(&output_dir)
+                .map_err(|error| output_unavailable(&output_dir, &error))?;
             let started = CopyStarted {
                 output_dir: output_dir.display().to_string(),
             };
@@ -388,6 +441,35 @@ fn open_source_for_output(
         // 其他平台还打不开物理盘，open_source 直接拒绝，走不到写输出那一步
         _ => open_source(source),
     }
+}
+
+/// 输出目录建不起来时的答复。
+fn output_unavailable(dir: &Path, error: &std::io::Error) -> ErrorObject {
+    ErrorObject::new(
+        protocol::error_code::OUTPUT_UNAVAILABLE,
+        format!("无法创建输出目录 {}：{error}", dir.display()),
+    )
+}
+
+/// 保存项：数量有上限，格式要认识，长度不能为 0、不能超过该格式的最大尺寸。
+fn check_extract_items(registry: &Registry, params: &ExtractParams) -> Result<(), ErrorObject> {
+    let invalid = |message: String| ErrorObject::new(error_code::INVALID_PARAMS, message);
+    if params.items.is_empty() || params.items.len() > MAX_COPY_ITEMS {
+        return Err(invalid(format!("保存项应为 1 到 {MAX_COPY_ITEMS} 个")));
+    }
+    for item in &params.items {
+        let format = registry
+            .position(&item.extension)
+            .and_then(|position| registry.formats().get(position))
+            .ok_or_else(|| invalid(format!("不认识的格式 {}", item.extension)))?;
+        if item.length == 0 || item.length > format.info().max_size {
+            return Err(invalid(format!(
+                "偏移 {} 处的 {} 长度 {} 不合理",
+                item.offset, item.extension, item.length
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// 解码复制项的定位信息，限制数量与路径层级。

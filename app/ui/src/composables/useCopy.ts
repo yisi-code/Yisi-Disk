@@ -1,15 +1,11 @@
 import { computed, ref, shallowRef } from 'vue'
 import { useJob } from './useJob'
-import {
-  startCopy,
-  type CopiedFile,
-  type CopyItem,
-  type CopySummary,
-  type JobTarget,
-  type PartitionRef,
-} from '../services/host'
+import type { CopiedFile, CopySummary } from '../services/host'
 
-/** 一次复制：在通用任务状态之上，记下陆续复制好（或失败）的文件和最后的汇总 */
+/**
+ * 一次复制或保存：在通用任务状态之上，记下陆续复制好（或失败）的文件和最后的汇总。
+ * 「找回删除的文件」的复制与深度恢复「只扫描」后的保存都用它，各自给出启动方式
+ */
 export function useCopy() {
   /** 每批换一个新数组，子组件按引用判断是否变了 */
   const copied = shallowRef<CopiedFile[]>([])
@@ -27,18 +23,14 @@ export function useCopy() {
   const failures = computed(() => copied.value.filter((file) => file.error !== null))
   const succeeded = computed(() => copied.value.filter((file) => file.error === null))
 
-  async function start(
-    target: JobTarget,
-    partition: PartitionRef,
-    items: CopyItem[],
-    outputDir: string,
-  ) {
+  /** `launch` 拿到新生成的任务 ID，调用宿主启动任务 */
+  async function start(launch: (jobId: string) => Promise<void>) {
     if (job.isBusy.value) {
       return
     }
     copied.value = []
     summary.value = null
-    await job.start((jobId) => startCopy(jobId, target, partition, items, outputDir))
+    await job.start(launch)
   }
 
   return {

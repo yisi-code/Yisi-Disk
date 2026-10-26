@@ -36,11 +36,7 @@ pub fn run(
     context: &JobContext,
 ) -> Result<JobOutcome, String> {
     let started = Instant::now();
-    let reporter = Reporter {
-        context,
-        pending: RefCell::new(Vec::new()),
-        last_flush: Cell::new(Instant::now()),
-    };
+    let reporter = Reporter::new(context);
     let mut failed = 0u64;
 
     // 先展开目录，算出总字节数，进度才有意义
@@ -332,14 +328,23 @@ pub fn sanitize(name: &str) -> String {
     clean
 }
 
-struct Reporter<'a> {
+/// 把复制好（或失败）的文件攒成一批发出；保存「只扫描」的结果时也用它。
+pub(crate) struct Reporter<'a> {
     context: &'a JobContext,
     pending: RefCell<Vec<CopiedFile>>,
     last_flush: Cell<Instant>,
 }
 
-impl Reporter<'_> {
-    fn push(&self, file: CopiedFile) {
+impl<'a> Reporter<'a> {
+    pub(crate) fn new(context: &'a JobContext) -> Self {
+        Self {
+            context,
+            pending: RefCell::new(Vec::new()),
+            last_flush: Cell::new(Instant::now()),
+        }
+    }
+
+    pub(crate) fn push(&self, file: CopiedFile) {
         self.pending.borrow_mut().push(file);
         let due = self.pending.borrow().len() >= COPIED_BATCH
             || self.last_flush.get().elapsed() >= COPIED_INTERVAL;
@@ -348,7 +353,7 @@ impl Reporter<'_> {
         }
     }
 
-    fn flush(&self) {
+    pub(crate) fn flush(&self) {
         let files = std::mem::take(&mut *self.pending.borrow_mut());
         self.last_flush.set(Instant::now());
         if !files.is_empty() {

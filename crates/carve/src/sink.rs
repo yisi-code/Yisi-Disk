@@ -29,24 +29,37 @@ pub trait SinkFile {
     fn discard(self: Box<Self>) -> io::Result<()>;
 }
 
-/// 写到一个目录里，文件名为 `f` 加起始扇区号（按 512 字节计），例如 `f0000012345.jpg`。
+/// 恢复出的文件的名字：`f` 加起始扇区号（按 512 字节计），例如 `f0000012345.jpg`。
+pub fn recovered_name(offset: u64, extension: &str) -> String {
+    format!("f{:010}.{extension}", offset / 512)
+}
+
+/// 写到一个目录里，文件名见 [`recovered_name`]。
 /// 写入过程中带 `.part` 后缀，确认完整、全部写出后才改成正式名字。
 pub struct DirectorySink {
     directory: PathBuf,
+    /// 扫描的设备在源上的起点：只扫源上的一段时，名字与报告里的偏移仍按在源上的位置算。
+    origin: u64,
 }
 
 impl DirectorySink {
     /// 目录不存在时创建。
     pub fn new(directory: impl AsRef<Path>) -> io::Result<Self> {
+        Self::with_origin(directory, 0)
+    }
+
+    /// 扫描的是源上从 `origin` 起的一段时用它，名字和偏移按在源上的位置算。
+    pub fn with_origin(directory: impl AsRef<Path>, origin: u64) -> io::Result<Self> {
         let directory = directory.as_ref().to_path_buf();
         fs::create_dir_all(&directory)?;
-        Ok(Self { directory })
+        Ok(Self { directory, origin })
     }
 }
 
 impl Sink for DirectorySink {
     fn create(&mut self, offset: u64, extension: &str) -> io::Result<Box<dyn SinkFile>> {
-        let name = format!("f{:010}.{extension}", offset / 512);
+        let offset = self.origin.saturating_add(offset);
+        let name = recovered_name(offset, extension);
         let final_path = self.directory.join(&name);
         let partial_path = self.directory.join(format!("{name}.part"));
         let file = File::create_new(&partial_path)?;
@@ -103,5 +116,45 @@ impl SinkFile for DirectoryFile {
     fn discard(self: Box<Self>) -> io::Result<()> {
         drop(self.writer);
         fs::remove_file(&self.partial_path)
+    }
+}
+
+/// 只扫描、不保存：识别流程照常，只记下每个文件在源上的位置和长度，什么都不写。
+/// 名字与 [`DirectorySink`] 起的一样，之后选中保存时用的是同一个名字。
+#[derive(Debug, Default)]
+pub struct ScanOnlySink;
+
+impl Sink for ScanOnlySink {
+    fn create(&mut self, offset: u64, extension: &str) -> io::Result<Box<dyn SinkFile>> {
+        Ok(Box::new(ScanOnlyFile {
+            name: recovered_name(offset, extension),
+            extension: extension.to_owned(),
+            offset,
+        }))
+    }
+}
+
+struct ScanOnlyFile {
+    name: String,
+    extension: String,
+    offset: u64,
+}
+
+impl SinkFile for ScanOnlyFile {
+    fn write(&mut self, _data: &[u8]) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn commit(self: Box<Self>, length: u64) -> io::Result<RecoveredFile> {
+        Ok(RecoveredFile {
+            name: self.name,
+            extension: self.extension,
+            offset: self.offset,
+            length,
+        })
+    }
+
+    fn discard(self: Box<Self>) -> io::Result<()> {
+        Ok(())
     }
 }

@@ -9,8 +9,8 @@ mod engines;
 use serde::Serialize;
 use tauri::{AppHandle, State};
 use yisi_engine::protocol::{
-    BrowseOpened, Capabilities, CopyItem, DiskList, FileListPage, FilePreview, FileTypeList,
-    PartitionRef,
+    BrowseOpened, Capabilities, CopyItem, DiskList, ExtractItem, FileListPage, FilePreview,
+    FileTypeList, PartitionRef,
 };
 
 use crate::broker::BrokerSession;
@@ -67,6 +67,7 @@ fn job_start_disk_scan(
 }
 
 /// 深度恢复。源为物理磁盘时与读取扫描一样，第一次需要时提权启动磁盘代理。
+/// 不给输出目录时只扫描，之后用 `carve_preview_range` 预览、`job_start_extract` 保存选中的文件。
 #[tauri::command(async)]
 fn job_start_carve(
     app: AppHandle,
@@ -74,10 +75,36 @@ fn job_start_carve(
     broker: State<'_, BrokerSession>,
     job_id: String,
     target: Target,
-    output_dir: String,
+    output_dir: Option<String>,
     extensions: Vec<String>,
 ) -> Result<(), HostError> {
     engines.start_carve(app, &broker, job_id, target, output_dir, extensions)
+}
+
+/// 预览只扫描、还没保存的文件：回到扫描任务的源上读。
+#[tauri::command(async)]
+fn carve_preview_range(
+    engines: State<'_, Engines>,
+    broker: State<'_, BrokerSession>,
+    scan_job_id: String,
+    offset: u64,
+    length: u64,
+) -> Result<FilePreview, HostError> {
+    engines.preview_range(&broker, &scan_job_id, offset, length)
+}
+
+/// 保存只扫描时选中的文件。
+#[tauri::command(async)]
+fn job_start_extract(
+    app: AppHandle,
+    engines: State<'_, Engines>,
+    broker: State<'_, BrokerSession>,
+    job_id: String,
+    scan_job_id: String,
+    items: Vec<ExtractItem>,
+    output_dir: String,
+) -> Result<(), HostError> {
+    engines.start_extract(app, &broker, job_id, &scan_job_id, items, output_dir)
 }
 
 #[tauri::command(async)]
@@ -211,6 +238,8 @@ fn main() -> anyhow::Result<()> {
             recovered_preview,
             recovered_open,
             recovered_reveal,
+            carve_preview_range,
+            job_start_extract,
             browse_open,
             browse_list,
             browse_preview,

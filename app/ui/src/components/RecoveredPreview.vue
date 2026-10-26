@@ -4,7 +4,12 @@ import { useI18n } from 'vue-i18n'
 import FilePreviewView from './FilePreviewView.vue'
 import { useDelayedPreview } from '../composables/useDelayedPreview'
 import { useHostErrorText } from '../composables/useHostErrorText'
-import { previewRecoveredFile, type FoundFile, type HostError } from '../services/host'
+import {
+  previewCarveRange,
+  previewRecoveredFile,
+  type FoundFile,
+  type HostError,
+} from '../services/host'
 import { formatBytes } from '../utils/format'
 
 /** 文件名里的扇区号按 512 字节计 */
@@ -16,6 +21,12 @@ const props = defineProps<{
   typeName: string
   /** 打开、在文件夹中显示失败时由父组件给出 */
   actionError: HostError | null
+  /** 只扫描、没有边扫边保存：预览从源上读，打开前要先保存 */
+  scanOnly: boolean
+  /** 只扫描时，这个文件已经保存过的话是保存它的任务 ID */
+  savedJobId: string | null
+  /** 不能打开时（例如正在扫描或正在保存）由父组件给出 */
+  canOpen: boolean
 }>()
 const emit = defineEmits<{ open: [file: FoundFile]; reveal: [file: FoundFile] }>()
 
@@ -23,10 +34,16 @@ const { t, locale } = useI18n()
 const { formatHostError } = useHostErrorText()
 
 const { preview, error: previewError, isLoading } = useDelayedPreview(
-  () => (props.jobId !== null && props.file !== null ? { jobId: props.jobId, name: props.file.name } : null),
-  (target) => `${target.jobId}/${target.name}`,
-  (target) => previewRecoveredFile(target.jobId, target.name),
+  () => (props.jobId !== null && props.file !== null ? { jobId: props.jobId, file: props.file } : null),
+  (target) => `${target.jobId}/${target.file.name}`,
+  (target) =>
+    props.scanOnly
+      ? previewCarveRange(target.jobId, target.file.offset, target.file.length)
+      : previewRecoveredFile(target.jobId, target.file.name),
 )
+
+/** 文件在不在输出目录里：边扫边保存的都在，只扫描的要保存过才在 */
+const isOnDisk = computed(() => !props.scanOnly || props.savedJobId !== null)
 
 /** 起止都按字节偏移给出，结束位置是文件最后一个字节 */
 const extent = computed(() => {
@@ -73,7 +90,7 @@ function locate(offset: number) {
         <button
           class="recovered-preview__button"
           type="button"
-          :disabled="jobId === null"
+          :disabled="jobId === null || !canOpen"
           @click="emit('open', file)"
         >
           {{ t('carve.preview.open') }}
@@ -81,12 +98,13 @@ function locate(offset: number) {
         <button
           class="recovered-preview__button recovered-preview__button--secondary"
           type="button"
-          :disabled="jobId === null"
+          :disabled="jobId === null || !isOnDisk"
           @click="emit('reveal', file)"
         >
           {{ t('carve.preview.reveal') }}
         </button>
       </div>
+      <p v-if="!isOnDisk" class="recovered-preview__note">{{ t('carve.preview.notSavedHint') }}</p>
       <p v-if="actionError" class="recovered-preview__error" role="alert">
         {{ formatHostError(actionError) }}
       </p>

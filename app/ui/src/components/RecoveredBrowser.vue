@@ -48,8 +48,12 @@ const props = defineProps<{
   fileTypes: FileType[]
   /** 源的总大小，决定按位置分组时每段多大 */
   deviceSize: number
+  /** 「只扫描」时可以勾选要保存的文件 */
+  selectable: boolean
 }>()
 const selectedFile = defineModel<FoundFile | null>('selected', { required: true })
+/** 勾选要保存的文件（按文件名）；每次改动换一个新 Set */
+const checkedNames = defineModel<Set<string>>('checked', { default: () => new Set<string>() })
 const emit = defineEmits<{ open: [file: FoundFile] }>()
 
 const { t } = useI18n()
@@ -191,7 +195,9 @@ function handleKeydown(event: KeyboardEvent) {
       }
       break
     case ' ':
-      if (current?.kind === 'group') {
+      if (props.selectable && current !== undefined) {
+        toggleChecked(current)
+      } else if (current?.kind === 'group') {
         toggleGroup(current.group.key)
       }
       break
@@ -229,6 +235,25 @@ function scrollIntoView(index: number) {
   } else if (top + ROW_HEIGHT > element.scrollTop + element.clientHeight) {
     element.scrollTop = top + ROW_HEIGHT - element.clientHeight
   }
+}
+
+/** 勾选或取消一个文件；分组行整组勾选，组里已全部勾选时整组取消 */
+function toggleChecked(row: TreeRow) {
+  const names = row.kind === 'group' ? row.group.files.map((file) => file.name) : [row.file.name]
+  const next = new Set(checkedNames.value)
+  const shouldCheck = !names.every((name) => next.has(name))
+  for (const name of names) {
+    if (shouldCheck) {
+      next.add(name)
+    } else {
+      next.delete(name)
+    }
+  }
+  checkedNames.value = next
+}
+
+function isGroupChecked(group: FileGroup): boolean {
+  return group.files.length > 0 && group.files.every((file) => checkedNames.value.has(file.name))
 }
 
 function toggleGroup(key: string) {
@@ -390,6 +415,15 @@ function fileDetail(file: FoundFile): string {
           @dblclick="handleRowDoubleClick(row)"
         >
           <template v-if="row.kind === 'group'">
+            <input
+              v-if="selectable"
+              class="recovered-browser__check"
+              type="checkbox"
+              tabindex="-1"
+              :checked="isGroupChecked(row.group)"
+              :aria-label="t('carve.browser.checkGroup', { name: row.group.label })"
+              @click.stop="toggleChecked(row)"
+            />
             <span class="recovered-browser__chevron" aria-hidden="true">
               {{ row.isExpanded ? '▾' : '▸' }}
             </span>
@@ -404,6 +438,15 @@ function fileDetail(file: FoundFile): string {
             </span>
           </template>
           <template v-else>
+            <input
+              v-if="selectable"
+              class="recovered-browser__check"
+              type="checkbox"
+              tabindex="-1"
+              :checked="checkedNames.has(row.file.name)"
+              :aria-label="t('carve.browser.check', { name: row.file.name })"
+              @click.stop="toggleChecked(row)"
+            />
             <span class="recovered-browser__name recovered-browser__name--file">
               {{ row.file.name }}
             </span>
@@ -413,7 +456,9 @@ function fileDetail(file: FoundFile): string {
         </div>
       </div>
     </div>
-    <p class="recovered-browser__hint">{{ t('carve.browser.hint') }}</p>
+    <p class="recovered-browser__hint">
+      {{ selectable ? t('carve.browser.selectHint') : t('carve.browser.hint') }}
+    </p>
   </div>
 </template>
 
@@ -513,6 +558,12 @@ function fileDetail(file: FoundFile): string {
 /* 键盘焦点所在的行；只在列表有焦点时画出来 */
 .recovered-browser__viewport:focus-visible .recovered-browser__row--active {
   box-shadow: inset 0 0 0 1px var(--color-accent);
+}
+
+.recovered-browser__check {
+  flex: none;
+  margin: 0;
+  accent-color: var(--color-accent);
 }
 
 .recovered-browser__chevron {

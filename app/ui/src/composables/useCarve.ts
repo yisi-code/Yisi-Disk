@@ -27,7 +27,8 @@ export function useCarve() {
     },
   })
 
-  async function start(target: JobTarget, outputDir: string, extensions: string[]) {
+  /** outputDir 为 null 时只扫描、什么都不写 */
+  async function start(target: JobTarget, outputDir: string | null, extensions: string[]) {
     if (job.isBusy.value) {
       return
     }

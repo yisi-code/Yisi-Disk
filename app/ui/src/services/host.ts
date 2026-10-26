@@ -61,8 +61,8 @@ export interface TypeTotal {
 
 /** 深度恢复的结果 */
 export interface CarveSummary {
-  /** 实际存放结果的目录 */
-  outputDir: string
+  /** 实际存放结果的目录；只扫描时为 null */
+  outputDir: string | null
   files: number
   bytes: number
   /** 按扩展名统计 */
@@ -245,16 +245,46 @@ export function startDiskScan(jobId: string, diskNumber: number): Promise<void> 
 }
 
 /**
- * 深度恢复：结果放在 outputDir 下新建的子目录里。物理磁盘与读取扫描一样可能先等提权；
+ * 深度恢复：结果放在 outputDir 下新建的子目录里；outputDir 为 null 时只扫描、什么都不写，
+ * 之后用 previewCarveRange 预览、startExtract 保存选中的文件。物理磁盘与读取扫描一样可能先等提权；
  * 输出目录在被扫描的盘上（或无法确认不在）时宿主返回 outputOnSource
  */
 export function startCarve(
   jobId: string,
   target: JobTarget,
-  outputDir: string,
+  outputDir: string | null,
   extensions: string[],
 ): Promise<void> {
   return invoke<void>('job_start_carve', { jobId, target, outputDir, extensions })
+}
+
+/** 只扫描时找到的一个文件的位置、长度与格式 */
+export interface ExtractItem {
+  offset: number
+  length: number
+  extension: string
+}
+
+/** 预览只扫描、还没保存的文件：宿主回到扫描任务的源上读这一段，由引擎生成预览 */
+export function previewCarveRange(
+  scanJobId: string,
+  offset: number,
+  length: number,
+): Promise<FilePreview> {
+  return invoke<FilePreview>('carve_preview_range', { scanJobId, offset, length })
+}
+
+/**
+ * 保存只扫描时选中的文件（任务）：回到源上重新读出并校验，与扫描时对不上的不保存。
+ * 保存好的文件按这个任务的 jobId 加文件名打开、在文件夹中显示
+ */
+export function startExtract(
+  jobId: string,
+  scanJobId: string,
+  items: ExtractItem[],
+  outputDir: string,
+): Promise<void> {
+  return invoke<void>('job_start_extract', { jobId, scanJobId, items, outputDir })
 }
 
 export function cancelJob(jobId: string): Promise<void> {

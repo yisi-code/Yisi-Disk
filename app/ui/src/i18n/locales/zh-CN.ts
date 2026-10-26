@@ -108,6 +108,11 @@ export default {
       hint: '只勾选需要的格式，误识别会更少。',
     },
     output: {
+      modeLegend: '什么时候保存',
+      whileScanning: '扫描时直接保存到下面的目录',
+      afterScan: '先只扫描，扫完再挑选要保存的文件',
+      afterScanHint:
+        '扫描时什么都不写。扫完后可以预览、勾选，再选一个目录保存；保存时会回到源上重新读出并校验。扫描结果只在本次打开的程序里，离开前记得保存。',
       label: '保存到',
       placeholder: '输出目录的完整路径，例如 F:/recovered',
       pickTitle: '选择保存恢复文件的目录',
@@ -127,6 +132,8 @@ export default {
       cancelling: '正在取消…',
       unresponsive: '引擎超过 10 秒没有响应',
       cancelledNote: '取消前已经找回的完整文件，仍保留在输出目录里。',
+      cancelledScanOnlyNote: '取消前已经找到的文件仍然可以勾选、保存。',
+      outputAfterScan: '扫完再挑选要保存的文件',
       status: {
         starting: '正在启动引擎…',
         startingDisk: '正在请求管理员权限并打开磁盘…',
@@ -158,6 +165,10 @@ export default {
       at: '位于 {position}',
       empty: '还没有找到文件',
       hint: '单击分组展开或收起，单击文件查看详情，双击文件用默认程序打开。',
+      selectHint:
+        '单击分组展开或收起，单击文件查看详情，双击文件先保存再用默认程序打开；勾选框或空格选择要保存的文件，勾选分组即选中整组。',
+      check: '选择 {name}',
+      checkGroup: '选择整组 {name}',
     },
     preview: {
       title: '文件详情',
@@ -171,6 +182,23 @@ export default {
       positionValue: '{position}（偏移 {offset}，扇区 {sector}）',
       open: '用默认程序打开',
       reveal: '在文件夹中显示',
+      notSavedHint: '这个文件还没保存：预览直接从源上读，打开前会先把它保存到下方的保存位置。',
+    },
+    save: {
+      hint: '在这个目录下新建一个子目录（名字以 recovered- 开头）保存选中的文件，文件名与边扫边保存时一样。保存时会回到源上重新读出并校验，与扫描时对不上的不保存。',
+      start: '保存选中的 {count} 个文件',
+      savedCount: '已保存 {saved} / {total} 个',
+      failedCount: '{count} 个文件没能保存',
+      failedItem: '{name}：{reason}',
+      summary: '保存了 {count} 个文件，共 {bytes}，在 {dir}',
+      discardConfirm: '还有扫描到的文件没有保存，离开或重新扫描后这些结果就没了。确定吗？',
+      status: {
+        starting: '正在启动保存…',
+        running: '已保存 {done} / {total}（{percent}%），{count} 个文件',
+        completed: '保存完成',
+        failed: '保存失败',
+        cancelled: '已取消；已经保存好的文件仍保留在保存位置',
+      },
     },
   },
   source: {
