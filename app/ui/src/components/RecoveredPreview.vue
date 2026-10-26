@@ -26,7 +26,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ open: [file: FoundFile]; reveal: [file: FoundFile] }>()
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const { formatHostError } = useHostErrorText()
 
 const preview = ref<FilePreview | null>(null)
@@ -36,6 +36,15 @@ const isLoading = ref(false)
 let pendingTimer: ReturnType<typeof setTimeout> | undefined
 /** 每次选中换一个序号，旧请求晚到的答复丢弃 */
 let requestSerial = 0
+
+/** 起止都按字节偏移给出，结束位置是文件最后一个字节 */
+const extent = computed(() => {
+  const file = props.file
+  if (file === null) {
+    return null
+  }
+  return { start: locate(file.offset), end: locate(file.offset + Math.max(file.length, 1) - 1) }
+})
 
 const thumbnailSource = computed(() =>
   preview.value?.image ? `data:image/png;base64,${preview.value.image.thumbnail}` : null,
@@ -85,6 +94,14 @@ async function loadPreview(jobId: string, name: string, serial: number) {
   }
 }
 
+function locate(offset: number) {
+  return {
+    position: formatBytes(offset),
+    offset: offset.toLocaleString(locale.value),
+    sector: Math.floor(offset / NAME_SECTOR_SIZE),
+  }
+}
+
 function decodeBase64(text: string): Uint8Array {
   const binary = atob(text)
   const bytes = new Uint8Array(binary.length)
@@ -126,15 +143,12 @@ function formatHex(bytes: Uint8Array): string[] {
         <dd>
           {{ t('carve.preview.sizeValue', { size: formatBytes(file.length), bytes: file.length }) }}
         </dd>
-        <dt>{{ t('carve.preview.position') }}</dt>
-        <dd>
-          {{
-            t('carve.preview.positionValue', {
-              position: formatBytes(file.offset),
-              sector: Math.floor(file.offset / NAME_SECTOR_SIZE),
-            })
-          }}
-        </dd>
+        <template v-if="extent">
+          <dt>{{ t('carve.preview.start') }}</dt>
+          <dd>{{ t('carve.preview.positionValue', extent.start) }}</dd>
+          <dt>{{ t('carve.preview.end') }}</dt>
+          <dd>{{ t('carve.preview.positionValue', extent.end) }}</dd>
+        </template>
       </dl>
 
       <div class="recovered-preview__actions">
