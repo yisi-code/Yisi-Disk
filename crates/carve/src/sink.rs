@@ -30,7 +30,7 @@ pub trait SinkFile {
 }
 
 /// 写到一个目录里，文件名为 `f` 加起始扇区号（按 512 字节计），例如 `f0000012345.jpg`。
-/// 写入过程中带 `.part` 后缀，确认完整后才改成正式名字。
+/// 写入过程中带 `.part` 后缀，确认完整、全部写出后才改成正式名字。
 pub struct DirectorySink {
     directory: PathBuf,
 }
@@ -80,8 +80,10 @@ impl SinkFile for DirectoryFile {
             .writer
             .into_inner()
             .map_err(|error| error.into_error())?;
+        // 不逐个 sync：USB 机械盘上每次约 100 ms，文件密集处会把扫描拖到每秒十来个文件。
+        // 数据已交给操作系统，引擎异常退出不影响落盘；系统崩溃或断电时，
+        // 最近改名的文件可能内容不全，源盘只读，重扫即可。
         file.set_len(length)?;
-        file.sync_all()?;
         drop(file);
         if self.final_path.exists() {
             return Err(io::Error::new(
