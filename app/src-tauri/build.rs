@@ -9,6 +9,9 @@ fn main() {
         "job_start_disk_scan",
         "job_start_carve",
         "job_cancel",
+        "recovered_preview",
+        "recovered_open",
+        "recovered_reveal",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("tauri-build 执行失败");

@@ -79,6 +79,26 @@ export interface FoundFile {
   length: number
 }
 
+/** 引擎生成的缩略图：图片在引擎里解码、缩小后重新编码成 PNG，界面不直接渲染恢复出的文件 */
+export interface ImagePreview {
+  /** 原图的尺寸 */
+  width: number
+  height: number
+  /** PNG，Base64 */
+  thumbnail: string
+}
+
+/** 恢复出的一个文件的预览 */
+export interface FilePreview {
+  length: number
+  /** 文件开头最多 4096 字节，Base64，供十六进制视图使用 */
+  head: string
+  /** 内容是 JPEG 或 PNG 且能解码时才有 */
+  image: ImagePreview | null
+  /** 内容是 JPEG 或 PNG 但解码失败时的原因 */
+  imageError: string | null
+}
+
 export interface ByteRange {
   offset: number
   length: number
@@ -154,6 +174,21 @@ export function startCarve(
 
 export function cancelJob(jobId: string): Promise<void> {
   return invoke<void>('job_cancel', { jobId })
+}
+
+/** 深度恢复找到的文件按任务 ID 加文件名指定：宿主只认恢复时起的文件名，不接受其他路径 */
+export function previewRecoveredFile(jobId: string, name: string): Promise<FilePreview> {
+  return invoke<FilePreview>('recovered_preview', { jobId, name })
+}
+
+/** 用系统默认程序打开 */
+export function openRecoveredFile(jobId: string, name: string): Promise<void> {
+  return invoke<void>('recovered_open', { jobId, name })
+}
+
+/** 在系统的文件管理器里显示 */
+export function revealRecoveredFile(jobId: string, name: string): Promise<void> {
+  return invoke<void>('recovered_reveal', { jobId, name })
 }
 
 /** 调用方按自己发起的任务种类给出 TResult：宿主不在事件里标注结果的类型 */

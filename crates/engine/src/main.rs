@@ -3,6 +3,7 @@
 
 mod carve_job;
 mod job;
+mod preview;
 mod read_scan;
 mod runtime;
 

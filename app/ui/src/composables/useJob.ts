@@ -35,8 +35,9 @@ export function useJob<TResult>(handlers: JobHandlers<TResult>) {
   const bytesPerSecond = ref<number | null>(null)
   const failure = ref<HostError | null>(null)
   const isUnresponsive = ref(false)
+  /** 最近一次发起的任务；任务结束后保留，深度恢复的结果还要按它预览、打开 */
+  const jobId = ref<string | null>(null)
 
-  let jobId: string | null = null
   let startedAt = 0
   let unlisten: UnlistenFn | null = null
   let isDisposed = false
@@ -69,7 +70,7 @@ export function useJob<TResult>(handlers: JobHandlers<TResult>) {
       return
     }
     const id = crypto.randomUUID()
-    jobId = id
+    jobId.value = id
     startedAt = performance.now()
     status.value = 'starting'
     done.value = 0
@@ -79,11 +80,11 @@ export function useJob<TResult>(handlers: JobHandlers<TResult>) {
     isUnresponsive.value = false
     try {
       await launch(id)
-      if (jobId === id && status.value === 'starting') {
+      if (jobId.value === id && status.value === 'starting') {
         status.value = 'running'
       }
     } catch (error) {
-      if (jobId === id) {
+      if (jobId.value === id) {
         status.value = 'failed'
         failure.value = toHostError(error)
       }
@@ -92,12 +93,12 @@ export function useJob<TResult>(handlers: JobHandlers<TResult>) {
 
   async function cancel() {
     // 启动阶段（可能正在等 UAC）引擎还没接下任务，只能在运行中取消
-    if (jobId === null || status.value !== 'running') {
+    if (jobId.value === null || status.value !== 'running') {
       return
     }
     status.value = 'cancelling'
     try {
-      await cancelJob(jobId)
+      await cancelJob(jobId.value)
     } catch {
       // 任务恰好在取消前结束：终结事件会更新状态，这里只撤回「正在取消」
       if (status.value === 'cancelling') {
@@ -107,7 +108,7 @@ export function useJob<TResult>(handlers: JobHandlers<TResult>) {
   }
 
   function handleJobEvent(event: JobEvent<TResult>) {
-    if (event.jobId !== jobId) {
+    if (event.jobId !== jobId.value) {
       return
     }
     switch (event.kind) {
@@ -157,6 +158,7 @@ export function useJob<TResult>(handlers: JobHandlers<TResult>) {
   }
 
   return {
+    jobId,
     status,
     done,
     total,

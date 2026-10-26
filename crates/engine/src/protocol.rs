@@ -16,9 +16,12 @@ pub const CANCEL: &str = "job.cancel";
 pub const LIST_DISKS: &str = "disk.list";
 /// 列出深度恢复支持的格式：没有参数，结果是 [`FileTypeList`]。
 pub const LIST_FILE_TYPES: &str = "carve.listFileTypes";
-/// 深度恢复（任务）：参数 [`CarveParams`]，立即返回空对象；找到的文件经 [`FOUND`] 通知分批送达，结果是 [`CarveSummary`]。
+/// 深度恢复（任务）：参数 [`CarveParams`]，立即返回 [`CarveStarted`]；找到的文件经 [`FOUND`] 通知分批送达，结果是 [`CarveSummary`]。
 /// 源为物理磁盘时，输出目录必须在另一块盘上，否则答复 [`error_code::OUTPUT_ON_SOURCE`]。
 pub const CARVE_START: &str = "carve.start";
+/// 预览一个文件：参数 [`PreviewParams`]，结果是 [`FilePreview`]。只读打开；JPEG、PNG 在引擎里解码、缩小后重新编码成 PNG，
+/// 界面只显示这份缩略图，不直接渲染恢复出的文件。打不开时答复 [`error_code::PREVIEW_UNAVAILABLE`]。
+pub const PREVIEW_FILE: &str = "preview.file";
 
 /// 引擎每隔 [`HEARTBEAT_INTERVAL`] 发一次，没有参数。
 pub const HEARTBEAT: &str = "engine.heartbeat";
@@ -49,6 +52,8 @@ pub mod error_code {
     pub const OUTPUT_UNAVAILABLE: i64 = -32004;
     /// 输出目录在被扫描的物理磁盘上，或者无法确认它不在：恢复出的文件会覆盖还没找回的数据。
     pub const OUTPUT_ON_SOURCE: i64 = -32005;
+    /// 要预览的文件打不开或读不了。
+    pub const PREVIEW_UNAVAILABLE: i64 = -32006;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,6 +187,13 @@ pub struct CarveParams {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CarveStarted {
+    /// 实际存放结果的目录（[`CarveParams::output_dir`] 下新建的子目录）。
+    pub output_dir: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct JobFound {
     pub job_id: String,
     pub files: Vec<FoundFile>,
@@ -217,6 +229,39 @@ pub struct CarveSummary {
 pub struct TypeTotal {
     pub count: u64,
     pub bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewParams {
+    pub path: String,
+}
+
+/// 文件开头最多给出这么多字节，供十六进制视图使用。
+pub const PREVIEW_HEAD_BYTES: usize = 4096;
+/// 缩略图最长边的像素数。
+pub const THUMBNAIL_EDGE: u32 = 512;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilePreview {
+    pub length: u64,
+    /// 文件开头最多 [`PREVIEW_HEAD_BYTES`] 字节，Base64 编码。
+    pub head: String,
+    /// 内容是 JPEG 或 PNG 且解码成功时的缩略图。
+    pub image: Option<ImagePreview>,
+    /// 内容是 JPEG 或 PNG 但解码失败时的原因。
+    pub image_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImagePreview {
+    /// 原图的尺寸。
+    pub width: u32,
+    pub height: u32,
+    /// 最长边不超过 [`THUMBNAIL_EDGE`] 的缩略图，PNG 格式，Base64 编码。
+    pub thumbnail: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

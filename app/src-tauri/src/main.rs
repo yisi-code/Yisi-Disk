@@ -8,7 +8,7 @@ mod engines;
 
 use serde::Serialize;
 use tauri::{AppHandle, State};
-use yisi_engine::protocol::{Capabilities, DiskList, FileTypeList};
+use yisi_engine::protocol::{Capabilities, DiskList, FilePreview, FileTypeList};
 
 use crate::broker::BrokerSession;
 use crate::engines::{Engines, HostError, Target};
@@ -82,6 +82,40 @@ fn job_cancel(engines: State<'_, Engines>, job_id: String) -> Result<(), HostErr
     engines.cancel(&job_id)
 }
 
+/// 预览深度恢复找到的文件：只认任务 ID 加恢复时起的文件名，由引擎读取与解码。
+#[tauri::command(async)]
+fn recovered_preview(
+    engines: State<'_, Engines>,
+    job_id: String,
+    name: String,
+) -> Result<FilePreview, HostError> {
+    engines.preview(&job_id, &name)
+}
+
+/// 用系统默认程序打开恢复出的文件。
+#[tauri::command(async)]
+fn recovered_open(
+    engines: State<'_, Engines>,
+    job_id: String,
+    name: String,
+) -> Result<(), HostError> {
+    let path = engines.recovered_file(&job_id, &name)?;
+    tauri_plugin_opener::open_path(&path, None::<&str>)
+        .map_err(|error| HostError::new("openFailed", error.to_string()))
+}
+
+/// 在系统的文件管理器里显示恢复出的文件。
+#[tauri::command(async)]
+fn recovered_reveal(
+    engines: State<'_, Engines>,
+    job_id: String,
+    name: String,
+) -> Result<(), HostError> {
+    let path = engines.recovered_file(&job_id, &name)?;
+    tauri_plugin_opener::reveal_item_in_dir(&path)
+        .map_err(|error| HostError::new("openFailed", error.to_string()))
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -98,7 +132,10 @@ fn main() -> anyhow::Result<()> {
             job_start_image_scan,
             job_start_disk_scan,
             job_start_carve,
-            job_cancel
+            job_cancel,
+            recovered_preview,
+            recovered_open,
+            recovered_reveal
         ])
         .run(tauri::generate_context!())?;
     Ok(())
