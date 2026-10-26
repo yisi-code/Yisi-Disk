@@ -4915,17 +4915,27 @@ dependencies = [
  "tracing-subscriber",
  "yisi-carve",
  "yisi-formats",
+ "yisi-fs",
  "yisi-io",
+ "yisi-part",
  "yisi-rpc",
 ]
 
 [[package]]
 name = "yisi-formats"
 version = "0.1.0"
+dependencies = [
+ "yisi-part",
+]
 
 [[package]]
 name = "yisi-fs"
 version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+ "yisi-io",
+ "yisi-part",
+]
 
 [[package]]
 name = "yisi-io"
@@ -4938,6 +4948,10 @@ dependencies = [
 [[package]]
 name = "yisi-part"
 version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+ "yisi-io",
+]
 
 [[package]]
 name = "yisi-repair"

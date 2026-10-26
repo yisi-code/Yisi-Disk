@@ -22,6 +22,17 @@ pub const CARVE_START: &str = "carve.start";
 /// 预览一个文件：参数 [`PreviewParams`]，结果是 [`FilePreview`]。只读打开；JPEG、PNG 在引擎里解码、缩小后重新编码成 PNG，
 /// 界面只显示这份缩略图，不直接渲染恢复出的文件。打不开时答复 [`error_code::PREVIEW_UNAVAILABLE`]。
 pub const PREVIEW_FILE: &str = "preview.file";
+/// 浏览分区（任务）：参数 [`BrowseParams`]，读出分区表后答复 [`BrowseOpened`]，之后一直运行到取消或宿主断开，
+/// 期间接受 [`LIST_FILES`] 与 [`PREVIEW_FS_FILE`]。只读源盘。
+pub const BROWSE_OPEN: &str = "repair.open";
+/// 列出浏览中的一个目录的一页：参数 [`ListFilesParams`]，结果是 [`FileListPage`]。目录第一次被列出时整份读出、排好序缓存。
+pub const LIST_FILES: &str = "repair.listFiles";
+/// 预览浏览中的一个文件：参数 [`PreviewFsParams`]，结果是 [`FilePreview`]，规则与 [`PREVIEW_FILE`] 相同。
+pub const PREVIEW_FS_FILE: &str = "repair.previewFile";
+/// 把分区里选中的文件与目录复制到另一块盘（任务）：参数 [`CopyParams`]，立即返回 [`CopyStarted`]；
+/// 复制好的文件经 [`COPIED`] 通知分批送达，结果是 [`CopySummary`]。源为物理磁盘时，输出目录必须在另一块盘上，
+/// 否则答复 [`error_code::OUTPUT_ON_SOURCE`]。
+pub const COPY_FILES: &str = "repair.copyFiles";
 
 /// 引擎每隔 [`HEARTBEAT_INTERVAL`] 发一次，没有参数。
 pub const HEARTBEAT: &str = "engine.heartbeat";
@@ -29,6 +40,8 @@ pub const HEARTBEAT: &str = "engine.heartbeat";
 pub const PROGRESS: &str = "job.progress";
 /// 参数 [`JobFound`]：一批新找到的文件，攒满 100 个或距上一批 250 毫秒时发出。
 pub const FOUND: &str = "job.found";
+/// 参数 [`JobCopied`]：一批复制好（或复制失败）的文件，攒满 100 个或距上一批 250 毫秒时发出。
+pub const COPIED: &str = "job.copied";
 /// 参数 [`JobLog`]。
 pub const LOG: &str = "job.log";
 /// 参数 [`JobCompleted`]。
@@ -54,6 +67,8 @@ pub mod error_code {
     pub const OUTPUT_ON_SOURCE: i64 = -32005;
     /// 要预览的文件打不开或读不了。
     pub const PREVIEW_UNAVAILABLE: i64 = -32006;
+    /// 分区不存在、文件系统暂不支持浏览，或文件定位信息不合法。
+    pub const FS_UNAVAILABLE: i64 = -32007;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,6 +277,169 @@ pub struct ImagePreview {
     pub height: u32,
     /// 最长边不超过 [`THUMBNAIL_EDGE`] 的缩略图，PNG 格式，Base64 编码。
     pub thumbnail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowseParams {
+    pub job_id: String,
+    pub source: Source,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowseOpened {
+    pub size: u64,
+    pub sector_size: u32,
+    /// mbr、gpt、none 之一。
+    pub scheme: String,
+    /// 读分区表时发现的问题：primaryGptInvalid、gptUnreadable、sectorSizeMismatch、extendedChainBroken、
+    /// partitionTruncated、partitionOutside。
+    pub notes: Vec<String>,
+    pub partitions: Vec<PartitionInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionInfo {
+    /// MBR 主分区 1–4、逻辑分区从 5 起；GPT 是表项序号加 1；无分区表时为 1。
+    pub number: u32,
+    pub offset: u64,
+    pub length: u64,
+    /// MBR 为 `0x0C` 这样的类型字节，GPT 为类型 GUID，无分区表时为空。
+    pub type_id: String,
+    /// 常见类型的用途（efiSystem、basicData、fat32 等），界面据此显示本地化名称。
+    pub role: Option<String>,
+    /// GPT 分区名。
+    pub name: String,
+    pub bootable: bool,
+    pub logical: bool,
+    /// fat12、fat16、fat32、exfat、ntfs、bitlocker、ext、unknown 之一；读不出引导扇区时为 unreadable。
+    pub filesystem: String,
+    pub label: Option<String>,
+    /// 能不能浏览目录（目前是 FAT 与 exFAT）。
+    pub browsable: bool,
+}
+
+/// 一页最多这么多项；名字很长时引擎会少给一些，保证一条答复不超过消息大小上限。
+pub const MAX_PAGE: u32 = 1000;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListFilesParams {
+    pub job_id: String,
+    /// 分区编号（[`PartitionInfo::number`]）。
+    pub partition: u32,
+    /// 目录的定位信息（[`FsEntry::file`]）；不给时为根目录。
+    #[serde(default)]
+    pub dir: Option<String>,
+    pub offset: u32,
+    pub limit: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileListPage {
+    /// 目录里的总项数。
+    pub total: u32,
+    /// 从 [`ListFilesParams::offset`] 起的若干项，按「目录在前、名字不分大小写」排序。
+    pub entries: Vec<FsEntry>,
+    /// 目录项太多，没有全部列出。
+    pub truncated: bool,
+    /// 已删除的目录的内容已被覆盖，列不出东西。
+    pub overwritten: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsEntry {
+    pub name: String,
+    pub short_name: Option<String>,
+    /// 名字有字符无法确定（FAT 删除后丢了首字母）。
+    pub name_uncertain: bool,
+    pub is_dir: bool,
+    pub size: u64,
+    /// `yyyy-MM-dd HH:mm:ss`，卷上记录的时间。
+    pub modified: Option<String>,
+    pub created: Option<String>,
+    pub deleted: bool,
+    /// live、intact（删除了，看起来完整）、overwritten（已被覆盖）、unknown（无法判断）之一。
+    pub state: String,
+    /// 定位信息，原样传回给 [`LIST_FILES`]、[`PREVIEW_FS_FILE`]、[`COPY_FILES`]。
+    pub file: String,
+    /// 数据在源上的起始字节偏移；没有数据时为空。
+    pub position: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewFsParams {
+    pub job_id: String,
+    pub partition: u32,
+    pub file: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopyParams {
+    pub job_id: String,
+    pub source: Source,
+    /// 浏览时得到的分区编号、偏移与长度；引擎重新读分区表核对，对不上就拒绝。
+    pub partition: PartitionRef,
+    pub items: Vec<CopyItem>,
+    /// 在这个目录下新建 `restored-<任务 ID 前 8 位>` 子目录存放结果。
+    pub output_dir: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionRef {
+    pub number: u32,
+    pub offset: u64,
+    pub length: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopyItem {
+    /// 定位信息（[`FsEntry::file`]）；是目录时连同里面的全部内容一起复制。
+    pub file: String,
+    /// 复制到输出目录下的相对路径，一级一项（通常是它在分区里的路径）。引擎会替换掉系统不允许的字符。
+    pub path: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopyStarted {
+    /// 实际存放结果的目录。
+    pub output_dir: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobCopied {
+    pub job_id: String,
+    pub files: Vec<CopiedFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopiedFile {
+    /// 输出目录下的相对路径，以 `/` 分隔（替换过非法字符、重名时加了序号）。
+    pub path: String,
+    pub size: u64,
+    /// 复制失败的原因；成功时为空。
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopySummary {
+    pub output_dir: String,
+    pub files: u64,
+    pub bytes: u64,
+    pub failed: u64,
+    pub elapsed_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

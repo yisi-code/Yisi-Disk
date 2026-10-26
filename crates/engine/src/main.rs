@@ -1,7 +1,9 @@
 //! 引擎进程入口：每个任务一个进程，经 stdin / stdout 与宿主通信，任务结束后退出。
 #![forbid(unsafe_code)]
 
+mod browse;
 mod carve_job;
+mod copy_job;
 mod job;
 mod preview;
 mod read_scan;

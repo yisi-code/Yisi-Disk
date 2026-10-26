@@ -12,11 +12,14 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 yisi-carve.workspace = true
 yisi-formats.workspace = true
+yisi-fs.workspace = true
 yisi-io.workspace = true
+yisi-part.workspace = true
 yisi-rpc.workspace = true
 
 [dev-dependencies]
 yisi-formats = { workspace = true, features = ["test-samples"] }
+yisi-fs = { workspace = true, features = ["test-samples"] }
 
 [lints]
 workspace = true

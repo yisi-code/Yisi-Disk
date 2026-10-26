@@ -3,16 +3,17 @@ import { nextTick, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import CarveWizard from './components/CarveWizard.vue'
 import EngineSelfTest from './components/EngineSelfTest.vue'
+import UndeleteWizard from './components/UndeleteWizard.vue'
 import { SUPPORTED_LOCALES } from './i18n'
 import { getAppInfo } from './services/host'
 
-type AppView = 'home' | 'carve'
+type AppView = 'home' | 'carve' | 'undelete'
 
 /** 首页的场景；view 为 null 的还没有接入 */
 const SCENARIOS: { key: string; view: AppView | null }[] = [
   { key: 'findPartitions', view: null },
   { key: 'repairPartition', view: null },
-  { key: 'undelete', view: null },
+  { key: 'undelete', view: 'undelete' },
   { key: 'carve', view: 'carve' },
   { key: 'fsCheck', view: null },
   { key: 'image', view: null },
@@ -72,6 +73,7 @@ async function returnHome() {
 
     <main class="app-main">
       <CarveWizard v-if="view === 'carve'" @exit="returnHome" />
+      <UndeleteWizard v-else-if="view === 'undelete'" @exit="returnHome" />
       <template v-else>
         <h2 ref="scenariosTitle" class="scenario-section__title" tabindex="-1">
           {{ t('scenarios.title') }}

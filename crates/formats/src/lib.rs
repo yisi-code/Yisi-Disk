@@ -3,7 +3,6 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 mod bytes;
-mod crc32;
 mod jpg;
 mod mp4;
 mod pdf;

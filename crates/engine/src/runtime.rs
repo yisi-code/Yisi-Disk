@@ -11,9 +11,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use yisi_carve::DirectorySink;
 use yisi_engine::protocol::{
-    self, CANCEL, CAPABILITIES, CARVE_START, Capabilities, CarveParams, CarveStarted, HEARTBEAT,
-    HEARTBEAT_INTERVAL, JobRef, LIST_DISKS, LIST_FILE_TYPES, PREVIEW_FILE, PreviewParams,
-    READ_SCAN, ReadScanParams, Source,
+    self, BROWSE_OPEN, BrowseParams, CANCEL, CAPABILITIES, CARVE_START, COPY_FILES, Capabilities,
+    CarveParams, CarveStarted, CopyParams, CopyStarted, HEARTBEAT, HEARTBEAT_INTERVAL, JobRef,
+    LIST_DISKS, LIST_FILE_TYPES, LIST_FILES, ListFilesParams, PREVIEW_FILE, PREVIEW_FS_FILE,
+    PreviewFsParams, PreviewParams, READ_SCAN, ReadScanParams, Source,
 };
 #[cfg(windows)]
 use yisi_engine::protocol::{DiskList, DiskSummary};
@@ -24,8 +25,16 @@ use yisi_rpc::{
     write_message,
 };
 
-use crate::job::{self, RunningJob};
+use crate::browse::{self, Session};
+use crate::copy_job::{self, Planned};
+use crate::job::{self, JobOutcome, RunningJob};
 use crate::{carve_job, preview, read_scan};
+
+/// 浏览任务每隔这么久看一次有没有被取消。
+const BROWSE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+/// 一次复制最多选这么多项、路径最多这么多级。
+const MAX_COPY_ITEMS: usize = 100_000;
+const MAX_COPY_DEPTH: usize = 64;
 
 /// 向宿主发消息。答复、通知可能来自不同线程，写入时加锁，保证一帧不被拆开。
 pub struct Outbox {
@@ -67,19 +76,20 @@ pub fn serve(reader: impl Read + Send + 'static, writer: impl Write + Send + 'st
     spawn_reader(reader, events.clone());
     let stop_heartbeat = spawn_heartbeat(Arc::clone(&outbox));
 
-    let mut job: Option<RunningJob> = None;
+    let mut state = State::default();
     for event in inbox {
         match event {
             Event::Incoming(Message::Request(request)) => {
-                let outcome = dispatch(&request, &mut job, &outbox, &events);
-                outbox.send(&Message::Response(Response {
-                    id: request.id,
-                    outcome,
-                }));
+                if let Some(outcome) = dispatch(&request, &mut state, &outbox, &events) {
+                    outbox.send(&Message::Response(Response {
+                        id: request.id,
+                        outcome,
+                    }));
+                }
             }
             // 宿主只发请求，通知和响应都不处理
             Event::Incoming(_) => {}
-            Event::InputClosed => match &job {
+            Event::InputClosed => match &state.job {
                 Some(running) => running.cancel(),
                 None => break,
             },
@@ -89,9 +99,66 @@ pub fn serve(reader: impl Read + Send + 'static, writer: impl Write + Send + 'st
     stop_heartbeat.store(true, Ordering::Relaxed);
 }
 
+/// 每个引擎进程只运行一个任务；浏览任务另外记着会话，供列目录、预览使用。
+#[derive(Default)]
+struct State {
+    job: Option<RunningJob>,
+    session: Option<Arc<Session>>,
+}
+
+/// 处理一个请求。返回 `None` 表示答复由后台线程稍后发出：列目录、预览可能要读很多数据，不能挡住取消请求。
 fn dispatch(
     request: &Request,
-    job: &mut Option<RunningJob>,
+    state: &mut State,
+    outbox: &Arc<Outbox>,
+    events: &Sender<Event>,
+) -> Option<Result<Value, ErrorObject>> {
+    match request.method.as_str() {
+        LIST_FILES | PREVIEW_FS_FILE => {
+            let session = match session_for(request, state) {
+                Ok(session) => session,
+                Err(error) => return Some(Err(error)),
+            };
+            let request = request.clone();
+            let outbox = Arc::clone(outbox);
+            thread::spawn(move || {
+                let outcome = if request.method == LIST_FILES {
+                    request
+                        .params::<ListFilesParams>()
+                        .and_then(|params| session.list(&params))
+                        .and_then(|page| to_result(&page))
+                } else {
+                    request
+                        .params::<PreviewFsParams>()
+                        .and_then(|params| session.preview(params.partition, &params.file))
+                        .and_then(|preview| to_result(&preview))
+                };
+                outbox.send(&Message::Response(Response {
+                    id: request.id,
+                    outcome,
+                }));
+            });
+            None
+        }
+        _ => Some(dispatch_now(request, state, outbox, events)),
+    }
+}
+
+/// 列目录、预览请求所属的浏览会话：任务 ID 要与正在运行的浏览任务一致。
+fn session_for(request: &Request, state: &State) -> Result<Arc<Session>, ErrorObject> {
+    let JobRef { job_id } = request.params()?;
+    match (&state.job, &state.session) {
+        (Some(running), Some(session)) if running.id() == job_id => Ok(Arc::clone(session)),
+        _ => Err(ErrorObject::new(
+            protocol::error_code::JOB_NOT_FOUND,
+            format!("没有正在浏览的任务 {job_id}"),
+        )),
+    }
+}
+
+fn dispatch_now(
+    request: &Request,
+    state: &mut State,
     outbox: &Arc<Outbox>,
     events: &Sender<Event>,
 ) -> Result<Value, ErrorObject> {
@@ -103,6 +170,10 @@ fn dispatch(
                 LIST_FILE_TYPES.to_owned(),
                 CARVE_START.to_owned(),
                 PREVIEW_FILE.to_owned(),
+                BROWSE_OPEN.to_owned(),
+                LIST_FILES.to_owned(),
+                PREVIEW_FS_FILE.to_owned(),
+                COPY_FILES.to_owned(),
             ];
             if cfg!(windows) {
                 methods.push(LIST_DISKS.to_owned());
@@ -115,7 +186,7 @@ fn dispatch(
         #[cfg(windows)]
         LIST_DISKS => to_result(&disk_list()),
         READ_SCAN => {
-            if job.is_some() {
+            if state.job.is_some() {
                 return Err(ErrorObject::new(
                     protocol::error_code::JOB_ALREADY_RUNNING,
                     "每个引擎进程只运行一个任务",
@@ -124,7 +195,7 @@ fn dispatch(
             let params: ReadScanParams = request.params()?;
             let device = open_source(&params.source)?;
             let finished = events.clone();
-            *job = Some(job::start(
+            state.job = Some(job::start(
                 params.job_id,
                 Arc::clone(outbox),
                 move |context| read_scan::run(device.as_ref(), context),
@@ -136,7 +207,7 @@ fn dispatch(
         }
         LIST_FILE_TYPES => to_result(&carve_job::file_types(&Registry::builtin())),
         CARVE_START => {
-            if job.is_some() {
+            if state.job.is_some() {
                 return Err(ErrorObject::new(
                     protocol::error_code::JOB_ALREADY_RUNNING,
                     "每个引擎进程只运行一个任务",
@@ -153,7 +224,7 @@ fn dispatch(
                 })?;
             let output_dir = Path::new(&params.output_dir)
                 .join(format!("recovered-{}", short_id(&params.job_id)));
-            let device = open_carve_source(&params.source, &output_dir)?;
+            let device = open_source_for_output(&params.source, &output_dir)?;
             let sink = DirectorySink::new(&output_dir).map_err(|error| {
                 ErrorObject::new(
                     protocol::error_code::OUTPUT_UNAVAILABLE,
@@ -164,7 +235,7 @@ fn dispatch(
                 output_dir: output_dir.display().to_string(),
             };
             let finished = events.clone();
-            *job = Some(job::start(
+            state.job = Some(job::start(
                 params.job_id,
                 Arc::clone(outbox),
                 move |context| {
@@ -183,6 +254,68 @@ fn dispatch(
             ));
             to_result(&started)
         }
+        BROWSE_OPEN => {
+            if state.job.is_some() {
+                return Err(ErrorObject::new(
+                    protocol::error_code::JOB_ALREADY_RUNNING,
+                    "每个引擎进程只运行一个任务",
+                ));
+            }
+            let params: BrowseParams = request.params()?;
+            let device: Arc<dyn BlockDevice> = Arc::from(open_source(&params.source)?);
+            let (session, opened) = Session::open(device)?;
+            state.session = Some(Arc::new(session));
+            let finished = events.clone();
+            // 浏览任务本身只等取消或宿主断开；列目录、预览由会话在别的线程里答复
+            state.job = Some(job::start(
+                params.job_id,
+                Arc::clone(outbox),
+                |context| {
+                    while !context.is_cancelled() {
+                        thread::sleep(BROWSE_POLL);
+                    }
+                    Ok(JobOutcome::Cancelled)
+                },
+                move || {
+                    let _ = finished.send(Event::JobFinished);
+                },
+            ));
+            to_result(&opened)
+        }
+        COPY_FILES => {
+            if state.job.is_some() {
+                return Err(ErrorObject::new(
+                    protocol::error_code::JOB_ALREADY_RUNNING,
+                    "每个引擎进程只运行一个任务",
+                ));
+            }
+            let params: CopyParams = request.params()?;
+            let items = copy_items(&params)?;
+            let output_dir = Path::new(&params.output_dir)
+                .join(format!("restored-{}", short_id(&params.job_id)));
+            let device: Arc<dyn BlockDevice> =
+                Arc::from(open_source_for_output(&params.source, &output_dir)?);
+            let volume = copy_volume(device, params.partition)?;
+            std::fs::create_dir_all(&output_dir).map_err(|error| {
+                ErrorObject::new(
+                    protocol::error_code::OUTPUT_UNAVAILABLE,
+                    format!("无法创建输出目录 {}：{error}", output_dir.display()),
+                )
+            })?;
+            let started = CopyStarted {
+                output_dir: output_dir.display().to_string(),
+            };
+            let finished = events.clone();
+            state.job = Some(job::start(
+                params.job_id,
+                Arc::clone(outbox),
+                move |context| copy_job::run(&volume, items, &output_dir, context),
+                move || {
+                    let _ = finished.send(Event::JobFinished);
+                },
+            ));
+            to_result(&started)
+        }
         PREVIEW_FILE => {
             let PreviewParams { path } = request.params()?;
             let preview = preview::preview(Path::new(&path)).map_err(|error| {
@@ -195,7 +328,7 @@ fn dispatch(
         }
         CANCEL => {
             let JobRef { job_id } = request.params()?;
-            match job {
+            match &state.job {
                 Some(running) if running.id() == job_id => {
                     running.cancel();
                     Ok(json!({}))
@@ -235,10 +368,10 @@ fn open_source(source: &Source) -> Result<Box<dyn BlockDevice>, ErrorObject> {
     }
 }
 
-/// 打开深度恢复的源。物理盘要先确认输出目录不在这块盘上，而且必须在创建任何输出目录之前确认：
-/// 单是建目录，就已经写到了这块盘上。
+/// 打开要往外写结果的任务（深度恢复、复制）的源。物理盘要先确认输出目录不在这块盘上，
+/// 而且必须在创建任何输出目录之前确认：单是建目录，就已经写到了这块盘上。
 #[cfg_attr(not(windows), expect(unused_variables))]
-fn open_carve_source(
+fn open_source_for_output(
     source: &Source,
     output_dir: &Path,
 ) -> Result<Box<dyn BlockDevice>, ErrorObject> {
@@ -255,6 +388,51 @@ fn open_carve_source(
         // 其他平台还打不开物理盘，open_source 直接拒绝，走不到写输出那一步
         _ => open_source(source),
     }
+}
+
+/// 解码复制项的定位信息，限制数量与路径层级。
+fn copy_items(params: &CopyParams) -> Result<Vec<Planned>, ErrorObject> {
+    let invalid = |message: String| ErrorObject::new(error_code::INVALID_PARAMS, message);
+    if params.items.is_empty() || params.items.len() > MAX_COPY_ITEMS {
+        return Err(invalid(format!("复制项应为 1 到 {MAX_COPY_ITEMS} 个")));
+    }
+    params
+        .items
+        .iter()
+        .map(|item| {
+            if item.path.is_empty() || item.path.len() > MAX_COPY_DEPTH {
+                return Err(invalid(format!("路径层级应为 1 到 {MAX_COPY_DEPTH} 级")));
+            }
+            Ok(Planned {
+                file: browse::decode(&item.file)?,
+                path: item.path.clone(),
+            })
+        })
+        .collect()
+}
+
+/// 重新读分区表，核对浏览时看到的分区还在原处，再打开它上面的卷。
+fn copy_volume(
+    device: Arc<dyn BlockDevice>,
+    partition: protocol::PartitionRef,
+) -> Result<yisi_fs::Volume, ErrorObject> {
+    let unavailable =
+        |message: String| ErrorObject::new(protocol::error_code::FS_UNAVAILABLE, message);
+    let table =
+        yisi_part::read_table(device.as_ref()).map_err(|error| unavailable(error_chain(&error)))?;
+    let found = table.partitions.iter().any(|candidate| {
+        candidate.number == partition.number
+            && candidate.offset == partition.offset
+            && candidate.length == partition.length
+    });
+    if !found {
+        return Err(unavailable(format!(
+            "分区 {} 已不在浏览时的位置",
+            partition.number
+        )));
+    }
+    yisi_fs::Volume::open(device, partition.offset, partition.length)
+        .map_err(|error| unavailable(error_chain(&error)))
 }
 
 #[cfg(windows)]

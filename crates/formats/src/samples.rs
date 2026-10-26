@@ -1,7 +1,7 @@
 //! 测试样本：按格式结构现场生成的最小合法文件，内容由固定种子的伪随机数填充，可以重放。
 //! 只在测试里使用（本 crate 的测试，或其他 crate 打开 `test-samples` 特性后的测试）。
 
-use crate::crc32::crc32;
+use yisi_part::crc32::crc32;
 
 /// 固定种子的 xorshift64 伪随机数。
 pub struct Noise(u64);

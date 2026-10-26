@@ -1,7 +1,7 @@
 //! 管理引擎进程：每个任务一个引擎，经 stdin / stdout 走 JSON-RPC；引擎的通知转成界面事件。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
@@ -14,9 +14,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter};
 use yisi_engine::protocol::{
-    CANCEL, CANCELLED, CAPABILITIES, CARVE_START, COMPLETED, Capabilities, CarveParams,
-    CarveStarted, DiskList, FAILED, FOUND, FilePreview, FileTypeList, HEARTBEAT, JobRef,
-    LIST_DISKS, LIST_FILE_TYPES, LOG, PREVIEW_FILE, PROGRESS, PreviewParams, READ_SCAN,
+    BROWSE_OPEN, BrowseOpened, BrowseParams, CANCEL, CANCELLED, CAPABILITIES, CARVE_START,
+    COMPLETED, COPIED, COPY_FILES, Capabilities, CarveParams, CarveStarted, CopyItem, CopyParams,
+    CopyStarted, DiskList, FAILED, FOUND, FileListPage, FilePreview, FileTypeList, HEARTBEAT,
+    JobRef, LIST_DISKS, LIST_FILE_TYPES, LIST_FILES, LOG, ListFilesParams, PREVIEW_FILE,
+    PREVIEW_FS_FILE, PROGRESS, PartitionRef, PreviewFsParams, PreviewParams, READ_SCAN,
     ReadScanParams, Source, error_code,
 };
 
@@ -26,6 +28,8 @@ use yisi_rpc::{ErrorObject, FrameError, Id, Message, Request, read_message, writ
 /// 发给界面的事件名，载荷是 [`JobEvent`]。
 pub const JOB_EVENT: &str = "job-event";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// 打开分区表、列目录、预览可能要读很多数据（十万级的目录、慢速的 USB 盘），等得久一些。
+const BROWSE_TIMEOUT: Duration = Duration::from_secs(120);
 /// 引擎每 2 秒一次心跳，超过这么久没有心跳就标为无响应。
 const UNRESPONSIVE_AFTER: Duration = Duration::from_secs(10);
 /// 发出取消后等这么久，引擎还没退出就强制结束它。
@@ -68,7 +72,7 @@ pub enum Target {
     },
 }
 
-/// 发给界面的任务事件。`kind` 为 progress、found、log、completed、failed、cancelled、unresponsive、responsive。
+/// 发给界面的任务事件。`kind` 为 progress、found、copied、log、completed、failed、cancelled、unresponsive、responsive。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobEvent {
@@ -83,6 +87,8 @@ pub struct Engines {
     jobs: Arc<Mutex<HashMap<String, Arc<EngineProcess>>>>,
     /// 本次运行里启动过的深度恢复任务各自的输出目录，任务结束后仍保留，供预览和打开恢复出的文件。
     recovered_dirs: Mutex<HashMap<String, PathBuf>>,
+    /// 本次运行里启动过的复制任务各自的输出目录，供打开、在文件夹中显示复制出的文件。
+    copied_dirs: Mutex<HashMap<String, PathBuf>>,
 }
 
 impl Engines {
@@ -204,12 +210,160 @@ impl Engines {
         )
     }
 
+    /// 浏览分区：引擎读出分区表后一直运行，直到取消（关闭浏览）。物理盘与扫描一样，第一次需要时提权启动磁盘代理。
+    pub fn open_browse(
+        &self,
+        app: AppHandle,
+        broker: &BrokerSession,
+        job_id: String,
+        target: Target,
+    ) -> Result<BrowseOpened, HostError> {
+        if let Target::Disk { disk_number } = &target {
+            disk_path(*disk_number)?;
+        }
+        let params_job_id = job_id.clone();
+        let opened =
+            self.start_job_with(app, job_id, BROWSE_OPEN, BROWSE_TIMEOUT, |engine_pid| {
+                to_params(&BrowseParams {
+                    job_id: params_job_id,
+                    source: resolve_source(target, broker, engine_pid)?,
+                })
+            })?;
+        from_value(opened)
+    }
+
+    /// 列出浏览中的一个目录的一页。
+    pub fn list_files(
+        &self,
+        job_id: String,
+        partition: u32,
+        dir: Option<String>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<FileListPage, HostError> {
+        let params = to_params(&ListFilesParams {
+            job_id: job_id.clone(),
+            partition,
+            dir,
+            offset,
+            limit,
+        })?;
+        from_value(
+            self.running(&job_id)?
+                .request(LIST_FILES, params, BROWSE_TIMEOUT)?,
+        )
+    }
+
+    /// 预览浏览中的一个文件：与深度恢复的预览一样，图片在引擎里解码，界面只拿到缩略图。
+    pub fn preview_fs_file(
+        &self,
+        job_id: String,
+        partition: u32,
+        file: String,
+    ) -> Result<FilePreview, HostError> {
+        let params = to_params(&PreviewFsParams {
+            job_id: job_id.clone(),
+            partition,
+            file,
+        })?;
+        from_value(
+            self.running(&job_id)?
+                .request(PREVIEW_FS_FILE, params, BROWSE_TIMEOUT)?,
+        )
+    }
+
+    /// 把分区里选中的项复制到另一块盘。源为物理磁盘时，引擎在开始前核对输出目录不在这块盘上。
+    #[expect(clippy::too_many_arguments, reason = "与界面命令的参数一一对应")]
+    pub fn start_copy(
+        &self,
+        app: AppHandle,
+        broker: &BrokerSession,
+        job_id: String,
+        target: Target,
+        partition: PartitionRef,
+        items: Vec<CopyItem>,
+        output_dir: String,
+    ) -> Result<(), HostError> {
+        if let Target::Disk { disk_number } = &target {
+            disk_path(*disk_number)?;
+        }
+        let params_job_id = job_id.clone();
+        let started = self.start_job_with(
+            app,
+            job_id.clone(),
+            COPY_FILES,
+            BROWSE_TIMEOUT,
+            |engine_pid| {
+                to_params(&CopyParams {
+                    job_id: params_job_id,
+                    source: resolve_source(target, broker, engine_pid)?,
+                    partition,
+                    items,
+                    output_dir,
+                })
+            },
+        )?;
+        let CopyStarted { output_dir } = from_value(started)?;
+        lock(&self.copied_dirs).insert(job_id, PathBuf::from(output_dir));
+        Ok(())
+    }
+
+    /// 复制任务输出目录里的一个文件。`path` 是引擎报告的相对路径（以 `/` 分隔），
+    /// 只接受普通的路径分量，解析后必须仍在输出目录之内。
+    pub fn copied_file(&self, job_id: &str, path: &str) -> Result<PathBuf, HostError> {
+        let invalid = || HostError::new("invalidCopiedPath", path);
+        let relative = Path::new(path);
+        if path.is_empty()
+            || !relative
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+        {
+            return Err(invalid());
+        }
+        let dir = lock(&self.copied_dirs)
+            .get(job_id)
+            .cloned()
+            .ok_or_else(|| HostError::new("copiedNotFound", job_id))?;
+        // 按分量重新拼，统一成本系统的分隔符
+        let full = dir.join(relative.components().collect::<PathBuf>());
+        let (Ok(real_dir), Ok(real_file)) = (dir.canonicalize(), full.canonicalize()) else {
+            return Err(HostError::new("copiedNotFound", full.display().to_string()));
+        };
+        if !real_file.starts_with(&real_dir) {
+            return Err(invalid());
+        }
+        if real_file.is_file() {
+            Ok(full)
+        } else {
+            Err(HostError::new("copiedNotFound", full.display().to_string()))
+        }
+    }
+
+    fn running(&self, job_id: &str) -> Result<Arc<EngineProcess>, HostError> {
+        lock(&self.jobs)
+            .get(job_id)
+            .cloned()
+            .ok_or_else(|| HostError::new("jobNotFound", job_id))
+    }
+
     /// 启动引擎并交给它一个任务，返回引擎接下任务时的答复。`params` 拿到引擎的进程 ID，返回任务方法 `method` 的参数。
     fn start_job(
         &self,
         app: AppHandle,
         job_id: String,
         method: &str,
+        params: impl FnOnce(u32) -> Result<Value, HostError>,
+    ) -> Result<Value, HostError> {
+        self.start_job_with(app, job_id, method, REQUEST_TIMEOUT, params)
+    }
+
+    /// 同 [`start_job`](Self::start_job)，等引擎接下任务最多 `timeout`。
+    fn start_job_with(
+        &self,
+        app: AppHandle,
+        job_id: String,
+        method: &str,
+        timeout: Duration,
         params: impl FnOnce(u32) -> Result<Value, HostError>,
     ) -> Result<Value, HostError> {
         validate_job_id(&job_id)?;
@@ -223,7 +377,8 @@ impl Engines {
         })?;
         lock(&self.jobs).insert(job_id.clone(), Arc::clone(&process));
 
-        let started = params(process.pid).and_then(|params| process.request(method, params));
+        let started =
+            params(process.pid).and_then(|params| process.request(method, params, timeout));
         if started.is_err() {
             // 引擎没接下任务：关闭输入让它退出，并且不再为这个任务发事件
             process.abandon();
@@ -242,7 +397,7 @@ impl Engines {
             job_id: job_id.to_owned(),
         })
         .map_err(|error| HostError::new("engineProtocol", error.to_string()))?;
-        process.request(CANCEL, params)?;
+        process.request(CANCEL, params, REQUEST_TIMEOUT)?;
         thread::spawn(move || {
             let deadline = Instant::now() + CANCEL_GRACE;
             while !process.has_exited() {
@@ -318,7 +473,7 @@ impl EngineProcess {
         Ok(process)
     }
 
-    fn request(&self, method: &str, params: Value) -> Result<Value, HostError> {
+    fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, HostError> {
         let id = Id::Number(self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
         let (sender, receiver) = mpsc::channel();
         lock(&self.pending).insert(id.clone(), sender);
@@ -331,7 +486,7 @@ impl EngineProcess {
             lock(&self.pending).remove(&id);
             return Err(HostError::new("engineIo", detail));
         }
-        match receiver.recv_timeout(REQUEST_TIMEOUT) {
+        match receiver.recv_timeout(timeout) {
             Ok(Ok(result)) => Ok(result),
             Ok(Err(error)) => Err(HostError::new(engine_error_code(error.code), error.message)),
             Err(RecvTimeoutError::Timeout) => {
@@ -410,6 +565,7 @@ impl EngineProcess {
         let kind = match method {
             PROGRESS => "progress",
             FOUND => "found",
+            COPIED => "copied",
             LOG => "log",
             COMPLETED => "completed",
             FAILED => "failed",
@@ -523,6 +679,7 @@ fn engine_error_code(code: i64) -> &'static str {
         error_code::OUTPUT_UNAVAILABLE => "outputUnavailable",
         error_code::OUTPUT_ON_SOURCE => "outputOnSource",
         error_code::PREVIEW_UNAVAILABLE => "previewUnavailable",
+        error_code::FS_UNAVAILABLE => "fsUnavailable",
         _ => "engineRejected",
     }
 }
@@ -534,10 +691,57 @@ fn query<T: DeserializeOwned>(method: &str) -> Result<T, HostError> {
 
 fn query_with<T: DeserializeOwned>(method: &str, params: Value) -> Result<T, HostError> {
     let process = EngineProcess::spawn(None, || {})?;
-    let result = process.request(method, params);
+    let result = process.request(method, params, REQUEST_TIMEOUT);
     process.abandon();
-    serde_json::from_value(result?)
+    from_value(result?)
+}
+
+fn from_value<T: DeserializeOwned>(value: Value) -> Result<T, HostError> {
+    serde_json::from_value(value)
         .map_err(|error| HostError::new("engineProtocol", error.to_string()))
+}
+
+/// 双击就会被系统直接运行、或会改系统设置的文件类型。找回的文件来路不明，这些类型不交给系统打开，
+/// 只能「在文件夹中显示」。
+pub fn is_executable_type(path: &Path) -> bool {
+    const EXECUTABLE: &[&str] = &[
+        "exe",
+        "com",
+        "scr",
+        "pif",
+        "cpl",
+        "msi",
+        "msp",
+        "msc",
+        "bat",
+        "cmd",
+        "ps1",
+        "psm1",
+        "psd1",
+        "vbs",
+        "vbe",
+        "js",
+        "jse",
+        "wsf",
+        "wsh",
+        "ws",
+        "hta",
+        "lnk",
+        "url",
+        "scf",
+        "reg",
+        "inf",
+        "jar",
+        "chm",
+        "application",
+        "appref-ms",
+        "gadget",
+        "settingcontent-ms",
+        "library-ms",
+    ];
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| EXECUTABLE.contains(&extension.to_ascii_lowercase().as_str()))
 }
 
 /// 引擎、代理与宿主程序放在同一目录；找不到时返回错误码 `missing_code`。
@@ -654,6 +858,55 @@ mod tests {
             .recovered_file("job", "f0000012345.jpg")
             .unwrap_err();
         assert_eq!(error.code, "recoveredNotFound");
+    }
+
+    #[test]
+    fn copied_paths_stay_inside_the_output_directory() {
+        let dir = std::env::temp_dir().join("yisi-host-copied-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Photos")).unwrap();
+        std::fs::write(dir.join("Photos").join("a.jpg"), b"x").unwrap();
+        let engines = Engines::default();
+        lock(&engines.copied_dirs).insert("job".to_owned(), dir.clone());
+        assert_eq!(
+            engines.copied_file("job", "Photos/a.jpg").unwrap(),
+            dir.join("Photos").join("a.jpg")
+        );
+        for bad in [
+            "",
+            "../x",
+            "Photos/../../x",
+            "/etc/passwd",
+            "C:/Windows/notepad.exe",
+        ] {
+            assert_eq!(
+                engines.copied_file("job", bad).unwrap_err().code,
+                "invalidCopiedPath",
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            engines.copied_file("job", "Photos").unwrap_err().code,
+            "copiedNotFound"
+        );
+        assert_eq!(
+            engines
+                .copied_file("other", "Photos/a.jpg")
+                .unwrap_err()
+                .code,
+            "copiedNotFound"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn executable_types_are_not_opened() {
+        for name in ["setup.EXE", "run.bat", "a.lnk", "x.ps1", "y.hta", "z.Js"] {
+            assert!(is_executable_type(Path::new(name)), "{name}");
+        }
+        for name in ["photo.jpg", "doc.pdf", "noext", "archive.zip", "page.html"] {
+            assert!(!is_executable_type(Path::new(name)), "{name}");
+        }
     }
 
     #[test]

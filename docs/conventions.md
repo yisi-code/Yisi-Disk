@@ -53,6 +53,7 @@ cargo test --workspace
 - **测试数据不得包含真实用户数据。**
 - 写盘相关测试只在镜像副本上进行，不碰真实磁盘。
 - 读真实磁盘的测试标 `#[ignore]`，只读，设备路径由环境变量给出（如 `YISI_IO_TEST_DEVICE`），在管理员终端手动运行：`cargo test -p yisi-io --test windows_disk -- --ignored --nocapture`。在 PowerShell 里设置环境变量；Git Bash 会吞掉 `\\.\` 开头的一个反斜杠。不对报过读错误的盘运行。
+- 文件系统对照镜像：`crates/fs/tests/make-test-images.ps1` 用 diskpart 建固定大小的 VHD（就是 raw 镜像末尾多 512 字节），由 Windows 自己分区、格式化（FAT12/16/32、exFAT，MBR 与 GPT）、写入已知内容并删掉一部分，产出镜像和清单。需要管理员权限；Windows PowerShell 5.1 按系统代码页读不带 BOM 的脚本，所以按 UTF-8 读进来再执行：`& ([ScriptBlock]::Create((Get-Content -Raw -Encoding UTF8 <脚本>))) -OutDir <目录>`。之后 `$env:YISI_FS_TEST_IMAGES = '<目录>'; cargo test -p yisi-fs --test real_images -- --ignored --nocapture` 逐个核对。读真实磁盘的分区表与 FAT 根目录：`$env:YISI_FS_TEST_DEVICE = '\\.\PhysicalDrive0'; cargo test -p yisi-fs --test real_disk -- --ignored --nocapture`（管理员终端）。
 - 句柄传递演示（会弹一次 UAC）：`cargo build -p yisi-broker --bins --examples` 之后，在**未提权**的 PowerShell 里运行 `target\debug\examples\handoff.exe target\debug\yisi-broker.exe \\.\PhysicalDrive0`，应看到授予的权限不含写类权限、读盘成功、重复认领与非磁盘路径都被拒绝。
 
 ## 5. 提交信息

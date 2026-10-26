@@ -8,10 +8,13 @@ mod engines;
 
 use serde::Serialize;
 use tauri::{AppHandle, State};
-use yisi_engine::protocol::{Capabilities, DiskList, FilePreview, FileTypeList};
+use yisi_engine::protocol::{
+    BrowseOpened, Capabilities, CopyItem, DiskList, FileListPage, FilePreview, FileTypeList,
+    PartitionRef,
+};
 
 use crate::broker::BrokerSession;
-use crate::engines::{Engines, HostError, Target};
+use crate::engines::{Engines, HostError, Target, is_executable_type};
 
 #[derive(Serialize)]
 struct AppInfo {
@@ -116,6 +119,78 @@ fn recovered_reveal(
         .map_err(|error| HostError::new("openFailed", error.to_string()))
 }
 
+/// 浏览分区（找回删除的文件）：答复分区表，之后引擎一直运行，直到界面用 `job_cancel` 关闭浏览。
+#[tauri::command(async)]
+fn browse_open(
+    app: AppHandle,
+    engines: State<'_, Engines>,
+    broker: State<'_, BrokerSession>,
+    job_id: String,
+    target: Target,
+) -> Result<BrowseOpened, HostError> {
+    engines.open_browse(app, &broker, job_id, target)
+}
+
+#[tauri::command(async)]
+fn browse_list(
+    engines: State<'_, Engines>,
+    job_id: String,
+    partition: u32,
+    dir: Option<String>,
+    offset: u32,
+    limit: u32,
+) -> Result<FileListPage, HostError> {
+    engines.list_files(job_id, partition, dir, offset, limit)
+}
+
+#[tauri::command(async)]
+fn browse_preview(
+    engines: State<'_, Engines>,
+    job_id: String,
+    partition: u32,
+    file: String,
+) -> Result<FilePreview, HostError> {
+    engines.preview_fs_file(job_id, partition, file)
+}
+
+/// 把浏览中选中的项复制到另一块盘。
+#[tauri::command(async)]
+#[expect(clippy::too_many_arguments, reason = "与界面传来的参数一一对应")]
+fn job_start_copy(
+    app: AppHandle,
+    engines: State<'_, Engines>,
+    broker: State<'_, BrokerSession>,
+    job_id: String,
+    target: Target,
+    partition: PartitionRef,
+    items: Vec<CopyItem>,
+    output_dir: String,
+) -> Result<(), HostError> {
+    engines.start_copy(app, &broker, job_id, target, partition, items, output_dir)
+}
+
+/// 用系统默认程序打开复制出的文件。可执行与脚本类文件不打开（`executableBlocked`），只能在文件夹中显示。
+#[tauri::command(async)]
+fn copied_open(engines: State<'_, Engines>, job_id: String, path: String) -> Result<(), HostError> {
+    let file = engines.copied_file(&job_id, &path)?;
+    if is_executable_type(&file) {
+        return Err(HostError::new("executableBlocked", path));
+    }
+    tauri_plugin_opener::open_path(&file, None::<&str>)
+        .map_err(|error| HostError::new("openFailed", error.to_string()))
+}
+
+#[tauri::command(async)]
+fn copied_reveal(
+    engines: State<'_, Engines>,
+    job_id: String,
+    path: String,
+) -> Result<(), HostError> {
+    let file = engines.copied_file(&job_id, &path)?;
+    tauri_plugin_opener::reveal_item_in_dir(&file)
+        .map_err(|error| HostError::new("openFailed", error.to_string()))
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -135,7 +210,13 @@ fn main() -> anyhow::Result<()> {
             job_cancel,
             recovered_preview,
             recovered_open,
-            recovered_reveal
+            recovered_reveal,
+            browse_open,
+            browse_list,
+            browse_preview,
+            job_start_copy,
+            copied_open,
+            copied_reveal
         ])
         .run(tauri::generate_context!())?;
     Ok(())

@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import DiskPicker from './DiskPicker.vue'
 import FileTypePicker from './FileTypePicker.vue'
 import RecoveredBrowser from './RecoveredBrowser.vue'
 import RecoveredPreview from './RecoveredPreview.vue'
+import SourcePicker from './SourcePicker.vue'
 import { useCarve } from '../composables/useCarve'
 import { useFileTypeName } from '../composables/useFileTypeName'
 import { useHostErrorText } from '../composables/useHostErrorText'
@@ -12,7 +12,6 @@ import {
   listFileTypes,
   openRecoveredFile,
   pickDirectory,
-  pickFile,
   revealRecoveredFile,
   toHostError,
   type FileType,
@@ -265,12 +264,6 @@ async function loadFileTypes() {
   }
 }
 
-async function browseImage() {
-  await pickPath(() => pickFile(t('carve.source.pickTitle')), (path) => {
-    imagePath.value = path
-  })
-}
-
 async function browseOutputDir() {
   await pickPath(() => pickDirectory(t('carve.output.pickTitle')), (path) => {
     outputDir.value = path
@@ -292,84 +285,53 @@ async function pickPath(pick: () => Promise<string | null>, apply: (path: string
 </script>
 
 <template>
-  <section class="carve-wizard" aria-labelledby="carve-wizard-title">
-    <header class="carve-wizard__header">
+  <section class="wizard" aria-labelledby="carve-wizard-title">
+    <header class="wizard__header">
       <button
-        class="carve-wizard__button carve-wizard__button--secondary"
+        class="wizard__button wizard__button--secondary"
         type="button"
         :disabled="isBusy"
         @click="handleExit"
       >
         {{ t('carve.exit') }}
       </button>
-      <h2 id="carve-wizard-title" ref="titleElement" class="carve-wizard__title" tabindex="-1">
+      <h2 id="carve-wizard-title" ref="titleElement" class="wizard__title" tabindex="-1">
         {{ t('scenarios.carve') }}
       </h2>
     </header>
 
-    <ol class="carve-wizard__steps">
+    <ol class="wizard__steps">
       <li
         v-for="(name, index) in STEPS"
         :key="name"
-        class="carve-wizard__step"
+        class="wizard__step"
         :class="{
-          'carve-wizard__step--current': name === step,
-          'carve-wizard__step--done': index < stepIndex,
+          'wizard__step--current': name === step,
+          'wizard__step--done': index < stepIndex,
         }"
         :aria-current="name === step ? 'step' : undefined"
       >
-        <span class="carve-wizard__step-number">{{ index + 1 }}</span>
+        <span class="wizard__step-number">{{ index + 1 }}</span>
         {{ t(`carve.steps.${name}`) }}
       </li>
     </ol>
 
-    <form class="carve-wizard__form" @submit.prevent="handleSubmit">
-      <div v-if="step === 'source'" class="carve-wizard__panel">
-        <fieldset class="carve-wizard__choice">
-          <legend class="carve-wizard__choice-legend">{{ t('carve.source.legend') }}</legend>
-          <label class="carve-wizard__choice-option">
-            <input v-model="sourceKind" type="radio" name="carve-source" value="image" />
-            {{ t('carve.source.image') }}
-          </label>
-          <label class="carve-wizard__choice-option">
-            <input v-model="sourceKind" type="radio" name="carve-source" value="disk" />
-            {{ t('carve.source.disk') }}
-          </label>
-        </fieldset>
-
-        <div v-if="sourceKind === 'image'" class="carve-wizard__path">
-          <label class="carve-wizard__label" for="carve-image-path">
-            {{ t('carve.source.imagePath') }}
-          </label>
-          <input
-            id="carve-image-path"
-            v-model="imagePath"
-            class="carve-wizard__input"
-            type="text"
-            spellcheck="false"
-            autocomplete="off"
-            :placeholder="t('carve.source.imagePathPlaceholder')"
-          />
-          <button
-            class="carve-wizard__button carve-wizard__button--secondary"
-            type="button"
-            @click="browseImage"
-          >
-            {{ t('carve.browseFile') }}
-          </button>
-        </div>
-        <template v-else>
-          <DiskPicker v-model="selectedDisk" :disabled="false" />
-          <p class="carve-wizard__hint">{{ t('carve.source.diskHint') }}</p>
-        </template>
+    <form class="wizard__form" @submit.prevent="handleSubmit">
+      <div v-if="step === 'source'" class="wizard__panel">
+        <SourcePicker
+          v-model:kind="sourceKind"
+          v-model:image-path="imagePath"
+          v-model:disk="selectedDisk"
+          :disk-hint="t('carve.source.diskHint')"
+        />
       </div>
 
-      <div v-else-if="step === 'formats'" class="carve-wizard__panel">
-        <p v-if="isLoadingFileTypes" class="carve-wizard__note">{{ t('carve.formats.loading') }}</p>
-        <div v-else-if="fileTypesError" class="carve-wizard__retry">
-          <p class="carve-wizard__error" role="alert">{{ formatHostError(fileTypesError) }}</p>
+      <div v-else-if="step === 'formats'" class="wizard__panel">
+        <p v-if="isLoadingFileTypes" class="wizard__note">{{ t('carve.formats.loading') }}</p>
+        <div v-else-if="fileTypesError" class="wizard__retry">
+          <p class="wizard__error" role="alert">{{ formatHostError(fileTypesError) }}</p>
           <button
-            class="carve-wizard__button carve-wizard__button--secondary"
+            class="wizard__button wizard__button--secondary"
             type="button"
             @click="loadFileTypes"
           >
@@ -378,83 +340,83 @@ async function pickPath(pick: () => Promise<string | null>, apply: (path: string
         </div>
         <template v-else>
           <FileTypePicker v-model="selectedExtensions" :types="fileTypes" :disabled="false" />
-          <p class="carve-wizard__hint">{{ t('carve.formats.hint') }}</p>
+          <p class="wizard__hint">{{ t('carve.formats.hint') }}</p>
         </template>
       </div>
 
-      <div v-else-if="step === 'output'" class="carve-wizard__panel">
-        <div class="carve-wizard__path">
-          <label class="carve-wizard__label" for="carve-output-dir">
+      <div v-else-if="step === 'output'" class="wizard__panel">
+        <div class="wizard__path">
+          <label class="wizard__label" for="carve-output-dir">
             {{ t('carve.output.label') }}
           </label>
           <input
             id="carve-output-dir"
             v-model="outputDir"
-            class="carve-wizard__input"
+            class="wizard__input"
             type="text"
             spellcheck="false"
             autocomplete="off"
             :placeholder="t('carve.output.placeholder')"
           />
           <button
-            class="carve-wizard__button carve-wizard__button--secondary"
+            class="wizard__button wizard__button--secondary"
             type="button"
             @click="browseOutputDir"
           >
             {{ t('carve.browseFolder') }}
           </button>
         </div>
-        <p class="carve-wizard__hint">{{ t('carve.output.hint') }}</p>
-        <p v-if="sourceKind === 'disk'" class="carve-wizard__hint carve-wizard__hint--warning">
+        <p class="wizard__hint">{{ t('carve.output.hint') }}</p>
+        <p v-if="sourceKind === 'disk'" class="wizard__hint wizard__hint--warning">
           {{ t('carve.output.diskHint') }}
         </p>
       </div>
 
-      <div v-else class="carve-wizard__panel">
-        <dl class="carve-wizard__details">
+      <div v-else class="wizard__panel">
+        <dl class="wizard__details">
           <dt>{{ t('carve.run.source') }}</dt>
-          <dd class="carve-wizard__path-text">{{ sourceText }}</dd>
+          <dd class="wizard__path-text">{{ sourceText }}</dd>
           <dt>{{ t('carve.run.formats') }}</dt>
           <dd>{{ selectedTypeNames }}</dd>
           <dt>{{ t('carve.run.output') }}</dt>
-          <dd class="carve-wizard__path-text">{{ trimmedOutputDir }}</dd>
+          <dd class="wizard__path-text">{{ trimmedOutputDir }}</dd>
         </dl>
 
-        <div v-if="status !== 'idle'" class="carve-wizard__job" aria-live="polite">
-          <progress class="carve-wizard__progress" :value="done" :max="total || 1"></progress>
-          <p class="carve-wizard__status">{{ statusText }}</p>
-          <p v-if="isUnresponsive" class="carve-wizard__error" role="alert">
+        <div v-if="status !== 'idle'" class="wizard__job" aria-live="polite">
+          <progress class="wizard__progress" :value="done" :max="total || 1"></progress>
+          <p class="wizard__status">{{ statusText }}</p>
+          <p v-if="isUnresponsive" class="wizard__error" role="alert">
             {{ t('carve.run.unresponsive') }}
           </p>
-          <p v-if="failure" class="carve-wizard__error" role="alert">
+          <p v-if="failure" class="wizard__error" role="alert">
             {{ formatHostError(failure) }}
           </p>
-          <p v-if="status === 'cancelled'" class="carve-wizard__hint">
+          <p v-if="status === 'cancelled'" class="wizard__hint">
             {{ t('carve.run.cancelledNote') }}
           </p>
 
-          <div v-if="hasResults" class="carve-wizard__results">
-            <table class="carve-wizard__table">
-              <caption class="carve-wizard__caption">
+          <div v-if="hasResults" class="wizard__results">
+            <table class="wizard__table">
+              <caption class="wizard__caption">
                 {{ t('carve.run.found', { count: summary?.files ?? foundCount }) }}
               </caption>
               <thead>
                 <tr>
                   <th scope="col">{{ t('carve.run.typeColumn') }}</th>
-                  <th scope="col" class="carve-wizard__number">{{ t('carve.run.countColumn') }}</th>
-                  <th scope="col" class="carve-wizard__number">{{ t('carve.run.sizeColumn') }}</th>
+                  <th scope="col" class="wizard__number">{{ t('carve.run.countColumn') }}</th>
+                  <th scope="col" class="wizard__number">{{ t('carve.run.sizeColumn') }}</th>
                 </tr>
               </thead>
               <tbody>
                 <tr v-for="row in typeRows" :key="row.extension">
                   <th scope="row">{{ row.name }}</th>
-                  <td class="carve-wizard__number">{{ row.totals.count }}</td>
-                  <td class="carve-wizard__number">{{ formatBytes(row.totals.bytes) }}</td>
+                  <td class="wizard__number">{{ row.totals.count }}</td>
+                  <td class="wizard__number">{{ formatBytes(row.totals.bytes) }}</td>
                 </tr>
               </tbody>
             </table>
 
-            <div class="carve-wizard__files">
+            <div class="wizard__files">
               <RecoveredBrowser
                 v-model:selected="selectedFile"
                 :files="files"
@@ -473,7 +435,7 @@ async function pickPath(pick: () => Promise<string | null>, apply: (path: string
             </div>
           </div>
 
-          <dl v-if="summary && status === 'completed'" class="carve-wizard__details">
+          <dl v-if="summary && status === 'completed'" class="wizard__details">
             <dt>{{ t('carve.run.report.files') }}</dt>
             <dd>
               {{
@@ -494,40 +456,40 @@ async function pickPath(pick: () => Promise<string | null>, apply: (path: string
               }}
             </dd>
             <dt>{{ t('carve.run.report.outputDir') }}</dt>
-            <dd class="carve-wizard__path-text">{{ summary.outputDir }}</dd>
+            <dd class="wizard__path-text">{{ summary.outputDir }}</dd>
           </dl>
         </div>
       </div>
 
-      <p v-if="dialogError" class="carve-wizard__error" role="alert">
+      <p v-if="dialogError" class="wizard__error" role="alert">
         {{ formatHostError(dialogError) }}
       </p>
 
-      <div class="carve-wizard__nav">
+      <div class="wizard__nav">
         <button
           v-if="stepIndex > 0"
-          class="carve-wizard__button carve-wizard__button--secondary"
+          class="wizard__button wizard__button--secondary"
           type="button"
           :disabled="isBusy"
           @click="goBack"
         >
           {{ t('carve.previous') }}
         </button>
-        <span class="carve-wizard__nav-gap"></span>
+        <span class="wizard__nav-gap"></span>
         <button
           v-if="step !== 'run'"
-          class="carve-wizard__button"
+          class="wizard__button"
           type="submit"
           :disabled="!canGoNext"
         >
           {{ t('carve.next') }}
         </button>
-        <button v-else-if="!isBusy" class="carve-wizard__button" type="submit" :disabled="!canStart">
+        <button v-else-if="!isBusy" class="wizard__button" type="submit" :disabled="!canStart">
           {{ status === 'idle' ? t('carve.run.start') : t('carve.run.restart') }}
         </button>
         <button
           v-else
-          class="carve-wizard__button carve-wizard__button--secondary"
+          class="wizard__button wizard__button--secondary"
           type="button"
           :disabled="status !== 'running'"
           @click="handleCancel"
@@ -538,266 +500,3 @@ async function pickPath(pick: () => Promise<string | null>, apply: (path: string
     </form>
   </section>
 </template>
-
-<style scoped>
-.carve-wizard {
-  display: block;
-  width: 100%;
-  padding: var(--space-md);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-card);
-}
-
-.carve-wizard__header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-md);
-}
-
-.carve-wizard__title {
-  margin: 0;
-  font-size: var(--font-size-section-title);
-  font-weight: 600;
-}
-
-/* 标题只是切换视图后的焦点落点，不可操作，不画焦点框 */
-.carve-wizard__title:focus-visible {
-  outline: none;
-}
-
-.carve-wizard__steps {
-  display: flex;
-  gap: var(--space-lg);
-  margin: var(--space-md) 0;
-  padding: 0 0 var(--space-sm);
-  list-style: none;
-  border-bottom: 1px solid var(--color-border);
-}
-
-.carve-wizard__step {
-  display: flex;
-  align-items: center;
-  gap: var(--space-xs);
-  color: var(--color-text-muted);
-}
-
-.carve-wizard__step--current {
-  color: var(--color-text);
-  font-weight: 600;
-}
-
-.carve-wizard__step-number {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  font-size: var(--font-size-small);
-  border: 1px solid var(--color-border);
-  border-radius: 50%;
-}
-
-.carve-wizard__step--current .carve-wizard__step-number {
-  color: var(--color-on-accent);
-  background: var(--color-accent);
-  border-color: var(--color-accent);
-}
-
-.carve-wizard__step--done .carve-wizard__step-number {
-  color: var(--color-accent);
-  border-color: var(--color-accent);
-}
-
-.carve-wizard__form {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-md);
-}
-
-.carve-wizard__panel {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-sm);
-}
-
-.carve-wizard__choice {
-  display: flex;
-  gap: var(--space-md);
-  margin: 0;
-  padding: 0;
-  border: none;
-}
-
-.carve-wizard__choice-legend {
-  float: left;
-  margin-right: var(--space-sm);
-  padding: 0;
-}
-
-.carve-wizard__choice-option {
-  display: flex;
-  align-items: center;
-  gap: var(--space-xs);
-  cursor: pointer;
-}
-
-.carve-wizard__path {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-}
-
-.carve-wizard__label {
-  flex: none;
-}
-
-.carve-wizard__input {
-  flex: 1;
-  min-width: 0;
-  padding: var(--space-xs) var(--space-sm);
-  color: var(--color-text);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--space-xs);
-  font: inherit;
-}
-
-.carve-wizard__hint,
-.carve-wizard__note {
-  margin: 0;
-  color: var(--color-text-muted);
-  font-size: var(--font-size-small);
-}
-
-.carve-wizard__hint--warning {
-  color: var(--color-text);
-  font-weight: 600;
-}
-
-.carve-wizard__retry {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-}
-
-.carve-wizard__error {
-  margin: 0;
-  color: var(--color-danger);
-}
-
-.carve-wizard__details {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: var(--space-xs) var(--space-md);
-  margin: 0;
-}
-
-.carve-wizard__details dt {
-  color: var(--color-text-muted);
-}
-
-.carve-wizard__details dd {
-  margin: 0;
-}
-
-.carve-wizard__path-text {
-  overflow-wrap: anywhere;
-  user-select: text;
-}
-
-.carve-wizard__job {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-sm);
-}
-
-.carve-wizard__progress {
-  display: block;
-  width: 100%;
-  height: var(--space-sm);
-  accent-color: var(--color-accent);
-}
-
-.carve-wizard__status {
-  margin: 0;
-}
-
-.carve-wizard__results {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-lg);
-}
-
-.carve-wizard__table {
-  width: 100%;
-  max-width: 560px;
-  border-collapse: collapse;
-}
-
-.carve-wizard__files {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: var(--space-lg);
-  align-items: start;
-}
-
-.carve-wizard__caption {
-  padding-bottom: var(--space-xs);
-  font-weight: 600;
-  text-align: left;
-}
-
-.carve-wizard__table th,
-.carve-wizard__table td {
-  padding: var(--space-xs) var(--space-sm);
-  text-align: left;
-  border-bottom: 1px solid var(--color-border);
-}
-
-.carve-wizard__table thead th {
-  color: var(--color-text-muted);
-  font-weight: normal;
-}
-
-.carve-wizard__table tbody th {
-  font-weight: normal;
-}
-
-.carve-wizard__table .carve-wizard__number {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
-.carve-wizard__nav {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-}
-
-.carve-wizard__nav-gap {
-  flex: 1;
-}
-
-.carve-wizard__button {
-  flex: none;
-  padding: var(--space-xs) var(--space-md);
-  color: var(--color-on-accent);
-  background: var(--color-accent);
-  border: 1px solid var(--color-accent);
-  border-radius: var(--space-xs);
-  font: inherit;
-  cursor: pointer;
-}
-
-.carve-wizard__button--secondary {
-  color: var(--color-text);
-  background: var(--color-surface);
-  border-color: var(--color-border);
-}
-
-.carve-wizard__button:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-</style>

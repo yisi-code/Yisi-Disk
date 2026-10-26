@@ -99,6 +99,90 @@ export interface FilePreview {
   imageError: string | null
 }
 
+/** 浏览分区时读出的分区表 */
+export interface BrowseOpened {
+  size: number
+  sectorSize: number
+  scheme: 'mbr' | 'gpt' | 'none'
+  /** 读分区表时发现的问题，界面按 undelete.notes.* 显示 */
+  notes: string[]
+  partitions: PartitionInfo[]
+}
+
+export interface PartitionInfo {
+  number: number
+  offset: number
+  length: number
+  /** MBR 为 0x0C 这样的类型字节，GPT 为类型 GUID */
+  typeId: string
+  /** 常见类型的用途，界面按 partition.role.* 显示 */
+  role: string | null
+  /** GPT 分区名 */
+  name: string
+  bootable: boolean
+  logical: boolean
+  /** fat12、fat16、fat32、exfat、ntfs、bitlocker、ext、unknown、unreadable */
+  filesystem: string
+  label: string | null
+  browsable: boolean
+}
+
+/** live：未删除；intact：已删除、看起来完整；overwritten：已被覆盖；unknown：无法判断 */
+export type EntryState = 'live' | 'intact' | 'overwritten' | 'unknown'
+
+/** 分区里的一项 */
+export interface FsEntry {
+  name: string
+  shortName: string | null
+  /** 名字有字符无法确定（FAT 删除后丢了首字母） */
+  nameUncertain: boolean
+  isDir: boolean
+  size: number
+  modified: string | null
+  created: string | null
+  deleted: boolean
+  state: EntryState
+  /** 引擎给的定位信息，原样传回 */
+  file: string
+  /** 数据在源上的起始字节偏移 */
+  position: number | null
+}
+
+export interface FileListPage {
+  total: number
+  entries: FsEntry[]
+  truncated: boolean
+  overwritten: boolean
+}
+
+export interface PartitionRef {
+  number: number
+  offset: number
+  length: number
+}
+
+/** 要复制的一项：定位信息，以及复制到输出目录下的相对路径（一级一项） */
+export interface CopyItem {
+  file: string
+  path: string[]
+}
+
+/** 复制好（或复制失败）的一个文件 */
+export interface CopiedFile {
+  /** 输出目录下的相对路径，以 / 分隔 */
+  path: string
+  size: number
+  error: string | null
+}
+
+export interface CopySummary {
+  outputDir: string
+  files: number
+  bytes: number
+  failed: number
+  elapsedMs: number
+}
+
 export interface ByteRange {
   offset: number
   length: number
@@ -117,6 +201,7 @@ export interface ReadScanReport {
 export type JobEvent<TResult = unknown> =
   | { jobId: string; kind: 'progress'; data: { done: number; total: number } }
   | { jobId: string; kind: 'found'; data: { files: FoundFile[] } }
+  | { jobId: string; kind: 'copied'; data: { files: CopiedFile[] } }
   | { jobId: string; kind: 'log'; data: { level: string; message: string } }
   | { jobId: string; kind: 'completed'; data: { result: TResult } }
   | {
@@ -189,6 +274,53 @@ export function openRecoveredFile(jobId: string, name: string): Promise<void> {
 /** 在系统的文件管理器里显示 */
 export function revealRecoveredFile(jobId: string, name: string): Promise<void> {
   return invoke<void>('recovered_reveal', { jobId, name })
+}
+
+/**
+ * 浏览分区（找回删除的文件）：读出分区表后引擎一直运行，用 cancelJob 关闭。
+ * 物理磁盘与扫描一样可能先等提权
+ */
+export function openBrowse(jobId: string, target: JobTarget): Promise<BrowseOpened> {
+  return invoke<BrowseOpened>('browse_open', { jobId, target })
+}
+
+/** 列出浏览中的一个目录的一页；dir 为 null 时是根目录。名字很长时引擎给的项数可能少于 limit */
+export function listFiles(
+  jobId: string,
+  partition: number,
+  dir: string | null,
+  offset: number,
+  limit: number,
+): Promise<FileListPage> {
+  return invoke<FileListPage>('browse_list', { jobId, partition, dir, offset, limit })
+}
+
+/** 预览浏览中的一个文件，规则与深度恢复的预览相同 */
+export function previewFsFile(jobId: string, partition: number, file: string): Promise<FilePreview> {
+  return invoke<FilePreview>('browse_preview', { jobId, partition, file })
+}
+
+/**
+ * 把浏览中选中的项复制到 outputDir 下新建的子目录里。源为物理磁盘时，
+ * 输出目录在源盘上（或无法确认不在）会返回 outputOnSource
+ */
+export function startCopy(
+  jobId: string,
+  target: JobTarget,
+  partition: PartitionRef,
+  items: CopyItem[],
+  outputDir: string,
+): Promise<void> {
+  return invoke<void>('job_start_copy', { jobId, target, partition, items, outputDir })
+}
+
+/** 用系统默认程序打开复制出的文件；可执行与脚本类文件宿主不打开（executableBlocked） */
+export function openCopiedFile(jobId: string, path: string): Promise<void> {
+  return invoke<void>('copied_open', { jobId, path })
+}
+
+export function revealCopiedFile(jobId: string, path: string): Promise<void> {
+  return invoke<void>('copied_reveal', { jobId, path })
 }
 
 /** 调用方按自己发起的任务种类给出 TResult：宿主不在事件里标注结果的类型 */
