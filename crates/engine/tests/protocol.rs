@@ -8,8 +8,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use yisi_engine::protocol::{
-    CANCEL, CAPABILITIES, CARVE_START, COMPLETED, CarveSummary, FOUND, FilePreview, FoundFile,
-    HEARTBEAT, LIST_FILE_TYPES, PREVIEW_FILE, PROGRESS, READ_SCAN, ReadScanReport, error_code,
+    BROWSE_OPEN, BrowseOpened, CANCEL, CANCELLED, CAPABILITIES, CARVE_START, COMPLETED, COPIED,
+    COPY_FILES, CarveSummary, CopiedFile, CopySummary, FOUND, FileListPage, FilePreview, FoundFile,
+    HEARTBEAT, LIST_FILE_TYPES, LIST_FILES, PREVIEW_FILE, PREVIEW_FS_FILE, PROGRESS, READ_SCAN,
+    ReadScanReport, error_code,
 };
 use yisi_formats::samples;
 use yisi_rpc::{Id, Message, Request, error_code as rpc_error, read_message, write_message};
@@ -321,4 +323,226 @@ fn carve_recovers_all_five_formats_from_an_image() {
         )
         .unwrap_err();
     assert_eq!(missing.code, error_code::PREVIEW_UNAVAILABLE);
+}
+
+/// 一块 MBR 盘：1 号分区 FAT16（大目录、删除的文件、删除的目录），2 号分区 exFAT。
+fn browse_image(dir: &Path) -> (String, Vec<u8>, Vec<u8>) {
+    use yisi_fs::samples::{ExfatImage, FatImage, FatType, Layout, pattern};
+    use yisi_part::samples::{MbrEntry, mbr_disk};
+
+    let mut fat = FatImage::new(FatType::Fat16);
+    fat.set_label(b"BROWSE     ");
+    let root = fat.root();
+    let many = fat.mkdir(root, "many").as_dir();
+    for index in 0..1500 {
+        fat.add_file(
+            many,
+            &format!("file {index:04}.txt"),
+            &pattern(index as u8, 10),
+            Layout::Contiguous,
+        );
+    }
+    let photos = fat.mkdir(root, "Photos").as_dir();
+    let photo = pattern(1, 5000);
+    fat.add_file(photos, "海边.jpg", &photo, Layout::Fragmented);
+    let report = pattern(2, 7000);
+    fat.add_file(root, "report.docx", &pattern(3, 100), Layout::Contiguous);
+    let old_report = fat.add_file(root, "report.docx", &report, Layout::Contiguous);
+    fat.delete(&old_report);
+    let fat = fat.finish();
+
+    let mut exfat = ExfatImage::new();
+    exfat.set_label("SECOND");
+    let root = exfat.root();
+    exfat.add_file(root, "readme.txt", b"hello", Layout::Contiguous);
+    let exfat = exfat.finish();
+
+    let fat_start = 2048u32;
+    let exfat_start = fat_start + (fat.len() / 512) as u32;
+    let mut image = mbr_disk(
+        exfat_start as usize * 512 + exfat.len(),
+        &[
+            MbrEntry::new(0x06, fat_start, (fat.len() / 512) as u32),
+            MbrEntry::new(0x07, exfat_start, (exfat.len() / 512) as u32),
+        ],
+    );
+    image[fat_start as usize * 512..][..fat.len()].copy_from_slice(&fat);
+    image[exfat_start as usize * 512..][..exfat.len()].copy_from_slice(&exfat);
+    let path = dir.join("browse.img");
+    std::fs::write(&path, &image).unwrap();
+    (path.to_string_lossy().into_owned(), photo, report)
+}
+
+#[test]
+fn browse_lists_pages_previews_and_copies_deleted_files() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-browse");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (image, photo, report) = browse_image(&dir);
+    let source = json!({"type": "image", "path": image, "sectorSize": 512});
+
+    let mut engine = Engine::start();
+    let opened: BrowseOpened = serde_json::from_value(
+        engine
+            .call(BROWSE_OPEN, json!({"jobId": "b1", "source": source}))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(opened.scheme, "mbr");
+    let summary: Vec<_> = opened
+        .partitions
+        .iter()
+        .map(|p| {
+            (
+                p.number,
+                p.filesystem.as_str(),
+                p.label.as_deref(),
+                p.browsable,
+                p.role.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (1, "fat16", Some("BROWSE"), true, Some("fat16")),
+            (2, "exfat", Some("SECOND"), true, Some("ntfsOrExfat")),
+        ]
+    );
+
+    let list = |engine: &mut Engine, dir: Option<&str>, offset: u32, limit: u32| -> FileListPage {
+        serde_json::from_value(
+            engine
+                .call(
+                    LIST_FILES,
+                    json!({"jobId": "b1", "partition": 1, "dir": dir, "offset": offset, "limit": limit}),
+                )
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    // 目录在前，名字不分大小写；同名时未删除的在前
+    let root = list(&mut engine, None, 0, 100);
+    let names: Vec<_> = root
+        .entries
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry.deleted, entry.state.as_str()))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("many", false, "live"),
+            ("Photos", false, "live"),
+            ("report.docx", false, "live"),
+            ("report.docx", true, "intact"),
+        ]
+    );
+    let many = root.entries[0].file.clone();
+    let first = list(&mut engine, Some(&many), 0, 1000);
+    assert_eq!((first.total, first.entries.len()), (1500, 1000));
+    assert_eq!(first.entries[0].name, "file 0000.txt");
+    let rest = list(&mut engine, Some(&many), 1000, 1000);
+    assert_eq!(rest.entries.len(), 500);
+    assert_eq!(rest.entries[499].name, "file 1499.txt");
+
+    let deleted = root.entries[3].clone();
+    assert!(deleted.position.is_some());
+    let preview: FilePreview = serde_json::from_value(
+        engine
+            .call(
+                PREVIEW_FS_FILE,
+                json!({"jobId": "b1", "partition": 1, "file": deleted.file}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(preview.length, report.len() as u64);
+
+    let wrong_job = engine
+        .call(
+            LIST_FILES,
+            json!({"jobId": "other", "partition": 1, "offset": 0, "limit": 10}),
+        )
+        .unwrap_err();
+    assert_eq!(wrong_job.code, error_code::JOB_NOT_FOUND);
+    let bad_token = engine
+        .call(
+            LIST_FILES,
+            json!({"jobId": "b1", "partition": 1, "dir": "x", "offset": 0, "limit": 10}),
+        )
+        .unwrap_err();
+    assert_eq!(bad_token.code, rpc_error::INVALID_PARAMS);
+    let no_partition = engine
+        .call(
+            LIST_FILES,
+            json!({"jobId": "b1", "partition": 9, "offset": 0, "limit": 10}),
+        )
+        .unwrap_err();
+    assert_eq!(no_partition.code, error_code::FS_UNAVAILABLE);
+
+    // 关闭浏览：取消任务，引擎随后退出
+    engine.call(CANCEL, json!({"jobId": "b1"})).unwrap();
+    engine.notifications_until(CANCELLED);
+    assert!(engine.wait_exit().success());
+
+    // 复制另起一个引擎：整个 Photos 目录、同名的现存文件与已删除文件
+    let photos = root.entries[1].file.clone();
+    let partition = &opened.partitions[0];
+    let partition_ref =
+        json!({"number": 1, "offset": partition.offset, "length": partition.length});
+    let mut copier = Engine::start();
+    let moved = copier
+        .call(
+            COPY_FILES,
+            json!({"jobId": "copy-1-xyz", "source": source, "outputDir": dir,
+                   "partition": {"number": 1, "offset": 0, "length": partition.length},
+                   "items": [{"file": photos, "path": ["Photos"]}]}),
+        )
+        .unwrap_err();
+    assert_eq!(moved.code, error_code::FS_UNAVAILABLE);
+    let started = copier
+        .call(
+            COPY_FILES,
+            json!({"jobId": "copy-1-xyz", "source": source, "outputDir": dir, "partition": partition_ref,
+                   "items": [
+                       {"file": photos, "path": ["Photos"]},
+                       {"file": root.entries[2].file, "path": ["report.docx"]},
+                       {"file": deleted.file, "path": ["report.docx"]},
+                   ]}),
+        )
+        .unwrap();
+    let output = dir.join("restored-copy-1-x");
+    assert_eq!(started, json!({"outputDir": output.display().to_string()}));
+    let notifications = copier.notifications_until(COMPLETED);
+    let copied: Vec<CopiedFile> = notifications
+        .iter()
+        .filter(|(method, _)| method == COPIED)
+        .flat_map(|(_, params)| {
+            serde_json::from_value::<Vec<CopiedFile>>(params["files"].clone()).unwrap()
+        })
+        .collect();
+    let paths: Vec<_> = copied
+        .iter()
+        .map(|file| (file.path.as_str(), file.error.is_none()))
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            ("Photos/海边.jpg", true),
+            ("report.docx", true),
+            ("report (1).docx", true)
+        ]
+    );
+    let summary: CopySummary =
+        serde_json::from_value(notifications.last().unwrap().1["result"].clone()).unwrap();
+    assert_eq!((summary.files, summary.failed), (3, 0));
+    assert_eq!(
+        std::fs::read(output.join("Photos").join("海边.jpg")).unwrap(),
+        photo
+    );
+    assert_eq!(
+        std::fs::read(output.join("report (1).docx")).unwrap(),
+        report
+    );
+    assert!(copier.wait_exit().success());
 }

@@ -25,7 +25,9 @@ yisi-broker = { path = "crates/broker" }
 yisi-carve = { path = "crates/carve" }
 yisi-engine = { path = "crates/engine" }
 yisi-formats = { path = "crates/formats" }
+yisi-fs = { path = "crates/fs" }
 yisi-io = { path = "crates/io" }
+yisi-part = { path = "crates/part" }
 yisi-rpc = { path = "crates/rpc" }
 
 [workspace.lints.clippy]

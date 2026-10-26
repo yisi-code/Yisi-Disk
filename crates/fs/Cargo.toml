@@ -4,5 +4,17 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[dependencies]
+thiserror.workspace = true
+yisi-io.workspace = true
+yisi-part.workspace = true
+
+[dev-dependencies]
+yisi-part = { workspace = true, features = ["test-samples"] }
+
+[features]
+# 测试样本生成器（按规范拼出的 FAT / exFAT 镜像），供其他 crate 的测试使用
+test-samples = ["yisi-part/test-samples"]
+
 [lints]
 workspace = true

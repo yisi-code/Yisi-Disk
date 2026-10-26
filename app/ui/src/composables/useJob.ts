@@ -4,6 +4,7 @@ import {
   cancelJob,
   onJobEvent,
   toHostError,
+  type CopiedFile,
   type FoundFile,
   type HostError,
   type JobEvent,
@@ -18,10 +19,11 @@ export type JobStatus =
   | 'failed'
   | 'cancelled'
 
-/** 各类任务自己的结果处理：任务完成时交出结果，深度恢复还会陆续交出找到的文件 */
+/** 各类任务自己的结果处理：任务完成时交出结果，深度恢复陆续交出找到的文件，复制陆续交出复制好的文件 */
 export interface JobHandlers<TResult> {
   onCompleted: (result: TResult) => void
   onFound?: (files: FoundFile[]) => void
+  onCopied?: (files: CopiedFile[]) => void
 }
 
 /**
@@ -128,6 +130,9 @@ export function useJob<TResult>(handlers: JobHandlers<TResult>) {
       }
       case 'found':
         handlers.onFound?.(event.data.files)
+        break
+      case 'copied':
+        handlers.onCopied?.(event.data.files)
         break
       case 'completed':
         handlers.onCompleted(event.data.result)

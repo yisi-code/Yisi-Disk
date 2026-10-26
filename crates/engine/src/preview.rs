@@ -21,7 +21,7 @@ pub fn preview(path: &Path) -> io::Result<FilePreview> {
 }
 
 /// `length` 是文件总长度，`file` 从文件开头读起。
-fn preview_from(mut file: impl Read, length: u64) -> io::Result<FilePreview> {
+pub fn preview_from(mut file: impl Read, length: u64) -> io::Result<FilePreview> {
     let mut head = Vec::with_capacity(PREVIEW_HEAD_BYTES);
     (&mut file)
         .take(PREVIEW_HEAD_BYTES as u64)

@@ -1,4 +1,4 @@
-//! CRC-32（IEEE 802.3，多项式 0xEDB88320），PNG 块校验用。
+//! CRC-32（IEEE 802.3，多项式 0xEDB88320）：GPT 的头与分区表项、PNG 的块都用它校验。
 
 const TABLE: [u32; 256] = make_table();
 
@@ -27,7 +27,7 @@ const fn make_table() -> [u32; 256] {
 }
 
 /// 依次计算多段数据的 CRC-32，相当于把它们拼起来再算。
-pub(crate) fn crc32(parts: &[&[u8]]) -> u32 {
+pub fn crc32(parts: &[&[u8]]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
     for part in parts {
         for &byte in *part {
