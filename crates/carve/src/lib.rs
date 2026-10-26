@@ -1,6 +1,8 @@
 //! 深度恢复：不依赖文件系统，按块顺序读设备，块开头命中文件头时开始恢复一个文件，
 //! 由格式插件判断它在哪里结束，写到输出目录。
 //!
+//! 读设备与识别在调用线程里进行，写出交给单独的写线程，输出盘慢时不拖住扫描。
+//!
 //! 目前只处理连续存放的文件；碎片重组、块大小探测、断点续传在后续阶段加入。
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
@@ -9,6 +11,9 @@ mod sink;
 
 use std::collections::BTreeMap;
 use std::io;
+use std::panic;
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::thread;
 use std::time::Instant;
 
 use yisi_formats::{DataCheck, Recovering, Registry};
@@ -18,6 +23,13 @@ pub use sink::{DirectorySink, RecoveredFile, Sink, SinkFile};
 
 /// 每次从设备读这么多再按块处理，进度也按这个粒度报告。
 const CHUNK_SIZE: usize = 1 << 20;
+
+/// 一个文件的数据攒到这么多再交给写线程。
+const FLUSH_SIZE: usize = 1 << 20;
+
+/// 写线程的队列最多排这么多条；排满时扫描等待。每条数据不超过约 [`FLUSH_SIZE`]，
+/// 在途数据因此不超过约 32 MiB。
+const QUEUE_DEPTH: usize = 32;
 
 pub struct CarveOptions {
     /// 文件只可能从这个大小的整数倍处开始，通常是扇区大小。
@@ -59,22 +71,79 @@ pub enum CarveError {
 }
 
 /// 扫描整个设备，把找到的文件写进 `sink`。被取消时返回 `None`，已写出的完整文件保留。
+///
+/// `sink` 在写线程里使用；`control` 只在调用线程里调用。返回前等写线程把排队的文件写完，
+/// 报告与 [`CarveControl::found`] 只计入已经写完、改好名的文件。
 pub fn carve(
     device: &dyn BlockDevice,
     registry: &Registry,
     options: &CarveOptions,
-    sink: &mut dyn Sink,
+    sink: &mut (dyn Sink + Send),
     control: &dyn CarveControl,
 ) -> Result<Option<CarveReport>, CarveError> {
     let block_size = usize::try_from(options.block_size)
         .ok()
         .filter(|size| size.is_power_of_two() && (512..=CHUNK_SIZE).contains(size))
         .ok_or(CarveError::InvalidBlockSize(options.block_size))?;
-    let block = block_size as u64;
     let started = Instant::now();
+    let mut report = CarveReport::default();
+
+    let finished = thread::scope(|scope| {
+        let (commands, inbox) = mpsc::sync_channel(QUEUE_DEPTH);
+        let (written, done) = mpsc::channel();
+        let writer = scope.spawn(move || write_files(sink, inbox, written));
+        let mut output = Output {
+            commands,
+            done,
+            pending: Vec::new(),
+            current: None,
+            opened: false,
+        };
+        let scanned = scan(
+            device,
+            registry,
+            options,
+            block_size,
+            &mut output,
+            &mut report,
+            control,
+        );
+        // 关掉队列，等写线程把排着的文件写完
+        let Output { commands, done, .. } = output;
+        drop(commands);
+        let writer_result = writer
+            .join()
+            .unwrap_or_else(|payload| panic::resume_unwind(payload));
+        for file in done.try_iter() {
+            record(&file, &mut report, control);
+        }
+        // 写线程出错时，扫描那边只知道队列断了，真正的原因在这里
+        writer_result.map_err(CarveError::Output)?;
+        scanned
+    })?;
+
+    if !finished {
+        return Ok(None);
+    }
+    let size = device.size();
+    control.progress(size, size);
+    report.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    Ok(Some(report))
+}
+
+/// 读设备、识别文件，把要写的内容排进 `output`。扫完返回 `true`，被取消返回 `false`。
+fn scan(
+    device: &dyn BlockDevice,
+    registry: &Registry,
+    options: &CarveOptions,
+    block_size: usize,
+    output: &mut Output,
+    report: &mut CarveReport,
+    control: &dyn CarveControl,
+) -> Result<bool, CarveError> {
+    let block = block_size as u64;
     let size = device.size();
     let mut reader = ChunkReader::new(device, block_size);
-    let mut report = CarveReport::default();
     let mut active: Option<Active> = None;
     let mut position = 0u64;
     let mut next_progress = 0u64;
@@ -92,32 +161,33 @@ pub fn carve(
                 .or_else(|| current.recovering.finish(current.received));
             match length {
                 Some(length) => {
-                    commit(current, length, &mut report, control)?;
+                    output.commit(length)?;
                     break;
                 }
                 None => {
                     position = current.start + block;
-                    current.file.discard().map_err(CarveError::Output)?;
+                    output.discard()?;
                     continue;
                 }
             }
         }
         if position >= next_progress {
             control.progress(position, size);
+            output.collect(report, control);
             next_progress = position + CHUNK_SIZE as u64;
         }
         if control.is_cancelled() {
-            if let Some(current) = active.take() {
-                current.file.discard().map_err(CarveError::Output)?;
+            if active.take().is_some() {
+                output.discard()?;
             }
-            return Ok(None);
+            return Ok(false);
         }
 
         let Some(data) = reader.block(position) else {
             // 读不出的块：正在恢复的文件缺了一段，放弃它
             report.unreadable_bytes += block.min(size - position);
-            if let Some(current) = active.take() {
-                current.file.discard().map_err(CarveError::Output)?;
+            if active.take().is_some() {
+                output.discard()?;
             }
             position += block;
             continue;
@@ -131,8 +201,8 @@ pub fn carve(
             && let Some(mut current) = active.take()
         {
             match current.recovering.finish(current.received) {
-                Some(length) => commit(current, length, &mut report, control)?,
-                None => current.file.discard().map_err(CarveError::Output)?,
+                Some(length) => output.commit(length)?,
+                None => output.discard()?,
             }
             continue;
         }
@@ -147,16 +217,12 @@ pub fn carve(
                 continue;
             };
             let info = format.info();
-            let file = sink
-                .create(position, info.extension)
-                .map_err(CarveError::Output)?;
+            output.begin(position, info.extension);
             active = Some(Active {
                 start: position,
-                extension: info.extension,
                 max_size: info.max_size,
                 limit: info.max_size.min(size - position),
                 recovering: found.recovering,
-                file,
                 received: 0,
                 known_length: None,
             });
@@ -165,15 +231,14 @@ pub fn carve(
             continue;
         };
 
-        match feed(current, data)? {
+        match feed(current, output, data)? {
             Fed::More => position += block,
             Fed::Complete {
                 length,
                 before_block,
             } => {
-                if let Some(current) = active.take() {
-                    commit(current, length, &mut report, control)?;
-                }
+                active = None;
+                output.commit(length)?;
                 if !before_block {
                     position += block;
                 }
@@ -182,25 +247,20 @@ pub fn carve(
                 if let Some(current) = active.take() {
                     // 误识别的文件头：从它的下一块重新找，它覆盖过的块里可能有真正的文件
                     position = current.start + block;
-                    current.file.discard().map_err(CarveError::Output)?;
+                    output.discard()?;
                 }
             }
         }
     }
-
-    control.progress(size, size);
-    report.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    Ok(Some(report))
+    Ok(true)
 }
 
 struct Active {
     start: u64,
-    extension: &'static str,
     max_size: u64,
     /// 文件长度的上限：格式的最大尺寸与设备剩余容量中较小的一个。
     limit: u64,
     recovering: Box<dyn Recovering>,
-    file: Box<dyn SinkFile>,
     received: u64,
     /// 插件给出的文件长度超过已收到的数据时，记下长度，之后按长度取数据。
     known_length: Option<u64>,
@@ -216,11 +276,15 @@ enum Fed {
     Invalid,
 }
 
-fn feed(active: &mut Active, data: &[u8]) -> Result<Fed, CarveError> {
+fn feed(active: &mut Active, output: &mut Output, data: &[u8]) -> Result<Fed, CarveError> {
     let data_len = data.len() as u64;
     if let Some(length) = active.known_length {
         let take = length.saturating_sub(active.received).min(data_len);
-        write(active, data.get(..take as usize).unwrap_or_default())?;
+        write(
+            active,
+            output,
+            data.get(..take as usize).unwrap_or_default(),
+        )?;
         return Ok(if active.received >= length {
             Fed::Complete {
                 length,
@@ -254,7 +318,7 @@ fn feed(active: &mut Active, data: &[u8]) -> Result<Fed, CarveError> {
             {
                 return Ok(Fed::Invalid);
             }
-            write(active, data)?;
+            write(active, output, data)?;
             Ok(Fed::More)
         }
         DataCheck::Complete(length) => {
@@ -271,6 +335,7 @@ fn feed(active: &mut Active, data: &[u8]) -> Result<Fed, CarveError> {
             if in_this_block <= data_len {
                 write(
                     active,
+                    output,
                     data.get(..in_this_block as usize).unwrap_or_default(),
                 )?;
                 Ok(Fed::Complete {
@@ -278,7 +343,7 @@ fn feed(active: &mut Active, data: &[u8]) -> Result<Fed, CarveError> {
                     before_block: false,
                 })
             } else {
-                write(active, data)?;
+                write(active, output, data)?;
                 active.known_length = Some(length);
                 Ok(Fed::More)
             }
@@ -287,26 +352,134 @@ fn feed(active: &mut Active, data: &[u8]) -> Result<Fed, CarveError> {
     }
 }
 
-fn write(active: &mut Active, data: &[u8]) -> Result<(), CarveError> {
-    active.file.write(data).map_err(CarveError::Output)?;
+fn write(active: &mut Active, output: &mut Output, data: &[u8]) -> Result<(), CarveError> {
+    output.write(data)?;
     active.received += data.len() as u64;
     Ok(())
 }
 
-fn commit(
-    active: Active,
-    length: u64,
-    report: &mut CarveReport,
-    control: &dyn CarveControl,
-) -> Result<(), CarveError> {
-    let extension = active.extension;
-    let file = active.file.commit(length).map_err(CarveError::Output)?;
+fn record(file: &RecoveredFile, report: &mut CarveReport, control: &dyn CarveControl) {
     report.files += 1;
-    report.bytes += length;
-    let totals = report.by_type.entry(extension.to_owned()).or_default();
+    report.bytes += file.length;
+    let totals = report.by_type.entry(file.extension.clone()).or_default();
     totals.count += 1;
-    totals.bytes += length;
-    control.found(&file);
+    totals.bytes += file.length;
+    control.found(file);
+}
+
+/// 交给写线程的操作，按顺序执行；同一时间只有一个文件在写。
+enum Command {
+    Create {
+        offset: u64,
+        extension: &'static str,
+    },
+    Write(Vec<u8>),
+    Commit(u64),
+    Discard,
+}
+
+/// 扫描这一侧的写出接口：把当前文件的数据攒够 [`FLUSH_SIZE`] 再排进队列。
+/// 文件在第一次交出数据之前就被放弃时，写线程完全不知道它，输出盘上不留任何操作。
+struct Output {
+    commands: SyncSender<Command>,
+    done: Receiver<RecoveredFile>,
+    pending: Vec<u8>,
+    /// 当前文件的起始偏移与扩展名。
+    current: Option<(u64, &'static str)>,
+    /// 写线程是否已经为当前文件建了 `.part`。
+    opened: bool,
+}
+
+impl Output {
+    fn begin(&mut self, offset: u64, extension: &'static str) {
+        self.pending.clear();
+        self.current = Some((offset, extension));
+        self.opened = false;
+    }
+
+    fn write(&mut self, data: &[u8]) -> Result<(), CarveError> {
+        self.pending.extend_from_slice(data);
+        if self.pending.len() >= FLUSH_SIZE {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn commit(&mut self, length: u64) -> Result<(), CarveError> {
+        self.flush()?;
+        self.current = None;
+        self.opened = false;
+        self.send(Command::Commit(length))
+    }
+
+    fn discard(&mut self) -> Result<(), CarveError> {
+        self.pending.clear();
+        self.current = None;
+        if std::mem::take(&mut self.opened) {
+            self.send(Command::Discard)?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), CarveError> {
+        if !self.opened
+            && let Some((offset, extension)) = self.current
+        {
+            self.send(Command::Create { offset, extension })?;
+            self.opened = true;
+        }
+        if !self.pending.is_empty() {
+            let data = std::mem::take(&mut self.pending);
+            self.send(Command::Write(data))?;
+        }
+        Ok(())
+    }
+
+    /// 队列排满时等待；写线程已经退出时报错，原因由 [`carve`] 从写线程取回。
+    fn send(&self, command: Command) -> Result<(), CarveError> {
+        self.commands
+            .send(command)
+            .map_err(|_| CarveError::Output(io::Error::other("写线程已退出")))
+    }
+
+    /// 把写线程已经写完的文件计入报告并通知。
+    fn collect(&self, report: &mut CarveReport, control: &dyn CarveControl) {
+        for file in self.done.try_iter() {
+            record(&file, report, control);
+        }
+    }
+}
+
+/// 写线程：按顺序执行队列里的操作，每写完一个文件把结果送回。出错即停，返回错误。
+fn write_files(
+    sink: &mut (dyn Sink + Send),
+    commands: Receiver<Command>,
+    written: Sender<RecoveredFile>,
+) -> io::Result<()> {
+    let mut current: Option<Box<dyn SinkFile>> = None;
+    for command in commands {
+        match command {
+            Command::Create { offset, extension } => {
+                current = Some(sink.create(offset, extension)?);
+            }
+            Command::Write(data) => {
+                if let Some(file) = current.as_mut() {
+                    file.write(&data)?;
+                }
+            }
+            Command::Commit(length) => {
+                if let Some(file) = current.take() {
+                    // 调用线程 panic 时没人接收，文件照样留在磁盘上
+                    let _ = written.send(file.commit(length)?);
+                }
+            }
+            Command::Discard => {
+                if let Some(file) = current.take() {
+                    file.discard()?;
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -379,7 +552,7 @@ impl<'a> ChunkReader<'a> {
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
-    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
 
     use yisi_formats::samples::{self, Noise};
     use yisi_io::IoError;
@@ -422,11 +595,13 @@ mod tests {
         }
     }
 
-    type Saved = Rc<RefCell<Vec<(RecoveredFile, Vec<u8>)>>>;
+    type Saved = Arc<Mutex<Vec<(RecoveredFile, Vec<u8>)>>>;
 
     #[derive(Default)]
     struct MemorySink {
         saved: Saved,
+        /// 建过多少个文件，包括后来丢弃的。
+        created: usize,
     }
 
     struct MemoryFile {
@@ -438,8 +613,9 @@ mod tests {
 
     impl Sink for MemorySink {
         fn create(&mut self, offset: u64, extension: &str) -> io::Result<Box<dyn SinkFile>> {
+            self.created += 1;
             Ok(Box::new(MemoryFile {
-                saved: Rc::clone(&self.saved),
+                saved: Arc::clone(&self.saved),
                 offset,
                 extension: extension.to_owned(),
                 data: Vec::new(),
@@ -461,7 +637,7 @@ mod tests {
                 offset: self.offset,
                 length,
             };
-            self.saved.borrow_mut().push((file.clone(), self.data));
+            self.saved.lock().unwrap().push((file.clone(), self.data));
             Ok(file)
         }
 
@@ -548,6 +724,16 @@ mod tests {
         enabled: Option<Vec<bool>>,
         control: &Recorder,
     ) -> (Option<CarveReport>, Vec<(RecoveredFile, Vec<u8>)>) {
+        let (report, sink) = run_into_sink(device, enabled, control);
+        let saved = sink.saved.lock().unwrap().clone();
+        (report, saved)
+    }
+
+    fn run_into_sink(
+        device: &MemoryDevice,
+        enabled: Option<Vec<bool>>,
+        control: &Recorder,
+    ) -> (Option<CarveReport>, MemorySink) {
         let registry = Registry::builtin();
         let options = CarveOptions {
             block_size: BLOCK as u32,
@@ -555,8 +741,7 @@ mod tests {
         };
         let mut sink = MemorySink::default();
         let report = carve(device, &registry, &options, &mut sink, control).unwrap();
-        let saved = sink.saved.borrow().clone();
-        (report, saved)
+        (report, sink)
     }
 
     fn five_formats() -> ImageBuilder {
@@ -700,5 +885,89 @@ mod tests {
             &Recorder::default(),
         );
         assert!(matches!(result, Err(CarveError::InvalidBlockSize(300))));
+    }
+
+    #[test]
+    fn file_larger_than_one_flush_is_written_in_pieces_intact() {
+        let mut image = ImageBuilder::new();
+        image
+            .garbage(1)
+            .file("mp4", samples::mp4(FLUSH_SIZE * 3 + 100, false))
+            .garbage(1);
+        let (_, sink) = run_into_sink(&image.device(vec![]), None, &Recorder::default());
+        let saved = sink.saved.lock().unwrap();
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].1 == image.placed[0].2);
+        assert_eq!(sink.created, 1);
+    }
+
+    #[test]
+    fn candidate_abandoned_before_its_first_flush_never_touches_the_sink() {
+        let mut image = ImageBuilder::new();
+        let mut fake = b"PK\x03\x04\x14\x00\x00\x00\x00\x00".to_vec();
+        fake.resize(BLOCK, 0x41);
+        image
+            .file("fake", fake)
+            .file("png", samples::png(&[50]))
+            .garbage(1);
+        let (_, sink) = run_into_sink(&image.device(vec![]), None, &Recorder::default());
+        assert_eq!(sink.saved.lock().unwrap().len(), 1);
+        assert_eq!(sink.created, 1, "误识别的 ZIP 不应建文件");
+    }
+
+    #[test]
+    fn cancellation_keeps_and_reports_files_already_queued() {
+        let mut image = five_formats();
+        image.garbage(4096); // 五个文件都在第一个 1 MiB 里，第二次报进度后取消
+        let control = Recorder {
+            cancel_after_progress: Some(1),
+            ..Recorder::default()
+        };
+        let (report, saved) = run(&image.device(vec![]), None, &control);
+        assert!(report.is_none());
+        assert_eq!(saved.len(), 5);
+        assert_eq!(
+            *control.found.borrow(),
+            saved
+                .iter()
+                .map(|(file, _)| file.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    struct FailingSink;
+
+    impl Sink for FailingSink {
+        fn create(&mut self, _offset: u64, _extension: &str) -> io::Result<Box<dyn SinkFile>> {
+            Err(io::Error::other("输出盘已满"))
+        }
+    }
+
+    #[test]
+    fn writer_error_is_returned_with_its_own_cause() {
+        let registry = Registry::builtin();
+        let options = CarveOptions {
+            block_size: BLOCK as u32,
+            enabled: vec![true; registry.formats().len()],
+        };
+        // 五个文件：写线程在第一个上出错后，扫描还要再交出后面几个，发送失败。
+        // 一个文件：扫描先结束，错误要在等写线程时取回。
+        let mut single = ImageBuilder::new();
+        single.garbage(1).file("png", samples::png(&[80]));
+        for image in [five_formats(), single] {
+            let control = Recorder::default();
+            let result = carve(
+                &image.device(vec![]),
+                &registry,
+                &options,
+                &mut FailingSink,
+                &control,
+            );
+            match result {
+                Err(CarveError::Output(error)) => assert_eq!(error.to_string(), "输出盘已满"),
+                other => panic!("应返回写出错误，实际 {other:?}"),
+            }
+            assert!(control.found.borrow().is_empty());
+        }
     }
 }
