@@ -8,11 +8,11 @@ use std::path::Path;
 use std::ptr;
 
 use windows_sys::Win32::Storage::FileSystem::{
-    GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW, GetVolumePathNameW,
+    GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
 };
 
-use crate::volume::{Existing, nearest_existing};
-use crate::{volume_disk_numbers, volume_guid, volume_root as root_of};
+use crate::volume::volume_guid_root;
+use crate::{IoError, volume_disk_numbers, volume_guid, volume_root as root_of};
 
 /// `GetVolumeInformationW` 报告的文件系统标志：支持稀疏文件（`FILE_SUPPORTS_SPARSE_FILES`）。
 const SUPPORTS_SPARSE_FILES: u32 = 0x0000_0040;
@@ -49,34 +49,21 @@ pub struct MountedVolume {
     pub disks: Vec<u32>,
 }
 
-/// `path` 最近一级已存在的目录（以 0 结尾的 UTF-16）：`path` 可以还不存在、也可以是已有的文件。
-fn existing_dir(path: &Path) -> io::Result<Vec<u16>> {
-    Ok(wide(
-        nearest_existing(path, Existing::Directory)?.as_os_str(),
-    ))
-}
-
-/// 目录所在卷的根路径，如 `C:\`（以 0 结尾）。
-fn volume_root(existing: &[u16]) -> io::Result<Vec<u16>> {
-    let mut root = vec![0u16; NAME_BUFFER];
-    // SAFETY: `existing` 以 0 结尾；`root` 的指针与长度来自独占借用的缓冲区，函数最多写入这么多个单元。
-    let found =
-        unsafe { GetVolumePathNameW(existing.as_ptr(), root.as_mut_ptr(), NAME_BUFFER as u32) };
-    if found == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(root)
-}
-
-/// 查询 `path` 所在的卷。`path` 可以还不存在、也可以是已有的文件：取最近一级已存在的目录。
-pub fn volume_info(path: impl AsRef<Path>) -> io::Result<VolumeInfo> {
-    let existing = existing_dir(path.as_ref())?;
-    let root = volume_root(&existing)?;
+/// 查询 `path` 所在的卷。`path` 可以还不存在、也可以是已有的文件；卷怎么找与 [`volume_guid`] 相同
+/// （随链接走到真实位置），然后按卷的 GUID 根路径查属性与剩余空间。
+pub fn volume_info(path: impl AsRef<Path>) -> Result<VolumeInfo, IoError> {
+    let mut root = volume_guid_root(path.as_ref())?;
+    root.push(0);
+    // 紧接在失败的系统调用之后调用，取的才是它的错误码
+    let failed = |what: &'static str| IoError::Query {
+        what,
+        source: io::Error::last_os_error(),
+    };
 
     let mut flags = 0u32;
     let mut label = vec![0u16; NAME_BUFFER];
     let mut name = vec![0u16; NAME_BUFFER];
-    // SAFETY: `root` 是上面写入的、以 0 结尾的卷根路径；不要序列号与最长文件名，传空指针；
+    // SAFETY: `root` 是以 0 结尾、以反斜杠结尾的卷根路径；不要序列号与最长文件名，传空指针；
     // 卷标、标志与文件系统名分别写进独占借用的 `label`、`flags`、`name`，长度如实传入。
     let queried = unsafe {
         GetVolumeInformationW(
@@ -91,16 +78,16 @@ pub fn volume_info(path: impl AsRef<Path>) -> io::Result<VolumeInfo> {
         )
     };
     if queried == 0 {
-        return Err(io::Error::last_os_error());
+        return Err(failed("卷属性"));
     }
 
     let mut free = 0u64;
     let mut total = 0u64;
-    // SAFETY: `existing` 以 0 结尾；可用空间与总容量写进独占借用的两个变量，剩余的总空闲量不要，传空指针。
+    // SAFETY: `root` 以 0 结尾；可用空间与总容量写进独占借用的两个变量，剩余的总空闲量不要，传空指针。
     let measured =
-        unsafe { GetDiskFreeSpaceExW(existing.as_ptr(), &mut free, &mut total, ptr::null_mut()) };
+        unsafe { GetDiskFreeSpaceExW(root.as_ptr(), &mut free, &mut total, ptr::null_mut()) };
     if measured == 0 {
-        return Err(io::Error::last_os_error());
+        return Err(failed("剩余空间"));
     }
     Ok(VolumeInfo {
         label: until_nul(&label),
@@ -161,7 +148,7 @@ mod tests {
         assert!(!volume.file_system.is_empty());
         assert!(volume.free_bytes > 0);
         assert!(volume.total_bytes >= volume.free_bytes);
-        // 已有的文件：按它所在的目录查
+        // 已有的文件：打开它本身查所在的卷
         let file = dir.join(format!("yisi-volume-{}.img", std::process::id()));
         std::fs::write(&file, b"x").unwrap();
         let of_file = volume_info(&file);
@@ -177,11 +164,11 @@ mod tests {
 
         let system = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_owned());
         let system_root = format!(r"{system}\");
-        for path in [
-            Path::new(&system_root),
-            Path::new(env!("CARGO_MANIFEST_DIR")),
-        ] {
-            let root = volume_root(&existing_dir(path).unwrap()).unwrap();
+        let here = env!("CARGO_MANIFEST_DIR");
+        let here_root = format!(r"{}\", &here[..2]);
+        // 第二项是挂载点（盘符根目录），按挂载点查出的 GUID 名作对照
+        for (path, mount_point) in [(system_root.as_str(), &system_root), (here, &here_root)] {
+            let root = wide(OsStr::new(mount_point));
             let mut name = vec![0u16; NAME_BUFFER];
             // SAFETY: `root` 是以 0 结尾、以反斜杠结尾的卷根路径；`name` 的指针与长度来自独占借用的缓冲区。
             let found = unsafe {
@@ -192,12 +179,7 @@ mod tests {
                 )
             };
             assert_ne!(found, 0, "{}", io::Error::last_os_error());
-            assert_eq!(
-                volume_guid(path).unwrap(),
-                until_nul(&name),
-                "{}",
-                path.display()
-            );
+            assert_eq!(volume_guid(path).unwrap(), until_nul(&name), "{path}");
         }
     }
 
