@@ -6,6 +6,7 @@ import PartitionFiles from './PartitionFiles.vue'
 import SourcePicker from './SourcePicker.vue'
 import WizardSteps from './WizardSteps.vue'
 import JobControls from './JobControls.vue'
+import ReadHealthHint from './ReadHealthHint.vue'
 import { useBrowse } from '../composables/useBrowse'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { usePartitionText } from '../composables/usePartitionText'
@@ -342,6 +343,11 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
             :max="search.total.value || 1"
           ></progress>
           <p class="wizard__status">{{ statusText }}</p>
+          <ReadHealthHint
+            :health="search.readHealth.value"
+            :source-is-disk="search.target.value?.kind === 'disk'"
+            context="scan"
+          />
           <p v-if="search.isUnresponsive.value" class="wizard__error" role="alert">
             {{ t('common.unresponsive') }}
           </p>

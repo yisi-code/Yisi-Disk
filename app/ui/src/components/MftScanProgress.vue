@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import ReadHealthHint from './ReadHealthHint.vue'
 import type { useBrowse } from '../composables/useBrowse'
 import { formatBytes } from '../utils/format'
 
 /**
- * 打开 NTFS 分区时扫描 MFT 的进度：进度条、已扫描多少、取消扫描。找回删除的文件与找回丢失的分区共用
+ * 打开 NTFS 分区时扫描 MFT 的进度：进度条、已扫描多少、读得慢的原因、取消扫描。找回删除的文件与找回丢失的分区共用
  */
 const props = defineProps<{
   browse: ReturnType<typeof useBrowse>
@@ -32,6 +33,11 @@ const statusText = computed(() =>
       :max="browse.scanTotal.value || 1"
     ></progress>
     <p class="wizard__status">{{ statusText }}</p>
+    <ReadHealthHint
+      :health="browse.readHealth.value"
+      :source-is-disk="browse.target.value?.kind === 'disk'"
+      context="scan"
+    />
     <div>
       <button
         class="wizard__button wizard__button--secondary"

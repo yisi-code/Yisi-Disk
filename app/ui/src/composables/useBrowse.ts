@@ -31,7 +31,8 @@ export function useBrowse() {
   const isCancellingScan = ref(false)
   const scanFailure = ref<HostError | null>(null)
   // 浏览任务不会「完成」，只会被关闭或失败
-  const job = useJob<null>({ onCompleted() {} })
+  // 浏览会话开着时多半在等用户点选；扫描 MFT 时才算在干活
+  const job = useJob<null>({ onCompleted() {} }, { isIdle: () => !isScanning.value })
 
   const isOpen = computed(() => job.status.value === 'running' && opened.value !== null)
   /** 正在打开或正在关闭，这时不能再打开新的会话 */
@@ -132,6 +133,7 @@ export function useBrowse() {
     target,
     failure: job.failure,
     isUnresponsive: job.isUnresponsive,
+    readHealth: job.readHealth,
     isOpen,
     isTransitioning,
     scanResults,

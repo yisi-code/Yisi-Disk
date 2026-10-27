@@ -8,6 +8,7 @@
   --color-on-accent: #ffffff;
   --color-danger: #c62828;
   --color-warning: #b26a00;
+  --color-success: #2e7d32;
 
   --font-family-base: system-ui, 'Segoe UI', 'Microsoft YaHei UI', 'PingFang SC', sans-serif;
   --font-size-body: 14px;
@@ -40,6 +41,7 @@
     --color-on-accent: #0f1115;
     --color-danger: #ef6b6b;
     --color-warning: #e0a03c;
+    --color-success: #66bb6a;
   }
 }
 
@@ -55,7 +57,9 @@ body {
   margin: 0;
 }
 
+/* 外框固定铺满窗口，只在内容区里滚动：整页滚动会把标题栏推出去、底下露出空白 */
 body {
+  overflow: hidden;
   background: var(--color-bg);
   color: var(--color-text);
   font-family: var(--font-family-base);

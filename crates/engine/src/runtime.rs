@@ -13,10 +13,11 @@ use yisi_carve::{DirectorySink, ScanOnlySink, Sink};
 use yisi_engine::protocol::{
     self, BROWSE_OPEN, BrowseParams, CANCEL, CANCEL_SCAN, CAPABILITIES, CARVE_EXTRACT, CARVE_START,
     COPY_FILES, Capabilities, CarveParams, CarveStarted, CopyParams, CopyStarted, ExtractParams,
-    FS_CHECK, FsCheckParams, HEARTBEAT, HEARTBEAT_INTERVAL, IMAGE_CREATE, IMAGE_RESUME,
-    ImageParams, JobRef, LIST_DISKS, LIST_FILE_TYPES, LIST_FILES, ListFilesParams, PAUSE,
-    PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PreviewFsParams, PreviewParams,
-    PreviewRangeParams, READ_SCAN, RESUME, ReadScanParams, SCAN_DELETED, ScanParams, Source,
+    FS_CHECK, FsCheckParams, HEARTBEAT, HEARTBEAT_INTERVAL, IMAGE_CREATE, IMAGE_DESCRIBE,
+    IMAGE_INSPECT, IMAGE_RESUME, ImageDescribeParams, ImageInspectParams, ImageParams, JobRef,
+    LIST_DISKS, LIST_FILE_TYPES, LIST_FILES, ListFilesParams, PAUSE, PREVIEW_FILE, PREVIEW_FS_FILE,
+    PREVIEW_RANGE, PreviewFsParams, PreviewParams, PreviewRangeParams, READ_SCAN, RESUME,
+    ReadScanParams, SCAN_DELETED, ScanParams, Source,
 };
 use yisi_engine::protocol::{DIAGNOSE_BOOT, DiagnoseBootParams};
 #[cfg(windows)]
@@ -33,7 +34,8 @@ use crate::browse::{self, Session};
 use crate::copy_job::{self, Planned};
 use crate::job::{self, JobContext, JobOutcome, ProgressSender, RunningJob};
 use crate::{
-    boot_check, carve_job, extract_job, fs_check_job, image_job, preview, read_scan, search_job,
+    boot_check, carve_job, extract_job, fs_check_job, image_inspect, image_job, preview, read_scan,
+    reading, search_job,
 };
 
 /// 浏览任务每隔这么久看一次有没有被取消。
@@ -41,6 +43,8 @@ const BROWSE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 /// 一次复制最多选这么多项、路径最多这么多级。
 const MAX_COPY_ITEMS: usize = 100_000;
 const MAX_COPY_DEPTH: usize = 64;
+/// 一次最多查看这么多个以前做过的镜像。
+const MAX_DESCRIBE_IMAGES: usize = 100;
 
 /// 向宿主发消息。答复、通知可能来自不同线程，写入时加锁，保证一帧不被拆开。
 pub struct Outbox {
@@ -125,13 +129,15 @@ impl State {
     }
 }
 
-/// 启动任务：结束时通知事件循环收尾。
+/// 启动任务：运行期间每秒报一次读源的统计，结束时通知事件循环收尾。
 fn start_job<W>(job_id: String, outbox: &Arc<Outbox>, events: &Sender<Event>, work: W) -> RunningJob
 where
     W: FnOnce(&JobContext) -> Result<JobOutcome, String> + Send + 'static,
 {
     let finished = events.clone();
+    let stop_reading = reading::spawn_reporter(job_id.clone(), Arc::clone(outbox));
     job::start(job_id, Arc::clone(outbox), work, move || {
+        stop_reading.store(true, Ordering::Relaxed);
         let _ = finished.send(Event::JobFinished);
     })
 }
@@ -224,6 +230,8 @@ fn dispatch_now(
                 COPY_FILES.to_owned(),
                 IMAGE_CREATE.to_owned(),
                 IMAGE_RESUME.to_owned(),
+                IMAGE_INSPECT.to_owned(),
+                IMAGE_DESCRIBE.to_owned(),
                 SEARCH_PARTITIONS.to_owned(),
                 OPEN_RANGE.to_owned(),
                 DIAGNOSE_BOOT.to_owned(),
@@ -386,29 +394,48 @@ fn dispatch_now(
         IMAGE_CREATE | IMAGE_RESUME => {
             state.ensure_idle()?;
             let params: ImageParams = request.params()?;
-            let image_path = Path::new(&params.image_path);
-            if !image_path.is_absolute() || image_path.file_name().is_none() {
-                return Err(ErrorObject::new(
-                    error_code::INVALID_PARAMS,
-                    format!("镜像应为含文件名的完整路径：{}", params.image_path),
-                ));
-            }
+            let image_path = image_path_param(&params.image_path)?;
             let (device, identity) = open_image_source(&params.source, image_path)?;
             // 确认镜像不在源盘上之后，才创建还不存在的上级目录
             if let Some(parent) = image_path.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|error| output_unavailable(parent, &error))?;
             }
+            let image_request = image_job::ImageRequest {
+                ranges: params.ranges,
+                reset: params.reset,
+                copy_only: params.copy_only,
+            };
             let prepared = if request.method == IMAGE_CREATE {
-                image_job::create(device, image_path, identity)?
+                image_job::create(device, image_path, identity, &image_request)?
             } else {
-                image_job::resume(device, image_path, identity)?
+                image_job::resume(device, image_path, identity, &image_request)?
             };
             let started = prepared.started();
             state.job = Some(start_job(params.job_id, outbox, events, move |context| {
                 image_job::run(prepared, context)
             }));
             to_result(&started)
+        }
+        IMAGE_INSPECT => {
+            let params: ImageInspectParams = request.params()?;
+            let image_path = image_path_param(&params.image_path)?;
+            let (device, identity) = open_image_source(&params.source, image_path)?;
+            to_result(&image_inspect::inspect(
+                Arc::from(device),
+                image_path,
+                &identity,
+            ))
+        }
+        IMAGE_DESCRIBE => {
+            let params: ImageDescribeParams = request.params()?;
+            if params.image_paths.len() > MAX_DESCRIBE_IMAGES {
+                return Err(ErrorObject::new(
+                    error_code::INVALID_PARAMS,
+                    format!("一次最多查看 {MAX_DESCRIBE_IMAGES} 个镜像"),
+                ));
+            }
+            to_result(&image_inspect::describe(&params.image_paths))
         }
         FS_CHECK => {
             state.ensure_idle()?;
@@ -473,10 +500,23 @@ fn dispatch_now(
     }
 }
 
+/// 镜像路径参数：要是含文件名的完整路径。
+fn image_path_param(path: &str) -> Result<&Path, ErrorObject> {
+    let image_path = Path::new(path);
+    if !image_path.is_absolute() || image_path.file_name().is_none() {
+        return Err(ErrorObject::new(
+            error_code::INVALID_PARAMS,
+            format!("镜像应为含文件名的完整路径：{path}"),
+        ));
+    }
+    Ok(image_path)
+}
+
+/// 打开源。打开的源一律经读取计数器（[`reading::metered`]），任务运行期间据此报告读得怎样。
 fn open_source(source: &Source) -> Result<Box<dyn BlockDevice>, ErrorObject> {
     match source {
         Source::Image { path, sector_size } => RawImage::open(path, *sector_size)
-            .map(|image| Box::new(image) as Box<dyn BlockDevice>)
+            .map(|image| reading::metered(Box::new(image)))
             .map_err(|error| {
                 ErrorObject::new(
                     protocol::error_code::SOURCE_UNAVAILABLE,
@@ -484,9 +524,7 @@ fn open_source(source: &Source) -> Result<Box<dyn BlockDevice>, ErrorObject> {
                 )
             }),
         #[cfg(windows)]
-        Source::Disk { handle } => {
-            adopt_disk(*handle).map(|disk| Box::new(disk) as Box<dyn BlockDevice>)
-        }
+        Source::Disk { handle } => adopt_disk(*handle).map(|disk| reading::metered(Box::new(disk))),
         #[cfg(not(windows))]
         Source::Disk { .. } => Err(ErrorObject::new(
             protocol::error_code::SOURCE_UNAVAILABLE,
@@ -510,7 +548,7 @@ fn open_source_for_output(
                 disk.device_number(),
                 yisi_io::volume_disk_numbers(output_dir),
             )?;
-            Ok(Box::new(disk))
+            Ok(reading::metered(Box::new(disk)))
         }
         // 其他平台还打不开物理盘，open_source 直接拒绝，走不到写输出那一步
         _ => open_source(source),
@@ -552,7 +590,7 @@ fn open_image_source(
                 yisi_io::volume_disk_numbers(image_path),
             )?;
             let identity = disk_identity(&disk);
-            Ok((Box::new(disk), identity))
+            Ok((reading::metered(Box::new(disk)), identity))
         }
         #[cfg(not(windows))]
         Source::Disk { .. } => open_source(source).map(|device| (device, "disk".to_owned())),
@@ -567,7 +605,13 @@ fn disk_identity(disk: &yisi_io::WindowsDisk) -> String {
             .into_iter()
             .find(|info| info.number == number)
     });
-    let words = match &info {
+    identity_of(info.as_ref())
+}
+
+/// 由磁盘属性得出标识；查不到属性时是 `disk`。列出磁盘时给界面的标识也用它，与坏区图里记的一致。
+#[cfg(windows)]
+fn identity_of(info: Option<&yisi_io::DiskInfo>) -> String {
+    let words = match info {
         Some(info) => format!("disk {} {} {}", info.vendor, info.model, info.serial),
         None => "disk".to_owned(),
     };
@@ -667,6 +711,7 @@ fn disk_list() -> DiskList {
     let disks = yisi_io::list_disks()
         .into_iter()
         .map(|disk| DiskSummary {
+            identity: identity_of(Some(&disk)),
             number: disk.number,
             path: disk.path,
             size: disk.size,

@@ -74,6 +74,12 @@ pub const IMAGE_CREATE: &str = "image.create";
 /// 按坏区图续做镜像（任务）：参数、答复、通知与结果同 [`IMAGE_CREATE`]。坏区图不存在、读不懂，
 /// 或者记录的容量、扇区大小、来源与当前的源不符时答复 [`error_code::IMAGE_MISMATCH`]。
 pub const IMAGE_RESUME: &str = "image.resume";
+/// 做镜像之前看一眼：参数 [`ImageInspectParams`]，结果是 [`ImageInspection`]。读源的分区表，查输出位置所在的卷；
+/// 镜像已经存在时读它的坏区图，与源上现在的分区表对比，并抽查已读出的部分与源是否一致。只读，读完即答复（不是任务）。
+pub const IMAGE_INSPECT: &str = "image.inspect";
+/// 查看以前做过的镜像现在怎样：参数 [`ImageDescribeParams`]，结果是 [`ImageDescriptions`]。只读镜像旁边的坏区图，
+/// 不碰源，不需要管理员权限。
+pub const IMAGE_DESCRIBE: &str = "image.describe";
 /// 文件系统一致性检查（任务，只读）：参数 [`FsCheckParams`]，立即返回空对象；进度经 [`PROGRESS`] 按阶段送达
 /// （`stage` 见 [`FsCheckReport`]），结果是 [`FsCheckReport`]。可以暂停、取消。分区要在源的分区表里、偏移与长度都对得上，
 /// 否则答复 [`error_code::FS_UNAVAILABLE`]。只检查、不修复。
@@ -89,6 +95,8 @@ pub const FOUND: &str = "job.found";
 pub const COPIED: &str = "job.copied";
 /// 参数 [`JobImaging`]：制作镜像的进展，每秒最多 5 次，结束前总会发出最后一次。
 pub const IMAGING: &str = "job.imaging";
+/// 参数 [`JobReading`]：任务读源的累计统计，任务运行期间每秒一次（没有变化时不发）。界面据此判断读得慢的原因。
+pub const READING: &str = "job.reading";
 /// 参数 [`JobLog`]。
 pub const LOG: &str = "job.log";
 /// 参数 [`JobCompleted`]。
@@ -168,6 +176,8 @@ pub struct DiskSummary {
     /// ata、sata、scsi、sas、nvme、usb、sd、mmc、virtual、other 之一。
     pub bus: String,
     pub removable: bool,
+    /// 认盘用的标识（厂商、型号、序列号），与制作镜像时坏区图里记的来源相同：重新插拔、盘号变了也不变。
+    pub identity: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -668,6 +678,16 @@ pub struct ImageParams {
     pub source: Source,
     /// 镜像文件的完整路径；坏区图是同一路径加 `.map`。
     pub image_path: String,
+    /// 只读这些范围（例如选中的几个分区）；不给时读整个源。只读一部分时，分区表所在的几小段
+    /// （[`ImageInspection::table_areas`]）总会一起读，镜像里才认得出分区。镜像必须是稀疏文件。
+    #[serde(default)]
+    pub ranges: Option<Vec<ByteRange>>,
+    /// 只做复制这一轮：先把完好区域读出来，读错的块与被跳过的区段留到以后。
+    #[serde(default)]
+    pub copy_only: bool,
+    /// 开始前把这些范围的进度清掉、重新读（重做做完的分区，或者源上变过的部分）。
+    #[serde(default)]
+    pub reset: Vec<ByteRange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -675,15 +695,19 @@ pub struct ImageParams {
 pub struct ImageStarted {
     pub image_path: String,
     pub map_path: String,
+    /// 坏区图里记的来源标识（物理盘见 [`DiskSummary::identity`]），宿主据此记下这个镜像是哪个源做的。
+    pub source_identity: String,
+    pub size: u64,
 }
 
-/// 制作镜像的进展。各项字节数取自坏区图，续做时包括以前读的。
+/// 制作镜像的进展。各项字节数取自坏区图、只算本次的范围，续做时包括以前读的。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobImaging {
     pub job_id: String,
     /// 当前轮次：copy（复制）、trim（修边）、scrape（细读）。
     pub round: String,
+    /// 本次范围的字节数；不限范围时是源的容量。
     pub size: u64,
     /// 已读出、写进镜像的字节数。
     pub read_bytes: u64,
@@ -695,22 +719,33 @@ pub struct JobImaging {
     pub scrape_bytes: u64,
     /// 最近几秒的读速；刚开始、还算不出来时为空。
     pub bytes_per_second: Option<u64>,
+    /// 只做复制这一轮。
+    pub copy_only: bool,
 }
 
-/// 制作镜像的结果。
+/// 制作镜像的结果。字节数只算本次的范围（`device_*` 是整个源的）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageSummary {
     pub image_path: String,
     pub map_path: String,
+    /// 本次范围的字节数；不限范围时是源的容量。
     pub size: u64,
     pub read_bytes: u64,
     pub bad_bytes: u64,
-    /// 还没读完的字节数（未读、待修边、待细读）；只在设备读不到时不为 0。
+    /// 本次范围里还没读完的字节数（未读、待修边、待细读）：设备读不到时，或者只做了复制这一轮时不为 0。
     pub unfinished_bytes: u64,
-    /// 读不出的区段，相邻的已合并；最多记录 [`MAX_UNREADABLE_RANGES`] 段。
+    /// 本次范围里读不出的区段，相邻的已合并；最多记录 [`MAX_UNREADABLE_RANGES`] 段。
     pub bad_ranges: Vec<ByteRange>,
     pub bad_ranges_truncated: bool,
+    /// 本次只读了源的一部分。
+    pub partial: bool,
+    /// 只做了复制这一轮。
+    pub copy_only: bool,
+    /// 整个源的容量、已读出的字节数、还没读完的字节数（含本次范围以外的）。
+    pub device_size: u64,
+    pub device_read_bytes: u64,
+    pub device_unfinished_bytes: u64,
     /// 读错之后连以前读出的位置也读不出了（多半是设备断开），在这个偏移处停下；检查连接后可以续做。
     pub source_lost_at: Option<u64>,
     /// 本次运行的用时。
@@ -722,6 +757,164 @@ pub struct ImageSummary {
 pub struct ByteRange {
     pub offset: u64,
     pub length: u64,
+}
+
+/// 任务读源的累计统计（从任务开始算）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobReading {
+    pub job_id: String,
+    /// 完成的读取次数（含读错的）。
+    pub reads: u64,
+    /// 读出的字节数。
+    pub bytes: u64,
+    /// 读错的次数。
+    pub errors: u64,
+    /// 单次用时不少于 [`SLOW_READ_MS`] 毫秒的读取次数：盘在内部反复重试，多半是坏扇区或快坏的扇区。
+    pub slow_reads: u64,
+    /// 花在读取上的总毫秒数。
+    pub busy_ms: u64,
+    /// 此刻已经连续读了多少毫秒还没读完；没在读时为 0。
+    pub stalled_ms: u64,
+}
+
+/// 单次读取超过这么多毫秒算读得很吃力。
+pub const SLOW_READ_MS: u64 = 2000;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageInspectParams {
+    pub source: Source,
+    /// 镜像文件的完整路径；还不存在时只读分区表、查输出位置。
+    pub image_path: String,
+}
+
+/// 做镜像之前看到的情况。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageInspection {
+    pub size: u64,
+    pub sector_size: u32,
+    /// mbr、gpt、none 之一；分区表读不出时为空。
+    pub scheme: Option<String>,
+    /// 源上现在的分区，与浏览时一样。
+    pub partitions: Vec<PartitionInfo>,
+    /// 从头到尾排好的各段：分区（`partition` 是编号）与分区以外的空隙，各带坏区图里的进展。
+    pub regions: Vec<ImageRegion>,
+    /// 只读一部分时总会一起读的几小段：开头与末尾各 1 MiB（分区表、GPT 备份），以及每个分区之前的 1 MiB（逻辑分区的链表），
+    /// 都只取不属于任何分区的部分。
+    pub table_areas: Vec<ByteRange>,
+    /// 输出位置所在的卷；查不到时为空，原因在 `output_error`。
+    pub output: Option<OutputInfo>,
+    pub output_error: Option<String>,
+    /// 这个位置已经有镜像或坏区图时的情况。
+    pub existing: Option<ExistingImage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageRegion {
+    /// 分区编号；分区以外的空隙为空。
+    pub partition: Option<u32>,
+    pub offset: u64,
+    pub length: u64,
+    pub progress: RegionProgress,
+    /// 抽查结果：镜像已存在、这一段有读出的部分时才有。
+    pub check: Option<RegionCheck>,
+}
+
+/// 一段里各状态的字节数（取自坏区图；还没有镜像时全部未读）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegionProgress {
+    pub read_bytes: u64,
+    pub bad_bytes: u64,
+    pub untried_bytes: u64,
+    pub trim_bytes: u64,
+    pub scrape_bytes: u64,
+}
+
+/// 抽查：从镜像里已读出的部分取几块，与源上同一位置比较。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegionCheck {
+    /// 比较了几块。
+    pub checked: u32,
+    /// 与源不一致的块数：做镜像之后源上这一段被写过。
+    pub mismatched: u32,
+    /// 源上读不出、没能比较的块数。
+    pub unreadable: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputInfo {
+    /// 文件系统名，如 NTFS、exFAT、FAT32。
+    pub file_system: String,
+    /// 支持稀疏文件：只有这样才能只读一部分、分几次做。
+    pub sparse: bool,
+    pub free_bytes: u64,
+}
+
+/// 已经存在的镜像。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExistingImage {
+    /// ok（可以续做）、imageMissing（只有坏区图）、mapMissing（只有镜像文件）、mapUnreadable、
+    /// otherSource（坏区图记的容量、扇区大小或来源与这个源不符）、lengthMismatch（镜像文件长度与容量不符）之一。
+    pub state: String,
+    /// 不是 ok 时的技术细节。
+    pub detail: Option<String>,
+    /// 坏区图里记的来源标识。
+    pub source_identity: Option<String>,
+    /// 镜像是稀疏文件：可以只读一部分。旧版本建的、或者建在不支持稀疏文件的卷上的不是。
+    pub sparse: bool,
+    /// 坏区图里记了上次开始读时的分区表（旧版本做的没有）。
+    pub partitions_recorded: bool,
+    /// 与上次开始读时相比，源上分区表的变化。
+    pub partition_changes: Vec<PartitionChange>,
+    /// 整个源的进展。
+    pub progress: RegionProgress,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionChange {
+    /// added（多出来的）、removed（不见了的）、moved（起点或长度变了的）之一。
+    pub kind: String,
+    pub number: u32,
+    /// 上次的位置（added 时为空）。
+    pub before: Option<ByteRange>,
+    /// 现在的位置（removed 时为空）。
+    pub after: Option<ByteRange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageDescribeParams {
+    pub image_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageDescriptions {
+    pub images: Vec<ImageDescription>,
+}
+
+/// 一个以前做过的镜像现在的样子。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageDescription {
+    pub image_path: String,
+    /// ok、missing（镜像与坏区图都不在了：被删除或移走）、imageMissing、mapMissing、mapUnreadable 之一。
+    pub state: String,
+    pub detail: Option<String>,
+    pub source_identity: Option<String>,
+    pub size: Option<u64>,
+    /// 整个源的进展（state 为 ok 时）。
+    pub progress: Option<RegionProgress>,
+    /// 坏区图最后保存的时间（毫秒，Unix 纪元起）。
+    pub saved_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

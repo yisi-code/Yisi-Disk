@@ -1,5 +1,7 @@
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watchEffect } from 'vue'
 import type { UnlistenFn } from '@tauri-apps/api/event'
+import { reportJobState, type EngineState } from './useEngineStatus'
+import { useReadHealth } from './useReadHealth'
 import {
   cancelJob,
   onJobEvent,
@@ -10,6 +12,7 @@ import {
   type HostError,
   type ImagingStatus,
   type JobEvent,
+  type ReadingStats,
 } from '../services/host'
 
 export type JobStatus =
@@ -33,10 +36,17 @@ export interface JobHandlers<TResult> {
 }
 
 /**
- * 一个任务的通用状态：发起、取消、暂停与继续（只有支持的任务）、进度与速度、无响应与恢复、终结。
+ * 一个任务的通用状态：发起、取消、暂停与继续（只有支持的任务）、进度与速度、无响应与恢复、终结，
+ * 以及读源的统计与据此判断的读得慢的原因（readHealth）。
  * 任务 ID 在调用宿主之前生成并记下，事件先于启动命令返回到达时也不会丢；不属于当前任务的事件一律忽略。
  */
-export function useJob<TResult>(handlers: JobHandlers<TResult>) {
+export function useJob<TResult>(
+  handlers: JobHandlers<TResult>,
+  options: {
+    /** 会话型任务（浏览）：运行中多半在等用户操作，返回 true 时底栏显示「已打开源」而不是「运行中」 */
+    isIdle?: () => boolean
+  } = {},
+) {
   const status = ref<JobStatus>('idle')
   const done = ref(0)
   const total = ref(0)
@@ -51,6 +61,8 @@ export function useJob<TResult>(handlers: JobHandlers<TResult>) {
   const isTogglingPause = ref(false)
   /** 最近一次发起的任务；任务结束后保留，深度恢复的结果还要按它预览、打开 */
   const jobId = ref<string | null>(null)
+  /** 读源的累计统计；还没收到时为 null */
+  const reading = ref<ReadingStats | null>(null)
 
   let startedAt = 0
   let pausedAt = 0
@@ -62,6 +74,28 @@ export function useJob<TResult>(handlers: JobHandlers<TResult>) {
   )
   const percent = computed(() =>
     total.value > 0 ? Math.floor((done.value / total.value) * 100) : 0,
+  )
+  /** 报给底栏的引擎状态 */
+  const engineState = computed<EngineState | null>(() => {
+    switch (status.value) {
+      case 'starting':
+        return 'starting'
+      case 'running':
+        if (isUnresponsive.value) return 'unresponsive'
+        if (isPaused.value) return 'paused'
+        return options.isIdle?.() ? 'session' : 'running'
+      case 'cancelling':
+        return isUnresponsive.value ? 'unresponsive' : 'cancelling'
+      default:
+        return null
+    }
+  })
+  const engineKey = Symbol('job')
+  watchEffect(() => reportJobState(engineKey, engineState.value))
+  const { health: readHealth } = useReadHealth(
+    reading,
+    computed(() => status.value === 'running'),
+    isPaused,
   )
 
   onMounted(async () => {
@@ -77,6 +111,7 @@ export function useJob<TResult>(handlers: JobHandlers<TResult>) {
   onBeforeUnmount(() => {
     isDisposed = true
     unlisten?.()
+    reportJobState(engineKey, null)
   })
 
   /** `launch` 拿到新生成的任务 ID，调用宿主启动任务。正在运行时什么也不做 */
@@ -95,6 +130,7 @@ export function useJob<TResult>(handlers: JobHandlers<TResult>) {
     failure.value = null
     isUnresponsive.value = false
     isPaused.value = false
+    reading.value = null
     try {
       await launch(id)
       if (jobId.value === id && status.value === 'starting') {
@@ -180,6 +216,9 @@ export function useJob<TResult>(handlers: JobHandlers<TResult>) {
       case 'imaging':
         handlers.onImaging?.(event.data)
         break
+      case 'reading':
+        reading.value = event.data
+        break
       case 'completed':
         handlers.onCompleted(event.data.result)
         isUnresponsive.value = false
@@ -224,6 +263,7 @@ export function useJob<TResult>(handlers: JobHandlers<TResult>) {
     isPaused,
     isTogglingPause,
     isBusy,
+    readHealth,
     start,
     cancel,
     pause: () => setPaused(true),
