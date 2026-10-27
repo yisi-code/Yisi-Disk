@@ -4864,7 +4864,7 @@ dependencies = [
 
 [[package]]
 name = "yisi-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -4883,7 +4883,7 @@ dependencies = [
 
 [[package]]
 name = "yisi-broker"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -4898,7 +4898,7 @@ dependencies = [
 
 [[package]]
 name = "yisi-carve"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "thiserror 2.0.21",
  "yisi-formats",
@@ -4907,7 +4907,7 @@ dependencies = [
 
 [[package]]
 name = "yisi-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "image",
  "serde",
@@ -4925,14 +4925,14 @@ dependencies = [
 
 [[package]]
 name = "yisi-formats"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "yisi-part",
 ]
 
 [[package]]
 name = "yisi-fs"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "thiserror 2.0.21",
  "yisi-io",
@@ -4941,7 +4941,7 @@ dependencies = [
 
 [[package]]
 name = "yisi-io"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "thiserror 2.0.21",
  "windows-sys 0.61.2",
@@ -4949,7 +4949,7 @@ dependencies = [
 
 [[package]]
 name = "yisi-part"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "thiserror 2.0.21",
  "yisi-io",
@@ -4957,7 +4957,7 @@ dependencies = [
 
 [[package]]
 name = "yisi-repair"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "tracing",
  "yisi-fs",
@@ -4967,7 +4967,7 @@ dependencies = [
 
 [[package]]
 name = "yisi-rpc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
