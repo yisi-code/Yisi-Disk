@@ -88,19 +88,31 @@ pub fn volume_disk_numbers(path: impl AsRef<Path>) -> Result<Vec<u32>, IoError> 
 /// `path` 所在的卷的 GUID 名，如 `\\?\Volume{0a1b…}\`：同一个卷换了盘符、重新插拔也不变，用来认卷、
 /// 比较两个路径在不在同一个卷上。卷怎么找见 [`locate_volume`]，与 [`volume_disk_numbers`] 相同。
 pub fn volume_guid(path: impl AsRef<Path>) -> Result<String, IoError> {
-    let (_, volume) = locate_volume(path.as_ref())?;
-    let mut name = String::from_utf16_lossy(&volume);
-    name.push('\\');
-    Ok(name)
+    Ok(String::from_utf16_lossy(&volume_guid_root(path.as_ref())?))
+}
+
+/// [`volume_guid`] 的 UTF-16 形式（以反斜杠结尾，不带结尾的 0）：按卷根查询卷属性、剩余空间时用。
+pub(crate) fn volume_guid_root(path: &Path) -> Result<Vec<u16>, IoError> {
+    let (_, mut volume) = locate_volume(path)?;
+    volume.push(u16::from(b'\\'));
+    Ok(volume)
 }
 
 /// `path` 所在的卷 `\\?\Volume{…}`（不带结尾的反斜杠），以及实际打开查询的那一级路径。
 ///
 /// `path` 可以还不存在：取最近一级已存在的文件或目录，打开它（随目录联接、符号链接走到真实位置），
 /// 从它的最终路径里取卷。还不存在的那几级目录之后才创建，不会改变所在的卷。
-/// 「输出不在源盘上」与「输出不在源卷上」两项检查都经这里，同一个路径不会落到两个不同的卷。
+/// 所在磁盘、卷的 GUID 名、卷属性与剩余空间都经这里，同一个路径不会落到两个不同的卷。
 fn locate_volume(path: &Path) -> Result<(&Path, Vec<u16>), IoError> {
-    let existing = nearest_existing(path, Existing::Any).map_err(|source| locate(path, source))?;
+    let existing = path
+        .ancestors()
+        .find(|ancestor| !ancestor.as_os_str().is_empty() && ancestor.exists())
+        .ok_or_else(|| {
+            locate(
+                path,
+                io::Error::new(io::ErrorKind::NotFound, "路径及其上级目录都不存在"),
+            )
+        })?;
     let opened = open_for_query(existing, FILE_FLAG_BACKUP_SEMANTICS)?;
     let final_path = final_path_by_guid(&opened).map_err(|source| locate(existing, source))?;
     let volume = volume_root(&final_path).ok_or_else(|| {
@@ -131,28 +143,6 @@ fn locate(path: &Path, source: io::Error) -> IoError {
         path: path.to_path_buf(),
         source,
     }
-}
-
-/// 往上找最近一级已存在的路径时，停在哪一种上。
-#[derive(Clone, Copy)]
-pub(crate) enum Existing {
-    /// 文件或目录都行：打开它时会随符号链接走到真实位置。
-    Any,
-    /// 只停在目录上：剩余空间只能按目录查，给文件会报「目录名称无效」。
-    Directory,
-}
-
-/// `path` 本身或最近一级已存在的上级（`path` 可以还不存在）。查输出位置所在的卷时共用。
-pub(crate) fn nearest_existing(path: &Path, kind: Existing) -> io::Result<&Path> {
-    path.ancestors()
-        .find(|ancestor| {
-            !ancestor.as_os_str().is_empty()
-                && match kind {
-                    Existing::Any => ancestor.exists(),
-                    Existing::Directory => ancestor.is_dir(),
-                }
-        })
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "路径及其上级目录都不存在"))
 }
 
 /// 以卷的 GUID 路径表示的完整路径，例如 `\\?\Volume{…}\Users\me`，不含结尾的 0。
