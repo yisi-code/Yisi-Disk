@@ -20,7 +20,7 @@ use self::stream::Stream;
 use crate::entry::{Entry, FileRef, Listing, Location, State, Unsupported, nt_time};
 use crate::reader::{FileReader, Piece};
 use crate::region::Region;
-use crate::{FsError, MAX_ENTRIES, ScanSummary};
+use crate::{FsError, MAX_ENTRIES, ScanSummary, bpb};
 
 /// 系统文件的记录号。
 const MFT_RECORD: u64 = 0;
@@ -56,49 +56,17 @@ pub(crate) struct Geometry {
     pub record_size: u64,
 }
 
-/// 「每条记录几簇」这类字段：正数是簇数，负数 -n 表示 2^n 字节。
-fn clusters_or_shift(raw: u8, cluster_size: u64) -> Option<u64> {
-    let value = raw as i8;
-    if value > 0 {
-        u64::try_from(value).ok()?.checked_mul(cluster_size)
-    } else {
-        let shift = u32::from(value.unsigned_abs());
-        (shift < 32).then(|| 1u64 << shift)
-    }
-}
-
+/// 解析引导扇区；有致命问题时返回 `None`（规则在 [`bpb`](crate::bpb)）。
 pub(crate) fn parse_boot(sector: &[u8]) -> Option<Geometry> {
-    if sector.get(3..11) != Some(b"NTFS    ".as_slice()) || le16(sector, 510) != Some(0xAA55) {
-        return None;
-    }
-    let bytes_per_sector = u64::from(le16(sector, 0x0B)?);
-    if !bytes_per_sector.is_power_of_two() || !(256..=4096).contains(&bytes_per_sector) {
-        return None;
-    }
-    // 每簇扇区数：大于 0x80 时表示 2^(256-n)（64 KiB 以上的簇）
-    let raw = *sector.get(0x0D)?;
-    let sectors_per_cluster = if raw <= 0x80 {
-        u64::from(raw)
-    } else {
-        1u64.checked_shl(256 - u32::from(raw))?
-    };
-    let cluster_size = bytes_per_sector.checked_mul(sectors_per_cluster)?;
-    if cluster_size == 0 || !cluster_size.is_power_of_two() || cluster_size > 2 << 20 {
-        return None;
-    }
-    let record_size = clusters_or_shift(*sector.get(0x40)?, cluster_size)?;
-    if !record_size.is_power_of_two() || !(512..=65536).contains(&record_size) {
-        return None;
-    }
-    let geometry = Geometry {
-        bytes_per_sector,
-        cluster_size,
-        total_bytes: le64(sector, 0x28)?.checked_mul(bytes_per_sector)?,
-        mft_lcn: le64(sector, 0x30)?,
-        mirror_lcn: le64(sector, 0x38)?,
-        record_size,
-    };
-    (geometry.total_bytes > 0).then_some(geometry)
+    let bpb = bpb::check_ntfs(sector).geometry?;
+    Some(Geometry {
+        bytes_per_sector: bpb.bytes_per_sector,
+        cluster_size: bpb.cluster_size,
+        total_bytes: bpb.total_bytes(),
+        mft_lcn: bpb.mft_lcn,
+        mirror_lcn: bpb.mirror_lcn,
+        record_size: bpb.record_size,
+    })
 }
 
 /// 一个属性的内容（数据流、索引等）。

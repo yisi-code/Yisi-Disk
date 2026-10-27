@@ -1,15 +1,16 @@
 //! 引导扇区诊断：对分区表里的每个分区，读出主引导扇区与备份引导扇区，逐项核对后列出问题，
 //! 比较主备之间哪些字段不一样，核对分区表里的类型、长度与引导扇区是否相符，给出结论。只读。
 //!
-//! 依据微软公开的 FAT 与 exFAT 规范；NTFS 依据公开的结构资料。备份的位置与 `yisi-fs` 打开卷时找的一致
-//! （[`yisi_fs::boot::backup_candidates`]），诊断说「备份可用」时就能用备份浏览。
+//! 逐项核对的规则在 [`yisi_fs::bpb`]，与打开卷、文件系统检查共用：诊断说「核对通过」的引导扇区，浏览时一定打得开。
+//! 备份的位置与 `yisi-fs` 打开卷时找的一致（[`yisi_fs::boot::backup_candidates`]），诊断说「备份可用」时就能用备份浏览。
 
 use std::sync::Arc;
 
 use yisi_fs::boot::{
     BackupFamily, Candidate, backup_candidates, backup_kind, exfat_boot_checksum,
-    exfat_stored_checksum,
+    exfat_stored_checksum, remnant_kind,
 };
+use yisi_fs::bpb::{self, Problem, Rule};
 use yisi_fs::{BootCopy, FsKind, Volume};
 use yisi_io::BlockDevice;
 use yisi_part::bytes::{le16, le32, le64};
@@ -19,8 +20,6 @@ use yisi_part::{PartError, Partition, PartitionKind, PartitionTable, Role};
 const SLACK: u64 = 1 << 20;
 /// exFAT 的引导区：引导扇区、8 个扩展引导扇区、OEM 参数、保留、校验和扇区。
 const EXFAT_BOOT_REGION_SECTORS: u64 = 12;
-/// NTFS 的簇最大 2 MiB。
-const MAX_NTFS_CLUSTER: u64 = 2 << 20;
 
 /// 一个分区的结论。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +72,8 @@ pub enum Issue {
     /// 数据区不在卷内，或簇数与卷的长度对不上。
     BadLayout,
     BadRootCluster(u64),
+    /// FAT32 不镜像时指定的那一份 FAT 不存在（值为扩展标志）。
+    BadActiveFat(u64),
     /// NTFS 的 MFT 记录大小、索引块大小不合法。
     BadRecordSize,
     BadIndexSize,
@@ -110,7 +111,10 @@ pub struct Difference {
 pub struct CopyReport {
     /// 在分区里的字节偏移。
     pub offset: u64,
+    /// 让这一份不能用的问题；为空表示核对通过。
     pub issues: Vec<Issue>,
+    /// 不影响使用的问题（跳转指令不标准、FAT 装不下全部簇、NTFS 旧字段不为 0 等），只作提醒。
+    pub notes: Vec<Issue>,
     /// 引导扇区记的卷长度与簇大小（参数读得出时）。
     pub volume_bytes: Option<u64>,
     pub cluster_size: Option<u64>,
@@ -126,6 +130,7 @@ impl CopyReport {
         Self {
             offset,
             issues: Vec::new(),
+            notes: Vec::new(),
             volume_bytes: None,
             cluster_size: None,
             sector_size: None,
@@ -184,7 +189,7 @@ pub fn diagnose_partition(device: &Arc<dyn BlockDevice>, partition: &Partition) 
     let primary_kind = yisi_fs::detect(device.as_ref(), partition.offset, partition.length)
         .ok()
         .filter(|&kind| kind != FsKind::Unknown)
-        .or_else(|| primary.as_deref().and_then(identify));
+        .or_else(|| primary.as_deref().and_then(remnant_kind));
     let filesystem = primary_kind
         .or_else(|| {
             candidates.iter().find_map(|candidate| {
@@ -329,7 +334,7 @@ impl Reader<'_> {
         }
         let checked = match kind {
             FsKind::Exfat => {
-                let mut checked = check_exfat(sector, expected_sector);
+                let mut checked = checked(bpb::check_exfat(sector), expected_sector);
                 if let Some(sector_size) = checked.sector_size {
                     checked
                         .issues
@@ -337,10 +342,11 @@ impl Reader<'_> {
                 }
                 checked
             }
-            FsKind::Ntfs => check_ntfs(sector, expected_sector),
-            _ => check_fat(kind, sector, expected_sector),
+            FsKind::Ntfs => checked(bpb::check_ntfs(sector), expected_sector),
+            _ => checked(bpb::check_fat(sector, Some(kind)), expected_sector),
         };
         report.issues = checked.issues;
+        report.notes = checked.notes;
         report.volume_bytes = checked.volume_bytes;
         report.cluster_size = checked.cluster_size;
         report.sector_size = checked.sector_size;
@@ -381,346 +387,61 @@ impl Reader<'_> {
 
 struct Checked {
     issues: Vec<Issue>,
+    notes: Vec<Issue>,
     volume_bytes: Option<u64>,
     cluster_size: Option<u64>,
     /// 引导扇区记的扇区大小（合法时）。
     sector_size: Option<u64>,
 }
 
-fn check_jump(sector: &[u8], issues: &mut Vec<Issue>) {
-    let jump = matches!(
-        (sector.first(), sector.get(2)),
-        (Some(0xEB), Some(0x90)) | (Some(0xE9), _)
-    );
-    if !jump {
-        issues.push(Issue::BadJump);
-    }
-}
-
-fn check_signature(sector: &[u8], issues: &mut Vec<Issue>) {
-    if le16(sector, 510) != Some(0xAA55) {
-        issues.push(Issue::MissingSignature);
-    }
-}
-
-/// 扇区大小：合法时返回，不合法或与位置不符时记下问题。
-fn check_sector_size(
-    recorded: u64,
-    valid: bool,
-    expected: Option<u64>,
-    issues: &mut Vec<Issue>,
-) -> Option<u64> {
-    if !valid {
-        issues.push(Issue::BadBytesPerSector(recorded));
-        return None;
-    }
-    if let Some(expected) = expected.filter(|&expected| expected != recorded) {
+/// 按 [`yisi_fs::bpb`] 核对的结果换成诊断的问题：致命的进 `issues`，其余的进 `notes`。
+/// `expected` 是找到备份时假定的扇区大小：备份记的扇区大小与它所在的位置不符，这一份也不能用。
+fn checked<G>(checked: bpb::Checked<G>, expected: Option<u64>) -> Checked {
+    let (fatal, minor): (Vec<&Problem>, Vec<&Problem>) =
+        checked.problems.iter().partition(|problem| problem.fatal);
+    let mut issues: Vec<Issue> = fatal.into_iter().map(issue_from).collect();
+    if let (Some(recorded), Some(expected)) = (checked.bytes_per_sector, expected)
+        && recorded != expected
+    {
         issues.push(Issue::SectorSizeMismatch { recorded, expected });
     }
-    Some(recorded)
+    Checked {
+        issues,
+        notes: minor.into_iter().map(issue_from).collect(),
+        volume_bytes: checked.volume_bytes,
+        cluster_size: checked.cluster_size,
+        sector_size: checked.bytes_per_sector,
+    }
 }
 
-fn check_fat(kind: FsKind, sector: &[u8], expected: Option<u64>) -> Checked {
-    let mut issues = Vec::new();
-    check_jump(sector, &mut issues);
-    check_signature(sector, &mut issues);
-    let field16 = |at| u64::from(le16(sector, at).unwrap_or(0));
-    let field8 = |at| u64::from(sector.get(at).copied().unwrap_or(0));
-    let bps = field16(11);
-    let bps = check_sector_size(
-        bps,
-        matches!(bps, 512 | 1024 | 2048 | 4096),
-        expected,
-        &mut issues,
-    );
-    let spc = field8(13);
-    let spc_valid = spc.is_power_of_two() && spc <= 128;
-    if !spc_valid {
-        issues.push(Issue::BadSectorsPerCluster(spc));
-    }
-    let reserved = field16(14);
-    if reserved == 0 {
-        issues.push(Issue::BadReservedSectors(reserved));
-    }
-    let fats = field8(16);
-    if !matches!(fats, 1 | 2) {
-        issues.push(Issue::BadFatCount(fats));
-    }
-    let media = field8(21);
-    if !(media == 0xF0 || media >= 0xF8) {
-        issues.push(Issue::BadMedia(media));
-    }
-    let root_entries = field16(17);
-    let is_fat32 = kind == FsKind::Fat32;
-    if is_fat32 != (root_entries == 0) {
-        issues.push(Issue::BadRootEntries(root_entries));
-    }
-    let total = match field16(19) {
-        0 => u64::from(le32(sector, 32).unwrap_or(0)),
-        total => total,
-    };
-    if total == 0 {
-        issues.push(Issue::BadTotalSectors(total));
-    }
-    let fat16_size = field16(22);
-    let fat_size = if is_fat32 {
-        u64::from(le32(sector, 36).unwrap_or(0))
-    } else {
-        fat16_size
-    };
-    if fat_size == 0 {
-        issues.push(Issue::BadFatSize(0));
-    } else if is_fat32 && fat16_size != 0 {
-        // FAT32 的 16 位 FAT 扇区数必须为 0
-        issues.push(Issue::BadFatSize(fat16_size));
-    }
-
-    let mut checked = Checked {
-        issues: Vec::new(),
-        volume_bytes: None,
-        cluster_size: None,
-        sector_size: bps,
-    };
-    if let Some(bps) = bps
-        && spc_valid
-        && reserved > 0
-        && matches!(fats, 1 | 2)
-        && total > 0
-        && fat_size > 0
-    {
-        checked.volume_bytes = total.checked_mul(bps);
-        checked.cluster_size = spc.checked_mul(bps);
-        let root_sectors = root_entries.saturating_mul(32).div_ceil(bps);
-        let first_data = fats
-            .checked_mul(fat_size)
-            .and_then(|fat_area| fat_area.checked_add(reserved))
-            .and_then(|start| start.checked_add(root_sectors));
-        match first_data.and_then(|first| total.checked_sub(first)) {
-            None | Some(0) => issues.push(Issue::BadLayout),
-            Some(data_sectors) => {
-                let clusters = data_sectors / spc;
-                let bits: u64 = match kind {
-                    FsKind::Fat12 => 12,
-                    FsKind::Fat16 => 16,
-                    _ => 32,
-                };
-                let capacity = fat_size.saturating_mul(bps).saturating_mul(8) / bits;
-                if capacity < clusters.saturating_add(2) {
-                    issues.push(Issue::BadFatSize(fat_size));
-                }
-                if is_fat32 {
-                    let root = u64::from(le32(sector, 44).unwrap_or(0));
-                    if root < 2 || root >= clusters.saturating_add(2) {
-                        issues.push(Issue::BadRootCluster(root));
-                    }
-                }
-            }
-        }
-    }
-    checked.issues = issues;
-    checked
-}
-
-fn check_exfat(sector: &[u8], expected: Option<u64>) -> Checked {
-    let mut issues = Vec::new();
-    if sector.get(..3) != Some([0xEB, 0x76, 0x90].as_slice()) {
-        issues.push(Issue::BadJump);
-    }
-    if sector.get(3..11) != Some(b"EXFAT   ".as_slice()) {
-        issues.push(Issue::BadOemId);
-    }
-    if sector
-        .get(11..64)
-        .is_none_or(|legacy| legacy.iter().any(|&byte| byte != 0))
-    {
-        issues.push(Issue::BadLegacyFields);
-    }
-    check_signature(sector, &mut issues);
-    let field8 = |at| u32::from(sector.get(at).copied().unwrap_or(0));
-    let field32 = |at| u64::from(le32(sector, at).unwrap_or(0));
-    let shift = field8(108);
-    let bps = check_sector_size(
-        1u64.checked_shl(shift).unwrap_or(0),
-        (9..=12).contains(&shift),
-        expected,
-        &mut issues,
-    );
-    let cluster_shift = field8(109);
-    let cluster_valid = bps.is_some() && shift + cluster_shift <= 25;
-    if bps.is_some() && !cluster_valid {
-        issues.push(Issue::BadSectorsPerCluster(
-            1u64.checked_shl(cluster_shift).unwrap_or(0),
-        ));
-    }
-    let fats = u64::from(field8(110));
-    if !matches!(fats, 1 | 2) {
-        issues.push(Issue::BadFatCount(fats));
-    }
-    let volume_length = le64(sector, 72).unwrap_or(0);
-    if volume_length == 0 {
-        issues.push(Issue::BadTotalSectors(0));
-    }
-    let fat_offset = field32(80);
-    if fat_offset < 24 {
-        issues.push(Issue::BadReservedSectors(fat_offset));
-    }
-    let fat_length = field32(84);
-    let heap = field32(88);
-    let count = field32(92);
-    let root = field32(96);
-
-    let mut checked = Checked {
-        issues: Vec::new(),
-        volume_bytes: None,
-        cluster_size: None,
-        sector_size: bps,
-    };
-    if let Some(bps) = bps
-        && cluster_valid
-        && matches!(fats, 1 | 2)
-        && volume_length > 0
-    {
-        checked.volume_bytes = volume_length.checked_mul(bps);
-        checked.cluster_size = bps.checked_shl(cluster_shift);
-        let fat_end = fat_length
-            .checked_mul(fats)
-            .and_then(|fat_area| fat_area.checked_add(fat_offset));
-        let heap_end = count
-            .checked_shl(cluster_shift)
-            .and_then(|clusters| clusters.checked_add(heap));
-        let layout_ok = fat_end.is_some_and(|end| end <= heap)
-            && heap_end.is_some_and(|end| end <= volume_length)
-            && count > 0;
-        if !layout_ok {
-            issues.push(Issue::BadLayout);
-        }
-        if fat_length == 0
-            || fat_length.saturating_mul(bps) < count.saturating_add(2).saturating_mul(4)
-        {
-            issues.push(Issue::BadFatSize(fat_length));
-        }
-        if count > 0 && (root < 2 || root >= count.saturating_add(2)) {
-            issues.push(Issue::BadRootCluster(root));
-        }
-    }
-    checked.issues = issues;
-    checked
-}
-
-/// NTFS「每条记录几簇」这类字段：正数是簇数，负数 -n 表示 2^n 字节。
-fn ntfs_size(raw: u8, cluster_size: u64) -> Option<u64> {
-    let value = raw as i8;
-    let size = if value > 0 {
-        u64::try_from(value).ok()?.checked_mul(cluster_size)?
-    } else {
-        1u64.checked_shl(u32::from(value.unsigned_abs()))?
-    };
-    (size.is_power_of_two() && (512..=65536).contains(&size)).then_some(size)
-}
-
-fn check_ntfs(sector: &[u8], expected: Option<u64>) -> Checked {
-    let mut issues = Vec::new();
-    check_jump(sector, &mut issues);
-    if sector.get(3..11) != Some(b"NTFS    ".as_slice()) {
-        issues.push(Issue::BadOemId);
-    }
-    check_signature(sector, &mut issues);
-    let bps = u64::from(le16(sector, 0x0B).unwrap_or(0));
-    let bps = check_sector_size(
-        bps,
-        bps.is_power_of_two() && (512..=4096).contains(&bps),
-        expected,
-        &mut issues,
-    );
-    let raw = sector.get(0x0D).copied().unwrap_or(0);
-    let sectors_per_cluster = if raw <= 0x80 {
-        Some(u64::from(raw)).filter(|&count| count.is_power_of_two())
-    } else {
-        1u64.checked_shl(256 - u32::from(raw))
-    };
-    let cluster_size = bps
-        .zip(sectors_per_cluster)
-        .and_then(|(bps, count)| bps.checked_mul(count))
-        .filter(|&size| size <= MAX_NTFS_CLUSTER);
-    if bps.is_some() && cluster_size.is_none() {
-        issues.push(Issue::BadSectorsPerCluster(u64::from(raw)));
-    }
-    // NTFS 不用的 BPB 字段规定为 0：保留扇区数、FAT 个数、根目录项数、16 位总扇区数、FAT 扇区数、32 位总扇区数
-    let legacy_zero = le16(sector, 14) == Some(0)
-        && sector.get(16) == Some(&0)
-        && le16(sector, 17) == Some(0)
-        && le16(sector, 19) == Some(0)
-        && le16(sector, 22) == Some(0)
-        && le32(sector, 32) == Some(0);
-    if !legacy_zero {
-        issues.push(Issue::BadLegacyFields);
-    }
-    let total = le64(sector, 0x28).unwrap_or(0);
-    if total == 0 {
-        issues.push(Issue::BadTotalSectors(0));
-    }
-    let record = cluster_size.and_then(|size| ntfs_size(sector.get(0x40).copied()?, size));
-    if cluster_size.is_some() && record.is_none() {
-        issues.push(Issue::BadRecordSize);
-    }
-    if cluster_size
-        .is_some_and(|size| ntfs_size(sector.get(0x44).copied().unwrap_or(0), size).is_none())
-    {
-        issues.push(Issue::BadIndexSize);
-    }
-    let mut checked = Checked {
-        issues: Vec::new(),
-        volume_bytes: None,
-        cluster_size,
-        sector_size: bps,
-    };
-    if let (Some(bps), Some(cluster), Some(record)) = (bps, cluster_size, record)
-        && total > 0
-    {
-        let volume = total.checked_mul(bps);
-        checked.volume_bytes = volume;
-        let inside = |lcn: u64| {
-            lcn > 0
-                && lcn
-                    .checked_mul(cluster)
-                    .and_then(|start| start.checked_add(record))
-                    .zip(volume)
-                    .is_some_and(|(end, volume)| end <= volume)
-        };
-        let mft = le64(sector, 0x30).unwrap_or(0);
-        if !inside(mft) {
-            issues.push(Issue::MftOutside(mft));
-        }
-        let mirror = le64(sector, 0x38).unwrap_or(0);
-        if !inside(mirror) {
-            issues.push(Issue::MirrorOutside(mirror));
-        }
-    }
-    checked.issues = issues;
-    checked
-}
-
-/// 引导扇区参数坏了也还认得出的文件系统标识：exFAT、NTFS、BitLocker 的 OEM 标识，FAT 的类型字符串。
-fn identify(sector: &[u8]) -> Option<FsKind> {
-    match sector.get(3..11) {
-        Some(b"EXFAT   ") => return Some(FsKind::Exfat),
-        Some(b"NTFS    ") => return Some(FsKind::Ntfs),
-        Some(b"-FVE-FS-") => return Some(FsKind::BitLocker),
-        _ => {}
-    }
-    if sector.get(82..90) == Some(b"FAT32   ".as_slice()) {
-        return Some(FsKind::Fat32);
-    }
-    match sector.get(54..62) {
-        Some(b"FAT12   ") => Some(FsKind::Fat12),
-        Some(b"FAT16   " | b"FAT     ") => Some(FsKind::Fat16),
-        _ => None,
+fn issue_from(problem: &Problem) -> Issue {
+    let value = problem.value;
+    match problem.rule {
+        Rule::Signature => Issue::MissingSignature,
+        Rule::Jump => Issue::BadJump,
+        Rule::OemId => Issue::BadOemId,
+        Rule::LegacyFields => Issue::BadLegacyFields,
+        Rule::BytesPerSector => Issue::BadBytesPerSector(value),
+        Rule::SectorsPerCluster => Issue::BadSectorsPerCluster(value),
+        Rule::ReservedSectors => Issue::BadReservedSectors(value),
+        Rule::FatCount => Issue::BadFatCount(value),
+        Rule::Media => Issue::BadMedia(value),
+        Rule::RootEntries => Issue::BadRootEntries(value),
+        Rule::TotalSectors => Issue::BadTotalSectors(value),
+        Rule::FatSize => Issue::BadFatSize(value),
+        Rule::Layout | Rule::ClusterCount => Issue::BadLayout,
+        Rule::ActiveFat => Issue::BadActiveFat(value),
+        Rule::RootCluster => Issue::BadRootCluster(value),
+        Rule::RecordSize => Issue::BadRecordSize,
+        Rule::IndexSize => Issue::BadIndexSize,
+        Rule::MftCluster => Issue::MftOutside(value),
+        Rule::MirrorCluster => Issue::MirrorOutside(value),
     }
 }
 
 /// 候选位置上的扇区看起来是不是这种文件系统的引导扇区（参数可以是坏的）。
 fn matches_family(candidate: &Candidate, sector: &[u8]) -> bool {
-    identify(sector) == Some(family_kind(candidate.family))
+    remnant_kind(sector) == Some(family_kind(candidate.family))
         || backup_kind(candidate, sector).is_some()
 }
 

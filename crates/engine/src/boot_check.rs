@@ -81,6 +81,7 @@ fn copy(report: &CopyReport, base: u64) -> BootCopyReport {
     BootCopyReport {
         offset: base.saturating_add(report.offset),
         issues: report.issues.iter().map(issue).collect(),
+        notes: report.notes.iter().map(issue).collect(),
         volume_bytes: report.volume_bytes,
         cluster_size: report.cluster_size,
         opened: report.opened(),
@@ -123,6 +124,7 @@ fn issue(issue: &Issue) -> BootIssue {
         Issue::BadTotalSectors(value) => ("badTotalSectors", Some(value), None),
         Issue::BadLayout => ("badLayout", None, None),
         Issue::BadRootCluster(value) => ("badRootCluster", Some(value), None),
+        Issue::BadActiveFat(value) => ("badActiveFat", Some(value), None),
         Issue::BadRecordSize => ("badRecordSize", None, None),
         Issue::BadIndexSize => ("badIndexSize", None, None),
         Issue::MftOutside(value) => ("mftOutside", Some(value), None),

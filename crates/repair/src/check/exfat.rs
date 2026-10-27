@@ -2,6 +2,7 @@
 //! 每个文件的簇（FAT 链或连续存放）与分配位图是否一致、丢失簇。依据微软公开的 exFAT 规范。
 
 use yisi_fs::boot::{exfat_boot_checksum, exfat_stored_checksum};
+use yisi_fs::bpb::{self, ExfatBpb as Geometry, Problem};
 use yisi_part::bytes::{le16, le32, le64};
 
 use crate::check::chains::{Layout, MAX_DEPTH, Volume};
@@ -31,79 +32,10 @@ const CHECKSUM_SKIPPED: [usize; 3] = [106, 107, 112];
 /// 大写表最多读这么多（规范里的完整大写表不到 6 KiB）。
 const MAX_UPCASE_BYTES: u64 = 1 << 20;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Geometry {
-    sector_shift: u32,
-    cluster_shift: u32,
-    volume_length: u64,
-    fat_offset: u64,
-    fat_length: u64,
-    heap_offset: u64,
-    cluster_count: u64,
-    root_cluster: u32,
-    flags: u16,
-    fats: u64,
-}
-
-impl Geometry {
-    fn bytes_per_sector(&self) -> u64 {
-        1 << self.sector_shift
-    }
-
-    fn cluster_size(&self) -> u64 {
-        1 << (self.sector_shift + self.cluster_shift)
-    }
-}
-
-/// 解析引导扇区；参数不合规范时返回出问题的那一项。
-fn parse(sector: &[u8]) -> Result<Geometry, &'static str> {
-    if sector.get(3..11) != Some(b"EXFAT   ".as_slice()) {
-        return Err("fileSystemName");
-    }
-    if le16(sector, 510) != Some(0xAA55) {
-        return Err("signature");
-    }
-    let sector_shift = u32::from(*sector.get(108).ok_or("bytesPerSectorShift")?);
-    if !(9..=12).contains(&sector_shift) {
-        return Err("bytesPerSectorShift");
-    }
-    let cluster_shift = u32::from(*sector.get(109).ok_or("sectorsPerClusterShift")?);
-    if cluster_shift > 25 - sector_shift {
-        return Err("sectorsPerClusterShift");
-    }
-    let fats = u64::from(*sector.get(110).ok_or("numberOfFats")?);
-    if !matches!(fats, 1 | 2) {
-        return Err("numberOfFats");
-    }
-    let number = |at, name| le32(sector, at).map(u64::from).ok_or(name);
-    let geometry = Geometry {
-        sector_shift,
-        cluster_shift,
-        volume_length: le64(sector, 72).ok_or("volumeLength")?,
-        fat_offset: number(80, "fatOffset")?,
-        fat_length: number(84, "fatLength")?,
-        heap_offset: number(88, "clusterHeapOffset")?,
-        cluster_count: number(92, "clusterCount")?,
-        root_cluster: le32(sector, 96).ok_or("firstClusterOfRootDirectory")?,
-        flags: le16(sector, 106).ok_or("volumeFlags")?,
-        fats,
-    };
-    if geometry.fat_offset < 24 {
-        return Err("fatOffset");
-    }
-    if geometry.fat_length == 0 {
-        return Err("fatLength");
-    }
-    if geometry.heap_offset < geometry.fat_offset + geometry.fat_length * fats {
-        return Err("clusterHeapOffset");
-    }
-    if geometry.cluster_count == 0 || geometry.cluster_count > 0xFFFF_FFF5 {
-        return Err("clusterCount");
-    }
-    if geometry.root_cluster < 2 || u64::from(geometry.root_cluster) >= geometry.cluster_count + 2 {
-        return Err("firstClusterOfRootDirectory");
-    }
-    Ok(geometry)
+/// 解析引导扇区：规则在 [`yisi_fs::bpb`]（与打开卷、引导扇区诊断共用）。有致命问题时参数为 `None`。
+fn parse(sector: &[u8]) -> (Option<Geometry>, Vec<Problem>) {
+    let checked = bpb::check_exfat(sector);
+    (checked.geometry, checked.problems)
 }
 
 /// 第 12 个扇区里每 4 个字节都应等于前 11 个扇区的校验和（[`exfat_boot_checksum`]）。
@@ -127,16 +59,17 @@ pub(crate) fn check(ctx: &mut Ctx, region: &[u8], from_backup: bool) -> Option<S
     };
     let mut region = region.to_vec();
     let mut using_backup = from_backup;
-    let geometry = match parse(&region) {
-        Ok(geometry) => geometry,
-        Err(field) => {
-            ctx.issues
-                .push(Issue::new(IssueKind::BootInvalid).area(area).field(field));
+    let (parsed, problems) = parse(&region);
+    ctx.boot_problems(&problems, area);
+    let geometry = match parsed {
+        Some(geometry) => geometry,
+        None => {
             // 主引导扇区坏了就试备份引导区
             let backup = (!from_backup).then(|| read_backup(ctx)).flatten();
-            match backup.as_deref().map(|backup| (parse(backup), backup)) {
-                Some((Ok(geometry), backup)) => {
-                    region = backup.to_vec();
+            match backup.map(|backup| (parse(&backup), backup)) {
+                Some(((Some(geometry), problems), backup)) => {
+                    ctx.boot_problems(&problems, Area::BackupBoot);
+                    region = backup;
                     using_backup = true;
                     area = Area::BackupBoot;
                     geometry
@@ -150,16 +83,6 @@ pub(crate) fn check(ctx: &mut Ctx, region: &[u8], from_backup: bool) -> Option<S
     let cluster_size = geometry.cluster_size();
     let length = ctx.disk.length();
 
-    if region
-        .get(11..64)
-        .is_some_and(|bytes| bytes.iter().any(|&byte| byte != 0))
-    {
-        ctx.issues.push(
-            Issue::new(IssueKind::BootInvalid)
-                .area(area)
-                .field("mustBeZero"),
-        );
-    }
     if !checksum_matches(&region, bps as usize) {
         ctx.issues
             .push(Issue::new(IssueKind::BootChecksum).area(area));
@@ -179,22 +102,7 @@ pub(crate) fn check(ctx: &mut Ctx, region: &[u8], from_backup: bool) -> Option<S
         );
     }
     let heap_offset = geometry.heap_offset.saturating_mul(bps);
-    let heap_end = heap_offset.saturating_add(geometry.cluster_count.saturating_mul(cluster_size));
-    if heap_end > volume_bytes {
-        ctx.issues.push(
-            Issue::new(IssueKind::BootInvalid)
-                .area(area)
-                .field("clusterCount"),
-        );
-    }
     let fat_entries = geometry.fat_length.saturating_mul(bps) / 4;
-    if fat_entries < geometry.cluster_count + 2 {
-        ctx.issues.push(
-            Issue::new(IssueKind::BootInvalid)
-                .area(area)
-                .field("fatLength"),
-        );
-    }
     if geometry.flags & FLAG_DIRTY != 0 {
         ctx.issues
             .push(Issue::new(IssueKind::VolumeDirty).area(area));
@@ -293,7 +201,7 @@ fn check_backup(ctx: &mut Ctx, main: &[u8], bps: u64) {
     let readable = ctx
         .read(12 * bps, &mut backup, Area::BackupBoot, None)
         .is_some_and(|bad| bad.is_empty());
-    if !readable || parse(&backup).is_err() {
+    if !readable || parse(&backup).0.is_none() {
         ctx.issues
             .push(Issue::new(IssueKind::BackupBootInvalid).area(Area::BackupBoot));
         return;

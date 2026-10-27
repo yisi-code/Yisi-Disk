@@ -1,7 +1,8 @@
 //! FAT12 / FAT16 / FAT32 的检查：引导扇区、备份引导扇区与 FSInfo、两份 FAT 是否一致、
 //! 目录树（长文件名的校验和与序号、`.` 与 `..`）、每个文件的 FAT 链、丢失簇。依据微软公开的 FAT 规范。
 
-use yisi_fs::{fat_short_checksum as short_checksum, fat_short_display};
+use yisi_fs::bpb::{self, Problem};
+use yisi_fs::{FsKind, fat_short_checksum as short_checksum, fat_short_display};
 use yisi_part::bytes::{le16, le32};
 
 use crate::check::chains::{Layout, MAX_DEPTH, Volume};
@@ -60,124 +61,45 @@ impl Geometry {
     }
 }
 
-/// 解析引导扇区；参数不自洽时返回出问题的那一项。类型按簇数判定（规范第 3.5 节），
-/// 只是 BPB 里 16 位的 FAT 扇区数为 0 时按 FAT32 处理（与浏览时的识别一致）。
-fn parse(sector: &[u8]) -> Result<Geometry, &'static str> {
-    let field = |value: Option<u64>, name| value.ok_or(name);
-    if le16(sector, 510) != Some(0xAA55) {
-        return Err("signature");
-    }
-    let bytes_per_sector = field(le16(sector, 11).map(u64::from), "bytesPerSector")?;
-    if !matches!(bytes_per_sector, 512 | 1024 | 2048 | 4096) {
-        return Err("bytesPerSector");
-    }
-    let sectors_per_cluster = field(sector.get(13).copied().map(u64::from), "sectorsPerCluster")?;
-    if !sectors_per_cluster.is_power_of_two() || sectors_per_cluster > 128 {
-        return Err("sectorsPerCluster");
-    }
-    let reserved = field(le16(sector, 14).map(u64::from), "reservedSectors")?;
-    if reserved == 0 {
-        return Err("reservedSectors");
-    }
-    let fats = field(sector.get(16).copied().map(u64::from), "fatCount")?;
-    if !matches!(fats, 1 | 2) {
-        return Err("fatCount");
-    }
-    let media = *sector.get(21).ok_or("mediaDescriptor")?;
-    if !(media == 0xF0 || media >= 0xF8) {
-        return Err("mediaDescriptor");
-    }
-    let root_entries = field(le16(sector, 17).map(u64::from), "rootEntries")?;
-    let total16 = field(le16(sector, 19).map(u64::from), "totalSectors")?;
-    let total32 = field(le32(sector, 32).map(u64::from), "totalSectors")?;
-    let total_sectors = if total16 != 0 { total16 } else { total32 };
-    if total_sectors == 0 {
-        return Err("totalSectors");
-    }
-    let fat16_sectors = field(le16(sector, 22).map(u64::from), "fatSize")?;
-    let is_fat32 = fat16_sectors == 0;
-    let fat_sectors = if is_fat32 {
-        field(le32(sector, 36).map(u64::from), "fatSize")?
-    } else {
-        fat16_sectors
-    };
-    if fat_sectors == 0 {
-        return Err("fatSize");
-    }
-    if is_fat32 == (root_entries != 0) {
-        return Err("rootEntries");
-    }
-    let mut geometry = Geometry {
-        width: Width::Fat32,
-        bytes_per_sector,
-        sectors_per_cluster,
-        reserved,
-        fats,
-        root_entries,
-        total_sectors,
-        fat_sectors,
-        media,
-        root_cluster: 0,
-        fs_info: 0,
-        backup_boot: 0,
-        mirroring: true,
-        active_fat: 0,
-        cluster_count: 0,
-    };
-    let data_sectors = total_sectors
-        .checked_sub(geometry.first_data_sector())
-        .ok_or("totalSectors")?;
-    let clusters = data_sectors / sectors_per_cluster;
-    geometry.width = if is_fat32 {
-        Width::Fat32
-    } else if clusters < 4085 {
-        Width::Fat12
-    } else if clusters < 65525 {
-        Width::Fat16
-    } else {
-        return Err("fatSize");
-    };
-    if clusters == 0 || clusters > 0x0FFF_FFF5 {
-        return Err("totalSectors");
-    }
-    geometry.cluster_count = clusters;
-    if is_fat32 {
-        let flags = le16(sector, 40).ok_or("extFlags")?;
-        if flags & 0x80 != 0 {
-            geometry.mirroring = false;
-            geometry.active_fat = u64::from(flags & 0x0F);
-            if geometry.active_fat >= fats {
-                return Err("extFlags");
-            }
-        }
-        geometry.root_cluster = le32(sector, 44).ok_or("rootCluster")?;
-        if geometry.root_cluster < 2 || u64::from(geometry.root_cluster) >= clusters + 2 {
-            return Err("rootCluster");
-        }
-        geometry.fs_info = u64::from(le16(sector, 48).ok_or("fsInfo")?);
-        geometry.backup_boot = u64::from(le16(sector, 50).ok_or("backupBootSector")?);
-    }
-    Ok(geometry)
+/// 解析引导扇区：规则在 [`yisi_fs::bpb`]（与打开卷、引导扇区诊断共用）。有致命问题时参数为 `None`。
+fn parse(sector: &[u8]) -> (Option<Geometry>, Vec<Problem>) {
+    let checked = bpb::check_fat(sector, None);
+    let geometry = checked.geometry.map(|bpb| Geometry {
+        width: match bpb.kind {
+            FsKind::Fat12 => Width::Fat12,
+            FsKind::Fat16 => Width::Fat16,
+            _ => Width::Fat32,
+        },
+        bytes_per_sector: bpb.bytes_per_sector,
+        sectors_per_cluster: bpb.sectors_per_cluster,
+        reserved: bpb.reserved,
+        fats: bpb.fats,
+        root_entries: bpb.root_entries,
+        total_sectors: bpb.total_sectors,
+        fat_sectors: bpb.fat_sectors,
+        media: bpb.media,
+        root_cluster: bpb.root_cluster,
+        fs_info: bpb.fs_info,
+        backup_boot: bpb.backup_boot,
+        mirroring: bpb.active_fat.is_none(),
+        active_fat: bpb.active_fat.unwrap_or(0),
+        cluster_count: bpb.cluster_count,
+    });
+    (geometry, checked.problems)
 }
 
 /// 识别用：认得出时给出是不是 FAT32、扇区大小。
 pub(crate) fn looks_valid(sector: &[u8]) -> Option<(bool, u64)> {
-    let geometry = parse(sector).ok()?;
+    let geometry = parse(sector).0?;
     Some((geometry.width == Width::Fat32, geometry.bytes_per_sector))
 }
 
 /// 检查一个 FAT 卷。`sector` 是认出来的引导扇区（`from_backup` 时来自备份）。被取消时返回 `None`。
 pub(crate) fn check(ctx: &mut Ctx, sector: &[u8], from_backup: bool) -> Option<Summary> {
-    let geometry = match parse(sector) {
-        Ok(geometry) => geometry,
-        Err(field) => {
-            ctx.issues.push(
-                Issue::new(IssueKind::BootInvalid)
-                    .area(Area::Boot)
-                    .field(field),
-            );
-            return Some(unknown());
-        }
+    let (geometry, problems) = parse(sector);
+    ctx.boot_problems(&problems, Area::Boot);
+    let Some(geometry) = geometry else {
+        return Some(unknown());
     };
     ctx.checked(CheckItem::Boot);
     let bps = geometry.bytes_per_sector;
@@ -196,13 +118,6 @@ pub(crate) fn check(ctx: &mut Ctx, sector: &[u8], from_backup: bool) -> Option<S
     // 簇数受 FAT 能装下的表项数限制，分区被截短时只算到分区末尾
     let heap_offset = geometry.first_data_sector().saturating_mul(bps);
     let fat_entries = geometry.fat_sectors.saturating_mul(bps).saturating_mul(8) / geometry.bits();
-    if fat_entries < geometry.cluster_count + 2 {
-        ctx.issues.push(
-            Issue::new(IssueKind::BootInvalid)
-                .area(Area::Boot)
-                .field("fatSize"),
-        );
-    }
     let fits = length.saturating_sub(heap_offset) / cluster_size;
     let count = geometry
         .cluster_count
@@ -305,7 +220,7 @@ fn check_backup_boot(ctx: &mut Ctx, geometry: &Geometry, main: &[u8]) {
                 None,
             )
             .is_some_and(|bad| bad.is_empty());
-    if !readable || parse(&backup).is_err() {
+    if !readable || parse(&backup).0.is_none() {
         ctx.issues
             .push(Issue::new(IssueKind::BackupBootInvalid).area(Area::BackupBoot));
         return;

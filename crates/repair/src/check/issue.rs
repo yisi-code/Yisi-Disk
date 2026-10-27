@@ -63,6 +63,8 @@ pub enum IssueKind {
     BootUnrecognized,
     /// 引导扇区的参数不合规范；`field` 是哪一项。
     BootInvalid,
+    /// 引导扇区里形式上不合规范、但不影响使用的地方（跳转指令、NTFS 规定为 0 的旧字段）；`field` 是哪一项。
+    BootNote,
     /// exFAT 引导区校验和不对（`area` 区分主、备）。
     BootChecksum,
     /// 备份引导扇区读不出、认不出或参数不合规范。
@@ -145,6 +147,7 @@ impl IssueKind {
             Self::UnknownFilesystem => "unknownFilesystem",
             Self::BootUnrecognized => "bootUnrecognized",
             Self::BootInvalid => "bootInvalid",
+            Self::BootNote => "bootNote",
             Self::BootChecksum => "bootChecksum",
             Self::BackupBootInvalid => "backupBootInvalid",
             Self::BackupBootMismatch => "backupBootMismatch",
@@ -222,6 +225,7 @@ impl IssueKind {
             | Self::DotEntries
             | Self::MftMirrorMismatch => Severity::Structure,
             Self::BackupBootMismatch
+            | Self::BootNote
             | Self::VolumeDirty
             | Self::FsInfoInvalid
             | Self::FatMediaMismatch
