@@ -4,7 +4,7 @@
 
 **下载最新版：<https://github.com/yisi-code/Yisi-Disk/releases/latest>**
 
-## 能做什么（v0.1.0）
+## 能做什么（v0.1.1）
 
 | 功能 | 说明 |
 |---|---|
@@ -21,7 +21,7 @@
 ## 下载与运行
 
 1. 打开 [最新版本](https://github.com/yisi-code/Yisi-Disk/releases/latest)，下载 `Yisi-Disk-<版本>-windows-x64.zip`。
-2. 解压到任意文件夹（不要放在要恢复数据的那块盘上），双击 `Yisi-Disk.exe` 运行。
+2. 解压到任意位置（不要放在要恢复数据的那块盘上），得到 `Yisi-Disk-<版本>-windows-x64` 文件夹，双击里面的 `Yisi-Disk.exe` 运行。
 3. 文件夹里的 `yisi-engine.exe`、`yisi-broker.exe` 由主程序按需启动，三个程序要放在一起。
 
 运行要求：
