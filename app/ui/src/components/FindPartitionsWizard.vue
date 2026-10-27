@@ -5,6 +5,7 @@ import PartitionFiles from './PartitionFiles.vue'
 import SourcePicker from './SourcePicker.vue'
 import { useBrowse } from '../composables/useBrowse'
 import { useHostErrorText } from '../composables/useHostErrorText'
+import { usePartitionText } from '../composables/usePartitionText'
 import { usePartitionSearch } from '../composables/usePartitionSearch'
 import {
   toHostError,
@@ -21,8 +22,9 @@ type WizardStep = (typeof STEPS)[number]
 
 const emit = defineEmits<{ exit: [] }>()
 
-const { t, te } = useI18n()
+const { t } = useI18n()
 const { formatHostError } = useHostErrorText()
+const { filesystemName, sourceName, unbrowsableReason } = usePartitionText()
 const search = usePartitionSearch()
 const browse = useBrowse()
 const domPrefix = useId()
@@ -70,7 +72,6 @@ const partitionRef = computed<PartitionRef | null>(() => {
     offset: partition.offset,
     length: partition.length,
     outsideTable: true,
-    backupBoot: candidate.backupBoot,
   }
 })
 
@@ -79,15 +80,7 @@ const isPartitionBusy = computed(
   () => isOpeningPartition.value || browse.isScanning.value || isCopying.value,
 )
 
-const sourceText = computed(() => {
-  const current = search.target.value
-  if (current === null) {
-    return ''
-  }
-  return current.kind === 'image'
-    ? t('undelete.sourceImage', { path: current.path })
-    : t('undelete.sourceDisk', { number: current.diskNumber })
-})
+const sourceText = computed(() => sourceName(search.target.value))
 
 const statusText = computed(() => {
   switch (search.status.value) {
@@ -226,7 +219,7 @@ async function openSelected() {
   isOpeningPartition.value = true
   let partition: PartitionInfo | null
   try {
-    partition = await browse.openRange(candidate.offset, candidate.length, candidate.backupBoot)
+    partition = await browse.openRange(candidate.offset, candidate.length, candidate.boot)
   } catch (error) {
     if (serial === openSerial) {
       openError.value = toHostError(error)
@@ -251,7 +244,7 @@ async function openSelected() {
 
 function candidateName(candidate: FoundPartition): string {
   return t('findPartitions.list.name', {
-    filesystem: partitionFs(candidate.filesystem),
+    filesystem: filesystemName(candidate.filesystem),
     size: formatBytes(candidate.length),
   })
 }
@@ -276,17 +269,6 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
     tags.push({ kind: 'truncated', text: t('findPartitions.list.truncated') })
   }
   return tags
-}
-
-function partitionFs(filesystem: string): string {
-  const key = `partition.fs.${filesystem}`
-  return te(key) ? t(key) : filesystem
-}
-
-/** 不能浏览的原因；文件系统认得出、却打不开时按「参数不对」说 */
-function unsupportedReason(partition: PartitionInfo): string {
-  const key = `undelete.partition.reason.${partition.filesystem}`
-  return te(key) ? t(key) : t('undelete.partition.reason.invalid')
 }
 </script>
 
@@ -479,6 +461,7 @@ function unsupportedReason(partition: PartitionInfo): string {
             :source="search.target.value"
             :partition="openedPartition"
             :partition-ref="partitionRef"
+            :boot="selectedCandidate?.boot ?? 'primary'"
             :sector-size="search.summary.value?.sectorSize ?? 512"
             :can-browse="browse.isOpen.value"
           />
@@ -520,7 +503,7 @@ function unsupportedReason(partition: PartitionInfo): string {
                   {{ t('findPartitions.files.openFailed', { reason: formatHostError(openError) }) }}
                 </p>
                 <p v-else-if="openedPartition" class="wizard__note">
-                  {{ t('findPartitions.files.unbrowsable', { reason: unsupportedReason(openedPartition) }) }}
+                  {{ t('findPartitions.files.unbrowsable', { reason: unbrowsableReason(openedPartition.filesystem) }) }}
                 </p>
                 <p v-else-if="browse.scanFailure.value" class="wizard__error" role="alert">
                   {{ t('undelete.scan.failed', { reason: formatHostError(browse.scanFailure.value) }) }}

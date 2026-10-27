@@ -256,8 +256,6 @@ export interface PartitionRef {
   length: number
   /** 按位置打开的分区（丢失分区搜索找到的）：引擎不核对分区表，只核对范围在源之内 */
   outsideTable?: boolean
-  /** 按位置打开时给的备份引导扇区位置 */
-  backupBoot?: number | null
 }
 
 /** 丢失分区搜索找到的一个分区 */
@@ -270,8 +268,8 @@ export interface FoundPartition {
   label: string | null
   /** 靠哪个引导扇区找到：primary（分区开头的）、backup（主引导扇区已坏，靠备份）、both */
   foundBy: 'primary' | 'backup' | 'both'
-  /** 只靠备份找到时备份引导扇区的位置；浏览、复制时原样传回 */
-  backupBoot: number | null
+  /** 浏览、复制时按哪一份引导扇区打开（只靠备份找到的为 backup）；原样传给 openBrowseRange 与 startCopy */
+  boot: BootCopy
   /** 卷超出了源的末尾，长度已截短 */
   truncated: boolean
   /** 与现有分区表的关系：表里已有、与表里的分区重叠、丢失 */
@@ -600,9 +598,9 @@ export function openBrowseRange(
   jobId: string,
   offset: number,
   length: number,
-  backupBoot: number | null,
+  boot: BootCopy,
 ): Promise<PartitionInfo> {
-  return invoke<PartitionInfo>('browse_open_range', { jobId, offset, length, backupBoot })
+  return invoke<PartitionInfo>('browse_open_range', { jobId, offset, length, boot })
 }
 
 /**

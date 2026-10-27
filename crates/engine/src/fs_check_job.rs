@@ -2,39 +2,14 @@
 
 use std::time::Instant;
 
-use yisi_engine::protocol::{self, FsCheckReport, FsIssue, FsIssueTotals, PartitionRef};
+use yisi_engine::protocol::{FsCheckReport, FsIssue, FsIssueTotals, PartitionRef};
 use yisi_io::BlockDevice;
 use yisi_repair::check::{self, Control, Issue, Report, Stage};
-use yisi_rpc::ErrorObject;
 
 use crate::job::{JobContext, JobOutcome};
-use crate::runtime::error_chain;
 
 /// 问题清单编码后最多这么多字节，留出余量，保证整条消息不超过 1 MiB。
 const ISSUES_BYTES: usize = 768 * 1024;
-
-/// 重新读分区表，核对浏览时看到的分区还在原处。
-pub fn verify_partition(
-    device: &dyn BlockDevice,
-    partition: PartitionRef,
-) -> Result<(), ErrorObject> {
-    let unavailable =
-        |message: String| ErrorObject::new(protocol::error_code::FS_UNAVAILABLE, message);
-    let table = yisi_part::read_table(device).map_err(|error| unavailable(error_chain(&error)))?;
-    let found = table.partitions.iter().any(|candidate| {
-        candidate.number == partition.number
-            && candidate.offset == partition.offset
-            && candidate.length == partition.length
-    });
-    if found {
-        Ok(())
-    } else {
-        Err(unavailable(format!(
-            "分区 {} 已不在浏览时的位置",
-            partition.number
-        )))
-    }
-}
 
 /// 检查点上过暂停闸门，进度带上阶段名。
 struct JobControl<'a>(&'a JobContext);

@@ -5,6 +5,7 @@ import PartitionFiles from './PartitionFiles.vue'
 import SourcePicker from './SourcePicker.vue'
 import { useBrowse } from '../composables/useBrowse'
 import { useHostErrorText } from '../composables/useHostErrorText'
+import { usePartitionText } from '../composables/usePartitionText'
 import {
   diagnoseBoot,
   toHostError,
@@ -28,6 +29,7 @@ const emit = defineEmits<{ exit: [] }>()
 
 const { t, te, locale } = useI18n()
 const { formatHostError } = useHostErrorText()
+const { tableNote, sourceName } = usePartitionText()
 const browse = useBrowse()
 
 const titleElement = ref<HTMLHeadingElement | null>(null)
@@ -78,15 +80,7 @@ const isBusy = computed(
 
 const canGoNext = computed(() => step.value === 'source' && target.value !== null && !isBusy.value)
 
-const sourceText = computed(() => {
-  const current = diagnosedTarget.value
-  if (current === null) {
-    return ''
-  }
-  return current.kind === 'image'
-    ? t('undelete.sourceImage', { path: current.path })
-    : t('undelete.sourceDisk', { number: current.diskNumber })
-})
+const sourceText = computed(() => sourceName(diagnosedTarget.value))
 
 const diagnosingText = computed(() =>
   diagnosedTarget.value?.kind === 'disk' ? t('repair.diagnose.runningDisk') : t('repair.diagnose.running'),
@@ -285,11 +279,6 @@ function openFailure(partition: PartitionBoot): string | null {
 function canBrowseBackup(partition: PartitionBoot): boolean {
   return partition.verdict === 'primaryDamaged' && partition.backup?.opened === true
 }
-
-function noteText(note: string): string {
-  const key = `undelete.notes.${note}`
-  return te(key) ? t(key) : note
-}
 </script>
 
 <template>
@@ -431,7 +420,7 @@ function noteText(note: string): string {
         </p>
         <p class="wizard__hint wizard__hint--warning">{{ t('repair.readOnly') }}</p>
         <ul v-if="diagnosis.notes.length" class="repair-wizard__list">
-          <li v-for="note in diagnosis.notes" :key="note">{{ noteText(note) }}</li>
+          <li v-for="note in diagnosis.notes" :key="note">{{ tableNote(note) }}</li>
         </ul>
         <p v-if="diagnosis.partitions.length === 0" class="wizard__note">{{ t('repair.result.none') }}</p>
 

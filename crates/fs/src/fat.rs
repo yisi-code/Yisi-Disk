@@ -507,9 +507,7 @@ fn raw_entry(
     {
         long = long_name(parts);
     }
-    let lowercase_base = raw.get(12).is_some_and(|&flags| flags & 0x08 != 0);
-    let lowercase_ext = raw.get(12).is_some_and(|&flags| flags & 0x10 != 0);
-    let (short_name, non_ascii) = short_display(&short, lowercase_base, lowercase_ext);
+    let (short_name, non_ascii) = short_display(&short, raw.get(12).copied().unwrap_or(0));
     if long.is_none() && non_ascii {
         name_uncertain = true;
     }
@@ -583,7 +581,7 @@ fn long_name(parts: &[LfnPart]) -> Option<String> {
 }
 
 /// 短文件名（11 字节）的校验和，长文件名的每一段都记着它。
-pub(crate) fn short_checksum(short: &[u8; 11]) -> u8 {
+pub fn short_checksum(short: &[u8; 11]) -> u8 {
     short
         .iter()
         .fold(0u8, |sum, &byte| sum.rotate_right(1).wrapping_add(byte))
@@ -614,10 +612,11 @@ fn plausible_short(short: &[u8]) -> bool {
     })
 }
 
-/// 8.3 名字显示成 `NAME.EXT`，按大小写标记转小写；非 ASCII 字节（OEM 代码页）显示为 `_`。
-fn short_display(short: &[u8; 11], lowercase_base: bool, lowercase_ext: bool) -> (String, bool) {
+/// 8.3 名字显示成 `NAME.EXT`：按大小写标记（目录项第 12 字节：0x08 名字小写、0x10 扩展名小写）转小写；
+/// 首字节 0x05 表示它实际是 0xE5；非 ASCII 字节（OEM 代码页）与控制字符显示为 `_`。第二项为有没有非 ASCII 字节。
+pub fn short_display(short: &[u8; 11], case_flags: u8) -> (String, bool) {
     let mut non_ascii = false;
-    let mut part = |bytes: &[u8], lower: bool| -> String {
+    let mut part = |bytes: &[u8], first: bool, lower: bool| -> String {
         let length = bytes
             .iter()
             .rposition(|&byte| byte != b' ')
@@ -625,9 +624,17 @@ fn short_display(short: &[u8; 11], lowercase_base: bool, lowercase_ext: bool) ->
         bytes
             .iter()
             .take(length)
-            .map(|&byte| {
+            .enumerate()
+            .map(|(index, &byte)| {
+                let byte = if first && index == 0 && byte == KANJI_E5 {
+                    DELETED
+                } else {
+                    byte
+                };
                 if byte >= 0x80 {
                     non_ascii = true;
+                    '_'
+                } else if !byte.is_ascii_graphic() && byte != b' ' {
                     '_'
                 } else if lower {
                     char::from(byte.to_ascii_lowercase())
@@ -638,8 +645,8 @@ fn short_display(short: &[u8; 11], lowercase_base: bool, lowercase_ext: bool) ->
             .collect()
     };
     let (base, ext) = short.split_at(8);
-    let base = part(base, lowercase_base);
-    let ext = part(ext, lowercase_ext);
+    let base = part(base, true, case_flags & 0x08 != 0);
+    let ext = part(ext, false, case_flags & 0x10 != 0);
     let name = if ext.is_empty() {
         base
     } else {
@@ -704,15 +711,19 @@ mod tests {
 
     #[test]
     fn short_names_respect_case_flags() {
-        assert_eq!(short_display(b"README  TXT", true, false).0, "readme.TXT");
-        assert_eq!(short_display(b"NOEXT      ", false, false).0, "NOEXT");
+        assert_eq!(short_display(b"README  TXT", 0x08).0, "readme.TXT");
+        assert_eq!(short_display(b"NOEXT      ", 0).0, "NOEXT");
+        assert_eq!(
+            short_display(b"\x05BC     TXT", 0x10),
+            ("_BC.txt".to_owned(), true)
+        );
+        assert_eq!(short_display(b"A\x01B     TXT", 0).0, "A_B.TXT");
         assert_eq!(
             short_display(
                 &[
                     0xC4, b'A', b' ', b' ', b' ', b' ', b' ', b' ', b'T', b'X', b'T'
                 ],
-                false,
-                false
+                0
             ),
             ("_A.TXT".to_owned(), true)
         );

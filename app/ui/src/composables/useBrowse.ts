@@ -69,13 +69,13 @@ export function useBrowse() {
   async function openRange(
     offset: number,
     length: number,
-    backupBoot: number | null,
+    boot: BootCopy,
   ): Promise<PartitionInfo | null> {
     const jobId = job.jobId.value
     if (jobId === null || !isOpen.value) {
       return null
     }
-    return openBrowseRange(jobId, offset, length, backupBoot)
+    return openBrowseRange(jobId, offset, length, boot)
   }
 
   /** 扫描分区里已删除的项；扫过的分区引擎直接给出上次的结果。被停下或失败时返回 null */

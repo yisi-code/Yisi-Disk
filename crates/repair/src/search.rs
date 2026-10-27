@@ -6,9 +6,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use yisi_fs::{BootLayout, BootSector, FsKind, Volume, inspect_boot};
-use yisi_io::{BlockDevice, IoError};
-use yisi_part::bytes::le32;
+use yisi_fs::boot::{exfat_boot_checksum, exfat_stored_checksum};
+use yisi_fs::{BootCopy, BootLayout, BootSector, FsKind, Volume, inspect_boot};
+use yisi_io::BlockDevice;
 use yisi_part::{PartitionKind, PartitionTable, Role};
 
 /// 每次顺序读 1 MiB。
@@ -54,8 +54,8 @@ pub struct Candidate {
     pub kind: FsKind,
     pub label: Option<String>,
     pub found_by: FoundBy,
-    /// 只靠备份找到时，备份引导扇区在设备上的位置：浏览时用它代替已坏的主引导扇区（[`BackupBootDevice`]）。
-    pub backup_boot: Option<u64>,
+    /// 浏览、复制时按哪一份引导扇区打开：只靠备份找到的（主引导扇区已坏）用备份，否则用主引导扇区。
+    pub boot: BootCopy,
     /// 卷超出了设备末尾，长度已截短。
     pub truncated: bool,
     pub relation: Relation,
@@ -140,8 +140,8 @@ struct Key {
 struct Found {
     kind: FsKind,
     primary: bool,
-    /// 核对通过的备份引导扇区的位置。
-    backup: Option<u64>,
+    /// 有备份引导扇区核对通过。
+    backup: bool,
 }
 
 #[derive(Default)]
@@ -192,12 +192,10 @@ impl Finder {
         let found = self.found.entry(key).or_insert(Found {
             kind: boot.kind,
             primary: false,
-            backup: None,
+            backup: false,
         });
         match backup {
-            Some(at) => {
-                found.backup.get_or_insert(at);
-            }
+            Some(_) => found.backup = true,
             None => found.primary = true,
         }
     }
@@ -212,18 +210,24 @@ impl Finder {
         let room = device.size().saturating_sub(key.offset);
         let length = key.volume_bytes.min(room);
         let found_by = match (found.primary, found.backup) {
-            (true, Some(_)) => FoundBy::Both,
-            (false, Some(_)) => FoundBy::Backup,
+            (true, true) => FoundBy::Both,
+            (false, true) => FoundBy::Backup,
             _ => FoundBy::Primary,
         };
-        let backup_boot = if found.primary { None } else { found.backup };
+        let boot = if found_by == FoundBy::Backup {
+            BootCopy::Backup
+        } else {
+            BootCopy::Primary
+        };
         Candidate {
             offset: key.offset,
             length,
             kind: found.kind,
-            label: volume_label(device, key.offset, length, backup_boot),
+            label: Volume::open_with(Arc::clone(device), key.offset, length, boot)
+                .ok()
+                .and_then(|volume| volume.label().map(str::to_owned)),
             found_by,
-            backup_boot,
+            boot,
             truncated: key.volume_bytes > room,
             relation: relation(table, key.offset, length),
             overlaps_candidate: false,
@@ -286,31 +290,7 @@ fn exfat_checksum_ok(device: &dyn BlockDevice, region: u64, bytes_per_sector: u6
         return false;
     }
     let (covered, stored) = bytes.split_at(sector * 11);
-    let mut checksum = 0u32;
-    for (index, &byte) in covered.iter().enumerate() {
-        if matches!(index, 106 | 107 | 112) {
-            continue;
-        }
-        checksum = checksum.rotate_right(1).wrapping_add(u32::from(byte));
-    }
-    le32(stored, 0) == Some(checksum)
-}
-
-fn volume_label(
-    device: &Arc<dyn BlockDevice>,
-    offset: u64,
-    length: u64,
-    backup_boot: Option<u64>,
-) -> Option<String> {
-    let device = match backup_boot {
-        Some(backup) => Arc::new(BackupBootDevice::new(Arc::clone(device), offset, backup).ok()?)
-            as Arc<dyn BlockDevice>,
-        None => Arc::clone(device),
-    };
-    Volume::open(device, offset, length)
-        .ok()?
-        .label()
-        .map(str::to_owned)
+    exfat_stored_checksum(stored) == Some(exfat_boot_checksum(covered))
 }
 
 /// 与分区表比对：起点相同算表里已有；否则与哪个分区有重叠就算重叠。
@@ -359,75 +339,13 @@ fn mark_overlapping(candidates: &mut [Candidate]) {
     }
 }
 
-/// 读设备时，把分区开头 `offset` 处的 512 字节换成 `backup` 处的备份引导扇区，其余照原样读。
-/// 只在内存里替换，不改设备；用来浏览主引导扇区已坏、靠备份找到的分区。
-pub struct BackupBootDevice {
-    inner: Arc<dyn BlockDevice>,
-    offset: u64,
-    sector: [u8; SECTOR],
-}
-
-impl BackupBootDevice {
-    pub fn new(inner: Arc<dyn BlockDevice>, offset: u64, backup: u64) -> Result<Self, IoError> {
-        let mut sector = [0u8; SECTOR];
-        inner.read_exact_at(backup, &mut sector)?;
-        Ok(Self {
-            inner,
-            offset,
-            sector,
-        })
-    }
-
-    fn sector_end(&self) -> u64 {
-        self.offset.saturating_add(SECTOR as u64)
-    }
-}
-
-impl BlockDevice for BackupBootDevice {
-    fn size(&self) -> u64 {
-        self.inner.size()
-    }
-
-    fn sector_size(&self) -> u32 {
-        self.inner.sector_size()
-    }
-
-    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, IoError> {
-        let end = offset.saturating_add(buf.len() as u64).min(self.size());
-        // 整个落在替换的扇区里：不读设备（主引导扇区可能本来就读不出）
-        if offset >= self.offset && end <= self.sector_end() && offset < end {
-            let from = (offset - self.offset) as usize;
-            let count = (end - offset) as usize;
-            if let (Some(target), Some(source)) = (
-                buf.get_mut(..count),
-                self.sector.get(from..from.saturating_add(count)),
-            ) {
-                target.copy_from_slice(source);
-                return Ok(count);
-            }
-        }
-        let read = self.inner.read_at(offset, buf)?;
-        let low = offset.max(self.offset);
-        let high = offset.saturating_add(read as u64).min(self.sector_end());
-        if low < high {
-            let target = buf.get_mut((low - offset) as usize..(high - offset) as usize);
-            let source = self
-                .sector
-                .get((low - self.offset) as usize..(high - self.offset) as usize);
-            if let (Some(target), Some(source)) = (target, source) {
-                target.copy_from_slice(source);
-            }
-        }
-        Ok(read)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
     use std::io;
 
     use yisi_fs::samples::MemoryDisk;
+    use yisi_io::IoError;
 
     use super::*;
     use crate::samples::{SearchDisk, search_disk};
@@ -481,14 +399,8 @@ mod tests {
 
     /// 按候选分区打开卷（靠备份找到的用备份引导扇区），读出根目录下的一个文件。
     fn file_in_root(device: Arc<dyn BlockDevice>, candidate: &Candidate, name: &str) -> Vec<u8> {
-        let device = match candidate.backup_boot {
-            Some(backup) => {
-                Arc::new(BackupBootDevice::new(device, candidate.offset, backup).unwrap())
-                    as Arc<dyn BlockDevice>
-            }
-            None => device,
-        };
-        let volume = Volume::open(device, candidate.offset, candidate.length).unwrap();
+        let volume =
+            Volume::open_with(device, candidate.offset, candidate.length, candidate.boot).unwrap();
         let listing = volume.list(&volume.root()).unwrap();
         let entry = listing
             .entries
@@ -533,7 +445,7 @@ mod tests {
         assert_eq!(exfat.found_by, FoundBy::Both);
         assert_eq!(exfat.label.as_deref(), Some("EXDATA"));
         assert_eq!(exfat.relation, Relation::InTable { number: 3 });
-        assert_eq!(exfat.backup_boot, None);
+        assert_eq!(exfat.boot, BootCopy::Primary);
     }
 
     #[test]
@@ -578,19 +490,19 @@ mod tests {
 
         let fat32 = find(&report, disk.fat32.0);
         assert_eq!(fat32.found_by, FoundBy::Backup);
-        assert_eq!(fat32.backup_boot, Some(disk.fat32.0 + 6 * 512));
+        assert_eq!(fat32.boot, BootCopy::Backup);
         assert_eq!(fat32.label.as_deref(), Some("DATA32"));
         assert_eq!(file_in_root(memory(&disk), fat32, "notes.txt"), disk.notes);
 
         let ntfs = find(&report, disk.ntfs.0);
         assert_eq!(ntfs.found_by, FoundBy::Backup);
         assert_eq!(ntfs.length, disk.ntfs.1);
-        assert_eq!(ntfs.backup_boot, Some(disk.ntfs.0 + disk.ntfs.1 - 512));
+        assert_eq!(ntfs.boot, BootCopy::Backup);
         assert_eq!(file_in_root(memory(&disk), ntfs, "report.bin"), disk.report);
 
         let exfat = find(&report, disk.exfat.0);
         assert_eq!(exfat.found_by, FoundBy::Backup);
-        assert_eq!(exfat.backup_boot, Some(disk.exfat.0 + 12 * 512));
+        assert_eq!(exfat.boot, BootCopy::Backup);
         assert_eq!(exfat.label.as_deref(), Some("EXDATA"));
         assert_eq!(file_in_root(memory(&disk), exfat, "photo.dat"), disk.photo);
     }
@@ -677,21 +589,5 @@ mod tests {
         };
         assert!(search(&memory(&disk), &control).is_none());
         assert_eq!(control.last.get().0, 3 << 20);
-    }
-
-    #[test]
-    fn backup_boot_device_replaces_only_the_boot_sector() {
-        let mut data = vec![0u8; 8192];
-        data[4096..4608].fill(7);
-        data[100] = 1;
-        let inner: Arc<dyn BlockDevice> = Arc::new(MemoryDisk::new(data, 512));
-        let device = BackupBootDevice::new(inner, 0, 4096).unwrap();
-        let mut buf = vec![0u8; 1024];
-        assert_eq!(device.read_at(256, &mut buf).unwrap(), 1024);
-        assert!(buf[..256].iter().all(|&byte| byte == 7));
-        assert!(buf[256..].iter().all(|&byte| byte == 0));
-        let mut head = [0u8; 4];
-        device.read_exact_at(98, &mut head).unwrap();
-        assert_eq!(head, [7; 4]);
     }
 }

@@ -1,6 +1,7 @@
 //! exFAT 的检查：主、备引导区（参数与校验和）、分配位图、大写表、目录项集合（校验和、次项个数、文件名长度）、
 //! 每个文件的簇（FAT 链或连续存放）与分配位图是否一致、丢失簇。依据微软公开的 exFAT 规范。
 
+use yisi_fs::boot::{exfat_boot_checksum, exfat_stored_checksum};
 use yisi_part::bytes::{le16, le32, le64};
 
 use crate::check::chains::{Layout, MAX_DEPTH, Volume};
@@ -105,30 +106,16 @@ fn parse(sector: &[u8]) -> Result<Geometry, &'static str> {
     Ok(geometry)
 }
 
-/// 主引导区（前 11 个扇区，跳过 VolumeFlags 与 PercentInUse）的校验和。
-fn boot_checksum(region: &[u8], bytes_per_sector: usize) -> u32 {
-    region
-        .iter()
-        .take(11 * bytes_per_sector)
-        .enumerate()
-        .filter(|(index, _)| !CHECKSUM_SKIPPED.contains(index))
-        .fold(0u32, |sum, (_, &byte)| {
-            sum.rotate_right(1).wrapping_add(u32::from(byte))
-        })
-}
-
-/// 第 12 个扇区里每 4 个字节都应等于校验和。
+/// 第 12 个扇区里每 4 个字节都应等于前 11 个扇区的校验和（[`exfat_boot_checksum`]）。
 fn checksum_matches(region: &[u8], bytes_per_sector: usize) -> bool {
-    let expected = boot_checksum(region, bytes_per_sector);
-    region
-        .get(11 * bytes_per_sector..12 * bytes_per_sector)
-        .is_some_and(|sector| {
-            sector
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .all(|word| u32::from_le_bytes(*word) == expected)
-        })
+    let covered = region.get(..11 * bytes_per_sector);
+    let stored = region.get(11 * bytes_per_sector..12 * bytes_per_sector);
+    match (covered, stored) {
+        (Some(covered), Some(stored)) => {
+            exfat_stored_checksum(stored) == Some(exfat_boot_checksum(covered))
+        }
+        _ => false,
+    }
 }
 
 /// 检查一个 exFAT 卷。`region` 是认出来的引导区（12 个扇区，`from_backup` 时来自备份）。被取消时返回 `None`。

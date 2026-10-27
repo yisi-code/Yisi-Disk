@@ -8,14 +8,14 @@ use std::time::Instant;
 
 use yisi_engine::protocol::{
     self, BrowseOpened, FileListPage, FilePreview, FsEntry, ListFilesParams, MAX_PAGE,
-    OpenRangeParams, PartitionInfo, RANGE_PARTITION_BASE, ScanResult,
+    OpenRangeParams, PartitionInfo, PartitionRef, RANGE_PARTITION_BASE, ScanResult,
 };
 use yisi_fs::{BootCopy, FileRef, FsKind, State, Unsupported, Volume};
 use yisi_io::BlockDevice;
 use yisi_part::{Note, Partition, PartitionKind, PartitionTable, Role, Scheme};
-use yisi_repair::search::BackupBootDevice;
 use yisi_rpc::{ErrorObject, error_code};
 
+use crate::boot_check;
 use crate::job::ProgressSender;
 use crate::preview;
 use crate::runtime::error_chain;
@@ -45,12 +45,11 @@ pub struct Session {
     ranges: Mutex<Vec<Range>>,
 }
 
-/// 按位置打开的分区。靠备份引导扇区找到的，读卷时用 [`BackupBootDevice`] 换掉已坏的主引导扇区。
+/// 按位置打开的分区，以及按哪一份引导扇区打开（靠备份找到的用备份）。
 struct Range {
     offset: u64,
     length: u64,
-    backup_boot: Option<u64>,
-    device: Arc<dyn BlockDevice>,
+    boot: BootCopy,
 }
 
 struct SortedDir {
@@ -225,93 +224,57 @@ impl Session {
     /// 在会话里按位置打开一个分区（不在分区表里，例如搜索找到的），之后用答复里的编号浏览。
     /// 同一位置再打开时给出同一个编号。
     pub fn open_range(&self, params: &OpenRangeParams) -> Result<PartitionInfo, ErrorObject> {
-        let invalid = |message: String| ErrorObject::new(error_code::INVALID_PARAMS, message);
-        let size = self.device.size();
-        let inside = |offset: u64, length: u64| {
-            length > 0 && offset.checked_add(length).is_some_and(|end| end <= size)
-        };
-        if !inside(params.offset, params.length) {
-            return Err(invalid(format!(
-                "偏移 {} 起 {} 字节超出了设备范围（{size} 字节）",
-                params.offset, params.length
-            )));
-        }
-        if params
-            .backup_boot
-            .is_some_and(|backup| !inside(backup, 512))
-        {
-            return Err(invalid("备份引导扇区的位置超出了设备范围".to_owned()));
-        }
-        let (number, device) = {
+        check_range(self.device.as_ref(), params.offset, params.length)?;
+        let boot = boot_check::fs_copy(params.boot);
+        let number = {
             let mut ranges = lock(&self.ranges);
             let existing = ranges.iter().position(|range| {
-                range.offset == params.offset
-                    && range.length == params.length
-                    && range.backup_boot == params.backup_boot
+                range.offset == params.offset && range.length == params.length && range.boot == boot
             });
             let index = match existing {
                 Some(index) => index,
                 None => {
                     if ranges.len() >= MAX_RANGES {
-                        return Err(invalid(format!(
-                            "一次浏览最多按位置打开 {MAX_RANGES} 个分区"
-                        )));
+                        return Err(ErrorObject::new(
+                            error_code::INVALID_PARAMS,
+                            format!("一次浏览最多按位置打开 {MAX_RANGES} 个分区"),
+                        ));
                     }
-                    let device = range_device(&self.device, params.offset, params.backup_boot)?;
                     ranges.push(Range {
                         offset: params.offset,
                         length: params.length,
-                        backup_boot: params.backup_boot,
-                        device,
+                        boot,
                     });
                     ranges.len() - 1
                 }
             };
-            let device = ranges
-                .get(index)
-                .map(|range| Arc::clone(&range.device))
-                .ok_or_else(|| fs_error("按位置打开的分区不见了".to_owned()))?;
-            let number = u32::try_from(index)
+            u32::try_from(index)
                 .ok()
                 .and_then(|index| RANGE_PARTITION_BASE.checked_add(index))
-                .ok_or_else(|| fs_error("分区编号溢出".to_owned()))?;
-            (number, device)
+                .ok_or_else(|| fs_error("分区编号溢出".to_owned()))?
         };
-        // 备份引导扇区已由 range_device 换到分区开头，按主引导扇区识别
         Ok(self.describe_volume(
             number,
-            device.as_ref(),
+            self.device.as_ref(),
             params.offset,
             params.length,
-            BootCopy::Primary,
+            boot,
         ))
     }
 
-    /// 分区 `number` 所在的设备、偏移、长度，以及按哪一份引导扇区打开：表里的分区按会话指定的那一份；
-    /// 按位置打开、靠备份找到的分区，设备已换掉了主引导扇区，按主引导扇区打开。
-    fn locate(&self, number: u32) -> Option<(Arc<dyn BlockDevice>, u64, u64, BootCopy)> {
+    /// 分区 `number` 的偏移、长度，以及按哪一份引导扇区打开：表里的分区按会话指定的那一份，
+    /// 按位置打开的分区按打开时给的那一份。
+    fn locate(&self, number: u32) -> Option<(u64, u64, BootCopy)> {
         if let Some(index) = number.checked_sub(RANGE_PARTITION_BASE) {
             let ranges = lock(&self.ranges);
             let range = ranges.get(usize::try_from(index).ok()?)?;
-            return Some((
-                Arc::clone(&range.device),
-                range.offset,
-                range.length,
-                BootCopy::Primary,
-            ));
+            return Some((range.offset, range.length, range.boot));
         }
         self.table
             .partitions
             .iter()
             .find(|partition| partition.number == number)
-            .map(|partition| {
-                (
-                    Arc::clone(&self.device),
-                    partition.offset,
-                    partition.length,
-                    self.boot,
-                )
-            })
+            .map(|partition| (partition.offset, partition.length, self.boot))
     }
 
     /// 打开（或取出已打开的）分区 `number` 上的卷。
@@ -319,10 +282,10 @@ impl Session {
         if let Some(volume) = lock(&self.volumes).get(&number) {
             return Ok(Arc::clone(volume));
         }
-        let (device, offset, length, boot) = self
+        let (offset, length, boot) = self
             .locate(number)
             .ok_or_else(|| fs_error(format!("没有分区 {number}")))?;
-        let volume = Volume::open_with(device, offset, length, boot)
+        let volume = Volume::open_with(Arc::clone(&self.device), offset, length, boot)
             .map_err(|error| fs_error(error_chain(&error)))?;
         let volume = Arc::new(volume);
         lock(&self.volumes).insert(number, Arc::clone(&volume));
@@ -330,7 +293,7 @@ impl Session {
     }
 
     fn partition_offset(&self, number: u32) -> u64 {
-        self.locate(number).map_or(0, |(_, offset, _, _)| offset)
+        self.locate(number).map_or(0, |(offset, _, _)| offset)
     }
 
     pub fn list(&self, params: &ListFilesParams) -> Result<FileListPage, ErrorObject> {
@@ -433,17 +396,41 @@ impl Session {
     }
 }
 
-/// 按位置打开的分区读卷用的设备：给了备份引导扇区时，读分区开头那 512 字节换成备份的内容。
-pub fn range_device(
-    device: &Arc<dyn BlockDevice>,
-    offset: u64,
-    backup_boot: Option<u64>,
-) -> Result<Arc<dyn BlockDevice>, ErrorObject> {
-    match backup_boot {
-        Some(backup) => BackupBootDevice::new(Arc::clone(device), offset, backup)
-            .map(|device| Arc::new(device) as Arc<dyn BlockDevice>)
-            .map_err(|error| fs_error(format!("读不出备份引导扇区：{}", error_chain(&error)))),
-        None => Ok(Arc::clone(device)),
+/// 核对复制、检查之前浏览时看到的分区还在原处：表里的分区重新读分区表核对编号、偏移与长度；
+/// 按位置打开的分区（搜索找到的）不在表里，只核对范围在设备之内。
+pub fn verify_partition(
+    device: &dyn BlockDevice,
+    partition: PartitionRef,
+) -> Result<(), ErrorObject> {
+    if partition.outside_table {
+        return check_range(device, partition.offset, partition.length);
+    }
+    let table = yisi_part::read_table(device).map_err(|error| fs_error(error_chain(&error)))?;
+    let found = table.partitions.iter().any(|candidate| {
+        candidate.number == partition.number
+            && candidate.offset == partition.offset
+            && candidate.length == partition.length
+    });
+    if found {
+        Ok(())
+    } else {
+        Err(fs_error(format!(
+            "分区 {} 已不在浏览时的位置",
+            partition.number
+        )))
+    }
+}
+
+/// 按位置给出的分区要在设备之内，长度不能为 0。
+fn check_range(device: &dyn BlockDevice, offset: u64, length: u64) -> Result<(), ErrorObject> {
+    let size = device.size();
+    if length > 0 && offset.checked_add(length).is_some_and(|end| end <= size) {
+        Ok(())
+    } else {
+        Err(ErrorObject::new(
+            error_code::INVALID_PARAMS,
+            format!("偏移 {offset} 起 {length} 字节超出了设备范围（{size} 字节）"),
+        ))
     }
 }
 
