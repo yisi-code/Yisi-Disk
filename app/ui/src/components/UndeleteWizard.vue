@@ -146,7 +146,7 @@ const copyStatusText = computed(() => {
         total: formatBytes(copy.total.value),
         percent: copy.percent.value,
         count: copy.succeeded.value.length,
-      })
+      }, copy.succeeded.value.length)
     case 'completed':
       return t('undelete.copy.status.completed')
     case 'failed':
@@ -564,10 +564,10 @@ function noteText(note: string): string {
             })
           }}
           <template v-if="currentScan.orphans > 0">
-            {{ t('undelete.scan.orphans', { count: currentScan.orphans.toLocaleString(locale) }) }}
+            {{ t('undelete.scan.orphans', { count: currentScan.orphans.toLocaleString(locale) }, currentScan.orphans) }}
           </template>
           <template v-if="currentScan.unreadable > 0">
-            {{ t('undelete.scan.unreadable', { count: currentScan.unreadable.toLocaleString(locale) }) }}
+            {{ t('undelete.scan.unreadable', { count: currentScan.unreadable.toLocaleString(locale) }, currentScan.unreadable) }}
           </template>
         </p>
         <p v-if="isSourceDisk" class="wizard__hint">{{ t('undelete.browse.liveHint') }}</p>
@@ -646,7 +646,7 @@ function noteText(note: string): string {
           </p>
           <template v-if="zeroFiles.length > 0">
             <p class="wizard__hint wizard__hint--warning">
-              {{ t('undelete.copy.allZero', { count: zeroFiles.length }) }}
+              {{ t('undelete.copy.allZero', { count: zeroFiles.length }, zeroFiles.length) }}
             </p>
             <ul class="undelete-wizard__failures">
               <li v-for="file in zeroFiles.slice(0, MAX_LISTED_FAILURES)" :key="file.path">
@@ -656,7 +656,7 @@ function noteText(note: string): string {
           </template>
           <template v-if="copy.failures.value.length > 0">
             <p class="wizard__error">
-              {{ t('undelete.copy.failedCount', { count: copy.failures.value.length }) }}
+              {{ t('undelete.copy.failedCount', { count: copy.failures.value.length }, copy.failures.value.length) }}
             </p>
             <ul class="undelete-wizard__failures">
               <li
@@ -674,7 +674,7 @@ function noteText(note: string): string {
                 t('undelete.copy.report.filesValue', {
                   count: copy.summary.value.files,
                   bytes: formatBytes(copy.summary.value.bytes),
-                })
+                }, copy.summary.value.files)
               }}
             </dd>
             <dt>{{ t('undelete.copy.report.elapsed') }}</dt>

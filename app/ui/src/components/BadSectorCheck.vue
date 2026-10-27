@@ -193,7 +193,7 @@ function formatPosition(offset: number): string {
               t('badSectors.result.unreadableValue', {
                 count: completedReport.unreadable.length,
                 bytes: formatBytes(completedReport.unreadableBytes),
-              })
+              }, completedReport.unreadable.length)
             }}
           </dd>
           <dt>{{ t('badSectors.result.elapsed') }}</dt>
