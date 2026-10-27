@@ -20,5 +20,9 @@ yisi-broker.workspace = true
 yisi-engine.workspace = true
 yisi-rpc.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# 另存问题清单时确认文件不在被检查的物理磁盘上
+yisi-io.workspace = true
+
 [lints]
 workspace = true

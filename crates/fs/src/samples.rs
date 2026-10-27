@@ -300,6 +300,12 @@ impl FatImage {
             self.image[at..at + bytes_per_fat].copy_from_slice(&table);
         }
         if self.kind == FatType::Fat32 {
+            // FSInfo 扇区：三处签名，空闲簇数与下一个空闲簇记为「未知」
+            let fs_info = &mut self.image[SECTOR..2 * SECTOR];
+            fs_info[..4].copy_from_slice(&0x4161_5252u32.to_le_bytes());
+            fs_info[484..488].copy_from_slice(&0x6141_7272u32.to_le_bytes());
+            fs_info[488..496].fill(0xFF);
+            fs_info[508..512].copy_from_slice(&0xAA55_0000u32.to_le_bytes());
             let backup = FAT32_BACKUP_SECTOR * SECTOR;
             self.image.copy_within(..SECTOR, backup);
         }
