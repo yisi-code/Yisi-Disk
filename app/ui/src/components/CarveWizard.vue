@@ -6,17 +6,21 @@ import FileTypePicker from './FileTypePicker.vue'
 import RecoveredBrowser from './RecoveredBrowser.vue'
 import RecoveredPreview from './RecoveredPreview.vue'
 import SourcePicker from './SourcePicker.vue'
+import WizardSteps from './WizardSteps.vue'
+import JobControls from './JobControls.vue'
+import FailureList from './FailureList.vue'
 import { useCarve } from '../composables/useCarve'
 import { useCopy } from '../composables/useCopy'
 import { useFileTypeName } from '../composables/useFileTypeName'
 import { useHostErrorText } from '../composables/useHostErrorText'
+import { useHostDialog } from '../composables/useHostDialog'
+import { usePartitionText } from '../composables/usePartitionText'
 import {
   copyRecoveredFile,
   listFileTypes,
   openOrReveal,
   openRecoveredFile,
   openRecoveredFileWith,
-  pickDirectory,
   pickSaveFile,
   revealRecoveredFile,
   startExtract,
@@ -27,7 +31,7 @@ import {
   type HostError,
   type JobTarget,
 } from '../services/host'
-import { formatBytes } from '../utils/format'
+import { formatBytes, formatSeconds } from '../utils/format'
 
 const STEPS = ['source', 'formats', 'scan'] as const
 type WizardStep = (typeof STEPS)[number]
@@ -48,6 +52,7 @@ const emit = defineEmits<{ exit: [] }>()
 
 const { t, locale } = useI18n()
 const { formatHostError } = useHostErrorText()
+const { sourceName } = usePartitionText()
 const { fileTypeName } = useFileTypeName()
 const {
   jobId,
@@ -85,7 +90,7 @@ const selectedExtensions = ref<string[]>([])
 const saveWhileScanning = ref(false)
 const isAdvancedOpen = ref(false)
 const outputDir = ref('')
-const dialogError = ref<HostError | null>(null)
+const { dialogError, pickFolder } = useHostDialog()
 /** 发起扫描时是不是只扫描：之后回到上一步改选项，不影响正在显示的这次结果 */
 const runScanOnly = ref(false)
 /** 只扫描时勾选要另存的文件（按扫描时的文件名） */
@@ -157,7 +162,7 @@ const hasUnsaved = computed(
 
 const saveStatusText = computed(() => {
   if (saveKind.value === 'openCopy') {
-    return t('carve.save.preparing')
+    return t('common.preparing')
   }
   switch (save.status.value) {
     case 'starting':
@@ -186,15 +191,7 @@ const isSaveStatusShown = computed(
     save.status.value !== 'idle' && (saveKind.value === 'saveAs' || save.isBusy.value),
 )
 
-const sourceText = computed(() => {
-  const current = target.value
-  if (current === null) {
-    return ''
-  }
-  return current.kind === 'image'
-    ? t('carve.run.sourceImage', { path: current.path })
-    : t('carve.run.sourceDisk', { number: current.diskNumber })
-})
+const sourceText = computed(() => sourceName(target.value))
 
 const selectedTypeNames = computed(() => {
   const names = fileTypes.value
@@ -222,8 +219,8 @@ const statusText = computed(() => {
       return ''
     case 'starting':
       return targetKind.value === 'disk'
-        ? t('carve.run.status.startingDisk')
-        : t('carve.run.status.starting')
+        ? t('common.startingDisk')
+        : t('common.startingEngine')
     case 'running':
     case 'cancelling':
       if (isPaused.value) {
@@ -244,7 +241,7 @@ const statusText = computed(() => {
     case 'failed':
       return t('carve.run.status.failed')
     case 'cancelled':
-      return t('carve.run.status.cancelled')
+      return t('common.cancelled')
   }
   return ''
 })
@@ -261,7 +258,7 @@ const menuItems = computed<MenuItem[]>(() => {
     { key: 'openWith', label: t('carve.menu.openWith'), disabled: needsCopy },
     { key: 'copy', label: t('carve.menu.copy'), disabled: needsCopy },
     { key: 'saveAs', label: t('carve.menu.saveAs'), disabled: !canExtract.value },
-    { key: 'reveal', label: t('carve.menu.reveal'), disabled: !isSavedByUser(file) },
+    { key: 'reveal', label: t('common.reveal'), disabled: !isSavedByUser(file) },
   ]
 })
 
@@ -413,7 +410,7 @@ async function runAction(action: FileAction, copy: SavedCopy) {
           () => revealRecoveredFile(copy.jobId, copy.name),
         )
         if (outcome === 'revealed') {
-          fileActionNotice.value = t('undelete.details.executableRevealed')
+          fileActionNotice.value = t('partitionFiles.details.executableRevealed')
         }
         break
       }
@@ -571,15 +568,6 @@ async function browseOutputDir() {
 }
 
 /** 系统的选择文件夹对话框；用户取消或对话框出错时返回 null */
-async function pickFolder(title: string): Promise<string | null> {
-  dialogError.value = null
-  try {
-    return await pickDirectory(title)
-  } catch (error) {
-    dialogError.value = toHostError(error)
-    return null
-  }
-}
 
 function handleAdvancedToggle(event: Event) {
   isAdvancedOpen.value = (event.target as HTMLDetailsElement).open
@@ -608,21 +596,7 @@ function handleAdvancedToggle(event: Event) {
 
     <form class="wizard__form" @submit.prevent="handleSubmit">
       <div class="wizard__stepbar">
-        <ol class="wizard__steps">
-          <li
-            v-for="(name, index) in STEPS"
-            :key="name"
-            class="wizard__step"
-            :class="{
-              'wizard__step--current': name === step,
-              'wizard__step--done': index < stepIndex,
-            }"
-            :aria-current="name === step ? 'step' : undefined"
-          >
-            <span class="wizard__step-number">{{ index + 1 }}</span>
-            {{ t(`carve.steps.${name}`) }}
-          </li>
-        </ol>
+        <WizardSteps :steps="STEPS" :current="step" label-prefix="carve.steps" />
         <div class="wizard__nav">
           <button
             v-if="stepIndex > 0"
@@ -631,7 +605,7 @@ function handleAdvancedToggle(event: Event) {
             :disabled="isBusy || save.isBusy.value"
             @click="goBack"
           >
-            {{ t('carve.previous') }}
+            {{ t('common.previous') }}
           </button>
           <button
             v-if="step === 'source'"
@@ -639,7 +613,7 @@ function handleAdvancedToggle(event: Event) {
             type="submit"
             :disabled="target === null"
           >
-            {{ t('carve.next') }}
+            {{ t('common.next') }}
           </button>
           <button
             v-else-if="step === 'formats'"
@@ -652,25 +626,14 @@ function handleAdvancedToggle(event: Event) {
           <button v-else-if="!isBusy" class="wizard__button" type="submit" :disabled="!canStart">
             {{ t('carve.run.restart') }}
           </button>
-          <template v-else>
-            <button
-              v-if="status === 'running'"
-              class="wizard__button wizard__button--secondary"
-              type="button"
-              :disabled="isTogglingPause"
-              @click="isPaused ? resume() : pause()"
-            >
-              {{ isPaused ? t('carve.run.resume') : t('carve.run.pause') }}
-            </button>
-            <button
-              class="wizard__button wizard__button--secondary"
-              type="button"
-              :disabled="status !== 'running'"
-              @click="handleCancel"
-            >
-              {{ status === 'cancelling' ? t('carve.run.cancelling') : t('carve.run.cancel') }}
-            </button>
-          </template>
+          <JobControls
+            v-else
+            :status="status"
+            :pause="{ isPaused, isToggling: isTogglingPause }"
+            @pause="pause"
+            @resume="resume"
+            @cancel="handleCancel"
+          />
         </div>
       </div>
 
@@ -732,7 +695,7 @@ function handleAdvancedToggle(event: Event) {
                   type="button"
                   @click="browseOutputDir"
                 >
-                  {{ t('carve.browseFolder') }}
+                  {{ t('common.browseFolder') }}
                 </button>
               </div>
               <p class="wizard__hint">{{ t('carve.output.hint') }}</p>
@@ -746,7 +709,7 @@ function handleAdvancedToggle(event: Event) {
 
       <div v-else class="wizard__panel wizard__fill">
         <dl class="wizard__details">
-          <dt>{{ t('carve.run.source') }}</dt>
+          <dt>{{ t('common.source') }}</dt>
           <dd class="wizard__path-text">{{ sourceText }}</dd>
           <dt>{{ t('carve.run.formats') }}</dt>
           <dd>{{ selectedTypeNames }}</dd>
@@ -759,7 +722,7 @@ function handleAdvancedToggle(event: Event) {
           <progress class="wizard__progress" :value="done" :max="total || 1"></progress>
           <p class="wizard__status">{{ statusText }}</p>
           <p v-if="isUnresponsive" class="wizard__error" role="alert">
-            {{ t('carve.run.unresponsive') }}
+            {{ t('common.unresponsive') }}
           </p>
           <p v-if="failure" class="wizard__error" role="alert">
             {{ formatHostError(failure) }}
@@ -774,7 +737,7 @@ function handleAdvancedToggle(event: Event) {
                 <dt>{{ t('carve.run.report.files') }}</dt>
                 <dd>
                   {{
-                    t('carve.run.report.filesValue', {
+                    t('common.filesValue', {
                       count: summary.files,
                       bytes: formatBytes(summary.bytes),
                     }, summary.files)
@@ -786,17 +749,17 @@ function handleAdvancedToggle(event: Event) {
                 <dd>{{ formatBytes(summary.unreadableBytes) }}</dd>
               </div>
               <div class="carve-wizard__report-item">
-                <dt>{{ t('carve.run.report.elapsed') }}</dt>
+                <dt>{{ t('common.elapsed') }}</dt>
                 <dd>
                   {{
-                    t('carve.run.report.elapsedValue', {
-                      seconds: (summary.elapsedMs / 1000).toFixed(1),
+                    t('common.seconds', {
+                      seconds: formatSeconds(summary.elapsedMs),
                     })
                   }}
                 </dd>
               </div>
               <div v-if="summary.outputDir" class="carve-wizard__report-item">
-                <dt>{{ t('carve.run.report.outputDir') }}</dt>
+                <dt>{{ t('common.savedIn') }}</dt>
                 <dd class="wizard__path-text">{{ summary.outputDir }}</dd>
               </div>
             </dl>
@@ -856,34 +819,13 @@ function handleAdvancedToggle(event: Event) {
                     :value="save.done.value"
                     :max="save.total.value || 1"
                   ></progress>
-                  <button
-                    v-if="save.isBusy.value"
-                    class="wizard__button wizard__button--secondary"
-                    type="button"
-                    :disabled="save.status.value !== 'running'"
-                    @click="save.cancel"
-                  >
-                    {{
-                      save.status.value === 'cancelling'
-                        ? t('carve.run.cancelling')
-                        : t('carve.run.cancel')
-                    }}
-                  </button>
+                  <JobControls v-if="save.isBusy.value" :status="save.status.value" @cancel="save.cancel" />
                 </div>
                 <p class="wizard__status">{{ saveStatusText }}</p>
                 <p v-if="save.failure.value" class="wizard__error" role="alert">
                   {{ formatHostError(save.failure.value) }}
                 </p>
-                <template v-if="save.failures.value.length > 0">
-                  <p class="wizard__error">
-                    {{ t('carve.save.failedCount', { count: save.failures.value.length }, save.failures.value.length) }}
-                  </p>
-                  <ul class="carve-wizard__failures">
-                    <li v-for="failed in save.failures.value.slice(0, 20)" :key="failed.path">
-                      {{ t('carve.save.failedItem', { name: failed.path, reason: failed.error }) }}
-                    </li>
-                  </ul>
-                </template>
+                <FailureList :failures="save.failures.value" count-key="carve.save.failedCount" />
                 <p v-if="save.summary.value" class="wizard__hint wizard__path-text">
                   {{
                     t('carve.save.summary', {
@@ -1002,12 +944,4 @@ function handleAdvancedToggle(event: Event) {
   gap: var(--space-sm);
 }
 
-.carve-wizard__failures {
-  max-height: 160px;
-  margin: 0;
-  padding-left: var(--space-lg);
-  overflow-y: auto;
-  font-size: var(--font-size-small);
-  overflow-wrap: anywhere;
-}
 </style>

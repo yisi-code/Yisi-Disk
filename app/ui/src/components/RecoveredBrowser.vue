@@ -2,7 +2,7 @@
 import { computed, ref, useId, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useFileTypeName } from '../composables/useFileTypeName'
-import { useVisibleRows } from '../composables/useVisibleRows'
+import { useTreeNavigation } from '../composables/useTreeNavigation'
 import type { FileType, FoundFile } from '../services/host'
 import { formatBytes } from '../utils/format'
 
@@ -68,10 +68,6 @@ const domPrefix = useId()
 
 const groupMode = ref<GroupMode>('type')
 const expandedKeys = ref(new Set<string>())
-const activeId = ref<string | null>(null)
-const scrollTop = ref(0)
-const viewport = ref<HTMLElement | null>(null)
-const rowsInView = useVisibleRows(viewport, ROW_HEIGHT, MIN_ROWS)
 
 const groups = computed<FileGroup[]>(() =>
   groupMode.value === 'type' ? groupByType() : groupByPosition(),
@@ -106,17 +102,30 @@ const rows = computed<TreeRow[]>(() => {
   return result
 })
 
-const activeIndex = computed(() => rows.value.findIndex((row) => row.id === activeId.value))
-
-const visibleRows = computed(() => {
-  const first = Math.max(0, Math.floor(scrollTop.value / ROW_HEIGHT) - OVERSCAN)
-  const last = Math.min(rows.value.length, first + rowsInView.value + OVERSCAN * 2)
-  return rows.value.slice(first, last).map((row, offset) => ({ row, index: first + offset }))
+const {
+  viewport,
+  scrollTop,
+  activeId,
+  activeIndex,
+  visibleRows,
+  activeDomId,
+  domId,
+  handleScroll,
+  resetScroll,
+  moveTo,
+  handleNavigationKey,
+} = useTreeNavigation(rows, {
+  viewportRef: 'viewport',
+  rowHeight: ROW_HEIGHT,
+  minRows: MIN_ROWS,
+  overscan: OVERSCAN,
+  domPrefix,
+  onMove: (row) => {
+    if (row.kind === 'file') {
+      selectedFile.value = row.file
+    }
+  },
 })
-
-const activeDomId = computed(() =>
-  activeIndex.value >= 0 && activeId.value !== null ? domId(activeId.value) : undefined,
-)
 
 // 新的一次恢复从空列表开始：清掉上一次的展开与焦点
 watch(
@@ -132,15 +141,8 @@ watch(
 
 watch(groupMode, () => {
   activeId.value = null
-  scrollTop.value = 0
-  if (viewport.value !== null) {
-    viewport.value.scrollTop = 0
-  }
+  resetScroll()
 })
-
-function handleScroll(event: Event) {
-  scrollTop.value = (event.target as HTMLElement).scrollTop
-}
 
 function handleRowClick(row: TreeRow) {
   activeId.value = row.id
@@ -188,30 +190,16 @@ defineExpose({ focus })
 
 function handleKeydown(event: KeyboardEvent) {
   const current = rows.value[activeIndex.value]
+  if (handleNavigationKey(event.key)) {
+    event.preventDefault()
+    return
+  }
   if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) {
     openMenuFromKeyboard(current)
     event.preventDefault()
     return
   }
   switch (event.key) {
-    case 'ArrowDown':
-      moveTo(activeIndex.value + 1)
-      break
-    case 'ArrowUp':
-      moveTo(activeIndex.value < 0 ? 0 : activeIndex.value - 1)
-      break
-    case 'PageDown':
-      moveTo(activeIndex.value + rowsInView.value)
-      break
-    case 'PageUp':
-      moveTo(activeIndex.value - rowsInView.value)
-      break
-    case 'Home':
-      moveTo(0)
-      break
-    case 'End':
-      moveTo(rows.value.length - 1)
-      break
     case 'ArrowRight':
       if (current?.kind === 'group') {
         if (current.isExpanded) {
@@ -246,36 +234,6 @@ function handleKeydown(event: KeyboardEvent) {
       return
   }
   event.preventDefault()
-}
-
-/** 移到第 `index` 行（越界时取首尾），文件行同时选中，并滚到看得见 */
-function moveTo(index: number) {
-  if (rows.value.length === 0) {
-    return
-  }
-  const clamped = Math.min(Math.max(index, 0), rows.value.length - 1)
-  const row = rows.value[clamped]
-  if (row === undefined) {
-    return
-  }
-  activeId.value = row.id
-  if (row.kind === 'file') {
-    selectedFile.value = row.file
-  }
-  scrollIntoView(clamped)
-}
-
-function scrollIntoView(index: number) {
-  const element = viewport.value
-  if (element === null) {
-    return
-  }
-  const top = index * ROW_HEIGHT
-  if (top < element.scrollTop) {
-    element.scrollTop = top
-  } else if (top + ROW_HEIGHT > element.scrollTop + element.clientHeight) {
-    element.scrollTop = top + ROW_HEIGHT - element.clientHeight
-  }
 }
 
 /** 勾选或取消一个文件；分组行整组勾选，组里已全部勾选时整组取消 */
@@ -382,10 +340,6 @@ function sumBytes(files: FoundFile[]): number {
   return files.reduce((sum, file) => sum + file.length, 0)
 }
 
-function domId(rowId: string): string {
-  return `${domPrefix}-${rowId.replace(/[^\w-]/g, '_')}`
-}
-
 function fileDetail(file: FoundFile): string {
   if (groupMode.value === 'type') {
     return t('carve.browser.at', { position: formatBytes(file.offset) })
@@ -396,9 +350,9 @@ function fileDetail(file: FoundFile): string {
 </script>
 
 <template>
-  <div class="recovered-browser">
-    <div class="recovered-browser__toolbar">
-      <h3 :id="`${domPrefix}-title`" class="recovered-browser__title">
+  <div class="tree-list">
+    <div class="tree-list__toolbar">
+      <h3 :id="`${domPrefix}-title`" class="tree-list__title">
         {{ t('carve.browser.title') }}
       </h3>
       <fieldset class="recovered-browser__modes">
@@ -420,7 +374,7 @@ function fileDetail(file: FoundFile): string {
     <div
       v-else
       ref="viewport"
-      class="recovered-browser__viewport"
+      class="tree-list__viewport"
       role="tree"
       tabindex="0"
       :aria-labelledby="`${domPrefix}-title`"
@@ -459,7 +413,7 @@ function fileDetail(file: FoundFile): string {
           <template v-if="row.kind === 'group'">
             <input
               v-if="selectable"
-              class="recovered-browser__check"
+              class="tree-list__check"
               type="checkbox"
               tabindex="-1"
               :checked="isGroupChecked(row.group)"
@@ -482,7 +436,7 @@ function fileDetail(file: FoundFile): string {
           <template v-else>
             <input
               v-if="selectable"
-              class="recovered-browser__check"
+              class="tree-list__check"
               type="checkbox"
               tabindex="-1"
               :checked="checkedNames.has(row.file.name)"
@@ -499,7 +453,7 @@ function fileDetail(file: FoundFile): string {
       </div>
     </div>
     <div class="recovered-browser__footer">
-      <p class="recovered-browser__hint">
+      <p class="tree-list__hint">
         {{ selectable ? t('carve.browser.selectHint') : t('carve.browser.hint') }}
       </p>
       <slot name="actions"></slot>
@@ -508,27 +462,6 @@ function fileDetail(file: FoundFile): string {
 </template>
 
 <style scoped>
-.recovered-browser {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-sm);
-  width: 100%;
-  min-width: 0;
-}
-
-.recovered-browser__toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-sm);
-}
-
-.recovered-browser__title {
-  margin: 0;
-  font-size: var(--font-size-body);
-  font-weight: 600;
-}
 
 .recovered-browser__modes {
   display: flex;
@@ -560,28 +493,6 @@ function fileDetail(file: FoundFile): string {
   gap: var(--space-md);
 }
 
-.recovered-browser__hint {
-  flex: 1;
-  min-width: 0;
-  margin: 0;
-  color: var(--color-text-muted);
-  font-size: var(--font-size-small);
-}
-
-/* 高度不按内容撑开（内容可能有十万行）：至少 MIN_ROWS 行，其余由所在布局拉伸 */
-.recovered-browser__viewport {
-  position: relative;
-  overflow-y: auto;
-  contain: size;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-card);
-}
-
-.recovered-browser__viewport:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 1px;
-}
-
 .recovered-browser__spacer {
   position: relative;
 }
@@ -611,14 +522,8 @@ function fileDetail(file: FoundFile): string {
 }
 
 /* 键盘焦点所在的行；只在列表有焦点时画出来 */
-.recovered-browser__viewport:focus-visible .recovered-browser__row--active {
+.tree-list__viewport:focus-visible .recovered-browser__row--active {
   box-shadow: inset 0 0 0 1px var(--color-accent);
-}
-
-.recovered-browser__check {
-  flex: none;
-  margin: 0;
-  accent-color: var(--color-accent);
 }
 
 .recovered-browser__chevron {

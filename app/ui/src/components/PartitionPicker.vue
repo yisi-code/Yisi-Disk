@@ -31,13 +31,13 @@ const domPrefix = useId()
     <caption class="wizard__caption">{{ caption }}</caption>
     <thead>
       <tr>
-        <th scope="col"><span class="partition-picker__visually-hidden">{{ t('undelete.partition.choose') }}</span></th>
-        <th scope="col">{{ t('undelete.partition.number') }}</th>
-        <th scope="col">{{ t('undelete.partition.label') }}</th>
-        <th scope="col">{{ t('undelete.partition.filesystem') }}</th>
-        <th scope="col">{{ t('undelete.partition.role') }}</th>
-        <th scope="col" class="wizard__number">{{ t('undelete.partition.start') }}</th>
-        <th scope="col" class="wizard__number">{{ t('undelete.partition.size') }}</th>
+        <th scope="col"><span class="partition-picker__visually-hidden">{{ t('partition.picker.choose') }}</span></th>
+        <th scope="col">{{ t('partition.picker.number') }}</th>
+        <th scope="col">{{ t('partition.picker.label') }}</th>
+        <th scope="col">{{ t('partition.picker.filesystem') }}</th>
+        <th scope="col">{{ t('partition.picker.role') }}</th>
+        <th scope="col" class="wizard__number">{{ t('partition.picker.start') }}</th>
+        <th scope="col" class="wizard__number">{{ t('partition.picker.size') }}</th>
       </tr>
     </thead>
     <tbody>
@@ -58,7 +58,7 @@ const domPrefix = useId()
         </td>
         <th scope="row">
           <label :for="`${domPrefix}-${partition.number}`">
-            {{ partition.number }}{{ partition.logical ? ` ${t('undelete.partition.logical')}` : '' }}
+            {{ partition.number }}{{ partition.logical ? ` ${t('partition.picker.logical')}` : '' }}
           </label>
         </th>
         <td>{{ partitionLabel(partition) }}</td>

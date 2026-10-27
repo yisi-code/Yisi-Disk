@@ -21,6 +21,10 @@
   --space-md: 16px;
   --space-lg: 24px;
   --radius-card: 8px;
+  /* 输入框、按钮、提示条这类控件的圆角 */
+  --radius-control: 4px;
+  /* 列表、详情、问题清单这类框体至少这么高：与树列表的 10 行（每行 28px）一致 */
+  --box-min-height: 280px;
 
   color-scheme: light dark;
 }

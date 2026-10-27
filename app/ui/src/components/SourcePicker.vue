@@ -117,7 +117,7 @@ async function browseImage() {
   color: var(--color-text);
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: var(--space-xs);
+  border-radius: var(--radius-control);
   font: inherit;
 }
 
@@ -127,7 +127,7 @@ async function browseImage() {
   color: var(--color-text);
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: var(--space-xs);
+  border-radius: var(--radius-control);
   font: inherit;
   cursor: pointer;
 }

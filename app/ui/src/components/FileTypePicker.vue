@@ -11,11 +11,11 @@ const { fileTypeName } = useFileTypeName()
 </script>
 
 <template>
-  <fieldset class="file-type-picker" :disabled="disabled">
+  <fieldset class="wizard__choices" :disabled="disabled">
     <legend class="file-type-picker__legend">{{ t('carve.formats.legend') }}</legend>
     <ul class="file-type-picker__list">
       <li v-for="type in types" :key="type.extension">
-        <label class="file-type-picker__option">
+        <label class="wizard__choice">
           <input
             v-model="selectedExtensions"
             class="file-type-picker__checkbox"
@@ -33,14 +33,6 @@ const { fileTypeName } = useFileTypeName()
 </template>
 
 <style scoped>
-.file-type-picker {
-  display: block;
-  width: 100%;
-  margin: 0;
-  padding: var(--space-sm) var(--space-md);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-card);
-}
 
 .file-type-picker__legend {
   padding: 0 var(--space-xs);
@@ -54,14 +46,6 @@ const { fileTypeName } = useFileTypeName()
   margin: 0;
   padding: 0;
   list-style: none;
-}
-
-.file-type-picker__option {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-sm);
-  padding: var(--space-xs) 0;
-  cursor: pointer;
 }
 
 .file-type-picker__checkbox {

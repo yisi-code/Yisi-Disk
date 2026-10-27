@@ -2,17 +2,19 @@
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import SourcePicker from './SourcePicker.vue'
+import UnreadableRanges from './UnreadableRanges.vue'
 import { useDiskImage } from '../composables/useDiskImage'
 import { useHostErrorText } from '../composables/useHostErrorText'
-import { pickDirectory, toHostError, type HostError, type JobTarget } from '../services/host'
-import { formatBytes } from '../utils/format'
+import { useHostDialog } from '../composables/useHostDialog'
+import type { JobTarget } from '../services/host'
+import { formatBytes, formatSeconds } from '../utils/format'
 
 /** 报告里最多列出的读不出区段数；其余只计入总数 */
 const MAX_LISTED_RANGES = 20
 
 const emit = defineEmits<{ exit: [] }>()
 
-const { t, locale } = useI18n()
+const { t } = useI18n()
 const { formatHostError } = useHostErrorText()
 const {
   status,
@@ -32,7 +34,7 @@ const sourceKind = ref<JobTarget['kind']>('disk')
 const sourcePath = ref('')
 const selectedDisk = ref<number | null>(null)
 const imagePath = ref('')
-const dialogError = ref<HostError | null>(null)
+const { dialogError, pickFolder } = useHostDialog()
 
 const imageTarget = computed<JobTarget | null>(() => {
   if (sourceKind.value === 'image') {
@@ -88,8 +90,8 @@ const statusText = computed(() => {
       return ''
     case 'starting':
       return lastRequest.value?.target.kind === 'disk'
-        ? t('diskImage.status.startingDisk')
-        : t('diskImage.status.starting')
+        ? t('common.startingDisk')
+        : t('common.startingEngine')
     case 'running':
       return imaging.value === null
         ? t('diskImage.status.preparing')
@@ -142,14 +144,9 @@ function handleResume() {
 
 /** 系统的选择文件夹对话框，选好后在后面接上默认的文件名；用户取消时什么也不改 */
 async function browseImageFolder() {
-  dialogError.value = null
-  try {
-    const folder = await pickDirectory(t('diskImage.output.pickTitle'))
-    if (folder !== null) {
-      imagePath.value = joinPath(folder, defaultImageName())
-    }
-  } catch (error) {
-    dialogError.value = toHostError(error)
+  const folder = await pickFolder(t('diskImage.output.pickTitle'))
+  if (folder !== null) {
+    imagePath.value = joinPath(folder, defaultImageName())
   }
 }
 
@@ -177,12 +174,6 @@ function formatRemaining(seconds: number): string {
     : t('diskImage.run.remainingHours', { hours: Math.floor(minutes / 60), minutes: minutes % 60 })
 }
 
-function formatPosition(offset: number): string {
-  return t('diskImage.result.positionValue', {
-    position: formatBytes(offset),
-    offset: offset.toLocaleString(locale.value),
-  })
-}
 </script>
 
 <template>
@@ -201,12 +192,12 @@ function formatPosition(offset: number): string {
       </h2>
     </header>
 
-    <div class="disk-image__body">
-      <p class="disk-image__intro">{{ t('diskImage.intro') }}</p>
+    <div class="tool__body">
+      <p class="tool__intro">{{ t('diskImage.intro') }}</p>
 
-      <details class="disk-image__guide" open>
-        <summary class="disk-image__guide-summary">{{ t('diskImage.guide.title') }}</summary>
-        <ul class="disk-image__guide-list">
+      <details class="tool__guide" open>
+        <summary class="tool__guide-summary">{{ t('diskImage.guide.title') }}</summary>
+        <ul class="tool__guide-list">
           <li>{{ t('diskImage.guide.copy') }}</li>
           <li>{{ t('diskImage.guide.trimScrape') }}</li>
           <li>{{ t('diskImage.guide.map') }}</li>
@@ -247,7 +238,7 @@ function formatPosition(offset: number): string {
               type="button"
               @click="browseImageFolder"
             >
-              {{ t('diskImage.output.browse') }}
+              {{ t('common.browseFolder') }}
             </button>
           </div>
           <p id="disk-image-path-hint" class="wizard__hint">{{ t('diskImage.output.hint') }}</p>
@@ -343,10 +334,10 @@ function formatPosition(offset: number): string {
 
       <section
         v-if="finishedSummary"
-        class="disk-image__report"
+        class="tool__report"
         aria-labelledby="disk-image-result-title"
       >
-        <h3 id="disk-image-result-title" class="disk-image__report-title">
+        <h3 id="disk-image-result-title" class="tool__report-title">
           {{
             finishedSummary.badBytes === 0
               ? t('diskImage.result.clean')
@@ -371,8 +362,8 @@ function formatPosition(offset: number): string {
           <dt>{{ t('diskImage.result.elapsed') }}</dt>
           <dd>
             {{
-              t('diskImage.result.elapsedValue', {
-                seconds: (finishedSummary.elapsedMs / 1000).toFixed(1),
+              t('common.seconds', {
+                seconds: formatSeconds(finishedSummary.elapsedMs),
               })
             }}
           </dd>
@@ -382,21 +373,7 @@ function formatPosition(offset: number): string {
           <dd class="wizard__path-text">{{ finishedSummary.mapPath }}</dd>
         </dl>
 
-        <table v-if="listedRanges.length > 0" class="wizard__table">
-          <caption class="wizard__caption">{{ t('diskImage.result.rangesCaption') }}</caption>
-          <thead>
-            <tr>
-              <th scope="col">{{ t('diskImage.result.start') }}</th>
-              <th scope="col" class="wizard__number">{{ t('diskImage.result.length') }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="range in listedRanges" :key="range.offset">
-              <td>{{ formatPosition(range.offset) }}</td>
-              <td class="wizard__number">{{ formatBytes(range.length) }}</td>
-            </tr>
-          </tbody>
-        </table>
+        <UnreadableRanges v-if="listedRanges.length > 0" :ranges="listedRanges" />
         <p v-if="finishedSummary.badRanges.length > MAX_LISTED_RANGES" class="wizard__note">
           {{
             t('diskImage.result.moreRanges', {
@@ -409,7 +386,7 @@ function formatPosition(offset: number): string {
           {{ t('diskImage.result.truncated', { count: finishedSummary.badRanges.length }) }}
         </p>
 
-        <p class="disk-image__next">
+        <p class="tool__next">
           {{ t('diskImage.result.next', { path: finishedSummary.imagePath }) }}
           <template v-if="finishedSummary.badBytes > 0">{{ t('diskImage.result.nextBad') }}</template>
         </p>
@@ -419,37 +396,6 @@ function formatPosition(offset: number): string {
 </template>
 
 <style scoped>
-.disk-image__body {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-md);
-  margin-top: var(--space-md);
-}
-
-.disk-image__intro {
-  margin: 0;
-}
-
-.disk-image__guide {
-  padding: var(--space-sm) var(--space-md);
-  background: var(--color-bg);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-card);
-}
-
-.disk-image__guide-summary {
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.disk-image__guide-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
-  margin: var(--space-sm) 0 0;
-  padding-left: var(--space-lg);
-}
-
 .disk-image__section {
   display: flex;
   flex-direction: column;
@@ -471,25 +417,5 @@ function formatPosition(offset: number): string {
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-sm);
-}
-
-.disk-image__report {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-sm);
-}
-
-.disk-image__report-title {
-  margin: 0;
-  font-size: var(--font-size-section-title);
-  font-weight: 600;
-}
-
-.disk-image__next {
-  margin: 0;
-  padding: var(--space-sm) var(--space-md);
-  border-left: 4px solid var(--color-warning);
-  background: var(--color-bg);
-  border-radius: var(--space-xs);
 }
 </style>

@@ -3,12 +3,14 @@ import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import FsBrowser, { type TreeItem } from './FsBrowser.vue'
 import FsEntryDetails from './FsEntryDetails.vue'
+import JobControls from './JobControls.vue'
+import FailureList from './FailureList.vue'
 import { useCopy } from '../composables/useCopy'
 import { useHostErrorText } from '../composables/useHostErrorText'
+import { useHostDialog } from '../composables/useHostDialog'
 import {
   openCopiedFile,
   openOrReveal,
-  pickDirectory,
   revealCopiedFile,
   startCopy as startCopyJob,
   toHostError,
@@ -19,7 +21,7 @@ import {
   type PartitionInfo,
   type PartitionRef,
 } from '../services/host'
-import { formatBytes } from '../utils/format'
+import { formatBytes, formatSeconds } from '../utils/format'
 
 /**
  * 一个分区里的文件：左边目录树（勾选、只看已删除的文件、另存为），右边详情与预览，下面是复制的进度与结果。
@@ -58,7 +60,7 @@ const copy = useCopy()
 const deletedOnly = ref(false)
 const selectedItem = ref<TreeItem | null>(null)
 const checkedItems = ref(new Map<string, TreeItem>())
-const dialogError = ref<HostError | null>(null)
+const { dialogError, pickFolder } = useHostDialog()
 const fileActionError = ref<HostError | null>(null)
 const fileActionNote = ref<string | null>(null)
 /** 当前的复制任务是另存为，还是为「打开」而复制单个文件 */
@@ -85,28 +87,28 @@ const canCopy = computed(
 
 const copyStatusText = computed(() => {
   if (copyPurpose.value === 'open') {
-    return t('undelete.copy.preparing')
+    return t('common.preparing')
   }
   switch (copy.status.value) {
     case 'starting':
-      return t('undelete.copy.status.starting')
+      return t('partitionFiles.copy.status.starting')
     case 'running':
     case 'cancelling':
       if (copy.stage.value === 'scanMft') {
-        return t('undelete.copy.status.scanning', { percent: copy.percent.value })
+        return t('partitionFiles.copy.status.scanning', { percent: copy.percent.value })
       }
-      return t('undelete.copy.status.running', {
+      return t('partitionFiles.copy.status.running', {
         done: formatBytes(copy.done.value),
         total: formatBytes(copy.total.value),
         percent: copy.percent.value,
         count: copy.succeeded.value.length,
       }, copy.succeeded.value.length)
     case 'completed':
-      return t('undelete.copy.status.completed')
+      return t('partitionFiles.copy.status.completed')
     case 'failed':
-      return t('undelete.copy.status.failed')
+      return t('partitionFiles.copy.status.failed')
     case 'cancelled':
-      return t('undelete.copy.status.cancelled')
+      return t('partitionFiles.copy.status.cancelled')
   }
   return ''
 })
@@ -158,7 +160,7 @@ async function finishOpen(item: TreeItem) {
   const first = copy.succeeded.value[0]
   const failureCode = copy.failure.value?.code ?? ''
   if (status === 'failed' && isOpenCacheCopy.value && OPEN_COPY_REFUSED.includes(failureCode)) {
-    const dir = await pickOutputDir(t('undelete.copy.fallbackTitle'))
+    const dir = await pickFolder(t('partitionFiles.copy.fallbackTitle'))
     if (dir !== null) {
       await copyToOpen(item, dir)
     }
@@ -177,21 +179,10 @@ async function finishOpen(item: TreeItem) {
       () => revealCopiedFile(jobId, first.path),
     )
     if (outcome === 'revealed') {
-      fileActionNote.value = t('undelete.details.executableRevealed')
+      fileActionNote.value = t('partitionFiles.details.executableRevealed')
     }
   } catch (error) {
     fileActionError.value = toHostError(error)
-  }
-}
-
-/** 系统的选择文件夹对话框；用户取消时返回 null */
-async function pickOutputDir(title: string): Promise<string | null> {
-  dialogError.value = null
-  try {
-    return await pickDirectory(title)
-  } catch (error) {
-    dialogError.value = toHostError(error)
-    return null
   }
 }
 
@@ -200,7 +191,7 @@ async function handleSaveAs() {
   if (!canCopy.value) {
     return
   }
-  const dir = await pickOutputDir(t('undelete.copy.pickTitle'))
+  const dir = await pickFolder(t('partitionFiles.copy.pickTitle'))
   if (dir === null) {
     return
   }
@@ -270,23 +261,15 @@ async function revealOutput() {
       <template #tools>
         <label class="partition-files__filter">
           <input v-model="deletedOnly" type="checkbox" />
-          {{ t('undelete.browse.deletedOnly') }}
+          {{ t('partitionFiles.browse.deletedOnly') }}
         </label>
       </template>
       <template #actions>
         <div class="partition-files__save-as">
           <button class="wizard__button" type="button" :disabled="!canCopy" @click="handleSaveAs">
-            {{ t('undelete.copy.saveAs', { count: copyItems.length }) }}
+            {{ t('partitionFiles.copy.saveAs', { count: copyItems.length }) }}
           </button>
-          <button
-            v-if="copy.isBusy.value"
-            class="wizard__button wizard__button--secondary"
-            type="button"
-            :disabled="copy.status.value !== 'running'"
-            @click="copy.cancel"
-          >
-            {{ copy.status.value === 'cancelling' ? t('carve.run.cancelling') : t('carve.run.cancel') }}
-          </button>
+          <JobControls v-if="copy.isBusy.value" :status="copy.status.value" @cancel="copy.cancel" />
         </div>
       </template>
     </FsBrowser>
@@ -304,9 +287,9 @@ async function revealOutput() {
     >
       <template #footer>
         <div class="partition-files__pane-notes">
-          <p class="wizard__hint">{{ t('undelete.browse.stateHint') }}</p>
+          <p class="wizard__hint">{{ t('partitionFiles.browse.stateHint') }}</p>
           <p v-if="partition.timesUtc" class="wizard__hint">
-            {{ t('undelete.browse.timesUtc') }}
+            {{ t('partitionFiles.browse.timesUtc') }}
           </p>
         </div>
       </template>
@@ -325,46 +308,34 @@ async function revealOutput() {
       </p>
       <template v-if="zeroFiles.length > 0">
         <p class="wizard__hint wizard__hint--warning">
-          {{ t('undelete.copy.allZero', { count: zeroFiles.length }, zeroFiles.length) }}
+          {{ t('partitionFiles.copy.allZero', { count: zeroFiles.length }, zeroFiles.length) }}
         </p>
-        <ul class="partition-files__failures">
+        <ul class="wizard__failures">
           <li v-for="file in zeroFiles.slice(0, MAX_LISTED_FAILURES)" :key="file.path">
             {{ file.path }}
           </li>
         </ul>
       </template>
-      <template v-if="copy.failures.value.length > 0">
-        <p class="wizard__error">
-          {{ t('undelete.copy.failedCount', { count: copy.failures.value.length }, copy.failures.value.length) }}
-        </p>
-        <ul class="partition-files__failures">
-          <li
-            v-for="failed in copy.failures.value.slice(0, MAX_LISTED_FAILURES)"
-            :key="failed.path"
-          >
-            {{ t('undelete.copy.failedItem', { path: failed.path, reason: failed.error }) }}
-          </li>
-        </ul>
-      </template>
+      <FailureList :failures="copy.failures.value" count-key="partitionFiles.copy.failedCount" />
       <dl v-if="copy.summary.value" class="wizard__details">
-        <dt>{{ t('undelete.copy.report.files') }}</dt>
+        <dt>{{ t('partitionFiles.copy.report.files') }}</dt>
         <dd>
           {{
-            t('undelete.copy.report.filesValue', {
+            t('common.filesValue', {
               count: copy.summary.value.files,
               bytes: formatBytes(copy.summary.value.bytes),
             }, copy.summary.value.files)
           }}
         </dd>
-        <dt>{{ t('undelete.copy.report.elapsed') }}</dt>
+        <dt>{{ t('common.elapsed') }}</dt>
         <dd>
           {{
-            t('carve.run.report.elapsedValue', {
-              seconds: (copy.summary.value.elapsedMs / 1000).toFixed(1),
+            t('common.seconds', {
+              seconds: formatSeconds(copy.summary.value.elapsedMs),
             })
           }}
         </dd>
-        <dt>{{ t('undelete.copy.report.outputDir') }}</dt>
+        <dt>{{ t('common.savedIn') }}</dt>
         <dd class="wizard__path-text">{{ copy.summary.value.outputDir }}</dd>
       </dl>
       <div v-if="copy.summary.value && copy.succeeded.value.length > 0">
@@ -373,7 +344,7 @@ async function revealOutput() {
           type="button"
           @click="revealOutput"
         >
-          {{ t('undelete.copy.reveal') }}
+          {{ t('common.reveal') }}
         </button>
       </div>
     </div>
@@ -399,15 +370,6 @@ async function revealOutput() {
 /* 复制状态与对话框错误排在两栏下方，宽度与两栏合起来一样 */
 .partition-files__wide {
   grid-column: -3 / -1;
-}
-
-.partition-files__failures {
-  max-height: 160px;
-  margin: 0;
-  padding-left: var(--space-lg);
-  overflow-y: auto;
-  font-size: var(--font-size-small);
-  overflow-wrap: anywhere;
 }
 
 .partition-files__filter {

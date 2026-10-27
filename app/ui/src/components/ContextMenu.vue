@@ -137,7 +137,7 @@ function focusItem(index: number) {
   padding: var(--space-xs) 0;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: var(--space-xs);
+  border-radius: var(--radius-control);
   box-shadow: 0 4px 16px rgb(0 0 0 / 18%);
 }
 

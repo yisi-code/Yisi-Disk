@@ -47,7 +47,7 @@ function handleClick() {
 <template>
   <button
     ref="cardElement"
-    class="feature-card"
+    class="nav-card feature-card"
     :class="{ 'feature-card--pending': view === null }"
     type="button"
     :aria-labelledby="`${id}-name`"
@@ -83,25 +83,6 @@ function handleClick() {
 </template>
 
 <style scoped>
-.feature-card {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
-  width: 100%;
-  padding: var(--space-md);
-  color: var(--color-text);
-  font: inherit;
-  text-align: left;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-card);
-  cursor: pointer;
-}
-
-.feature-card:hover {
-  border-color: var(--color-accent);
-}
-
 .feature-card--pending {
   background: var(--color-bg);
   border-style: dashed;

@@ -3,6 +3,7 @@ import { computed, onMounted, ref, shallowRef } from 'vue'
 import { useI18n } from 'vue-i18n'
 import PartitionFiles from './PartitionFiles.vue'
 import SourcePicker from './SourcePicker.vue'
+import WizardSteps from './WizardSteps.vue'
 import { useBrowse } from '../composables/useBrowse'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { usePartitionText } from '../composables/usePartitionText'
@@ -173,7 +174,7 @@ async function closeBrowse() {
 function partitionTitle(partition: PartitionBoot): string {
   const number = t('repair.result.partitionTitle', {
     number: partition.number,
-    logical: partition.logical ? ` ${t('undelete.partition.logical')}` : '',
+    logical: partition.logical ? ` ${t('partition.picker.logical')}` : '',
   })
   return [number, partitionLabel(partition), filesystemName(partition.filesystem), formatBytes(partition.length)]
     .filter((part) => part !== '')
@@ -282,21 +283,7 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
 
     <form class="wizard__form" @submit.prevent="handleSubmit">
       <div class="wizard__stepbar">
-        <ol class="wizard__steps">
-          <li
-            v-for="(name, index) in STEPS"
-            :key="name"
-            class="wizard__step"
-            :class="{
-              'wizard__step--current': name === step,
-              'wizard__step--done': index < stepIndex,
-            }"
-            :aria-current="name === step ? 'step' : undefined"
-          >
-            <span class="wizard__step-number">{{ index + 1 }}</span>
-            {{ t(`repair.steps.${name}`) }}
-          </li>
-        </ol>
+        <WizardSteps :steps="STEPS" :current="step" label-prefix="repair.steps" />
         <div class="wizard__nav">
           <button
             v-if="stepIndex > 0"
@@ -305,7 +292,7 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
             :disabled="isBusy"
             @click="goBack"
           >
-            {{ isBrowsing ? t('repair.browse.backToResult') : t('carve.previous') }}
+            {{ isBrowsing ? t('repair.browse.backToResult') : t('common.previous') }}
           </button>
           <button v-if="step === 'source'" class="wizard__button" type="submit" :disabled="!canGoNext">
             {{ t('repair.diagnose.start') }}
@@ -349,20 +336,20 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
         class="wizard__panel wizard__fill"
       >
         <dl class="wizard__details">
-          <dt>{{ t('undelete.browse.source') }}</dt>
+          <dt>{{ t('common.source') }}</dt>
           <dd class="wizard__path-text">{{ sourceText }}</dd>
-          <dt>{{ t('undelete.browse.partition') }}</dt>
+          <dt>{{ t('partitionFiles.browse.partition') }}</dt>
           <dd>{{ partitionLine(browsingPartition) }}</dd>
         </dl>
         <p class="wizard__hint wizard__hint--warning">{{ t('repair.browse.intro') }}</p>
-        <p v-if="browse.target.value.kind === 'disk'" class="wizard__hint">{{ t('undelete.browse.liveHint') }}</p>
+        <p v-if="browse.target.value.kind === 'disk'" class="wizard__hint">{{ t('partitionFiles.browse.liveHint') }}</p>
         <p v-if="browse.isUnresponsive.value" class="wizard__error" role="alert">
-          {{ t('carve.run.unresponsive') }}
+          {{ t('common.unresponsive') }}
         </p>
         <p v-if="!browse.isOpen.value && browse.failure.value" class="wizard__error" role="alert">
           {{ formatHostError(browse.failure.value) }}
         </p>
-        <div class="repair-wizard__files wizard__fill">
+        <div class="wizard__files wizard__fill">
           <PartitionFiles
             v-model:busy="isCopying"
             :job-id="browse.jobId.value"
@@ -379,15 +366,15 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
       <div v-else-if="diagnosis" class="wizard__panel">
         <p class="wizard__note">
           {{
-            t('undelete.partition.summary', {
+            t('partition.picker.summary', {
               source: sourceText,
-              scheme: t(`undelete.partition.scheme.${diagnosis.scheme}`),
+              scheme: t(`partition.picker.scheme.${diagnosis.scheme}`),
               size: formatBytes(diagnosis.size),
             })
           }}
         </p>
         <p class="wizard__hint wizard__hint--warning">{{ t('repair.readOnly') }}</p>
-        <ul v-if="diagnosis.notes.length" class="repair-wizard__list">
+        <ul v-if="diagnosis.notes.length" class="wizard__list">
           <li v-for="note in diagnosis.notes" :key="note">{{ tableNote(note) }}</li>
         </ul>
         <p v-if="diagnosis.partitions.length === 0" class="wizard__note">{{ t('repair.result.none') }}</p>
@@ -418,10 +405,10 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
                 <p v-if="partition.primary.issues.length === 0" class="repair-wizard__ok">
                   {{ t('repair.result.copyOk') }}
                 </p>
-                <ul v-else class="repair-wizard__list">
+                <ul v-else class="wizard__list">
                   <li v-for="(issue, index) in partition.primary.issues" :key="index">{{ issueText(issue) }}</li>
                 </ul>
-                <ul v-if="partition.primary.notes.length" class="repair-wizard__list repair-wizard__notes">
+                <ul v-if="partition.primary.notes.length" class="wizard__list repair-wizard__notes">
                   <li v-for="(note, index) in partition.primary.notes" :key="index">
                     {{ t('repair.result.note', { text: issueText(note) }) }}
                   </li>
@@ -435,10 +422,10 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
                   <p v-if="partition.backup.issues.length === 0" class="repair-wizard__ok">
                     {{ t('repair.result.copyOk') }}
                   </p>
-                  <ul v-else class="repair-wizard__list">
+                  <ul v-else class="wizard__list">
                     <li v-for="(issue, index) in partition.backup.issues" :key="index">{{ issueText(issue) }}</li>
                   </ul>
-                  <ul v-if="partition.backup.notes.length" class="repair-wizard__list repair-wizard__notes">
+                  <ul v-if="partition.backup.notes.length" class="wizard__list repair-wizard__notes">
                     <li v-for="(note, index) in partition.backup.notes" :key="index">
                       {{ t('repair.result.note', { text: issueText(note) }) }}
                     </li>
@@ -469,7 +456,7 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
 
           <template v-if="partition.tableIssues.length">
             <p class="repair-wizard__subtitle">{{ t('repair.result.tableIssues') }}</p>
-            <ul class="repair-wizard__list">
+            <ul class="wizard__list">
               <li v-for="issue in partition.tableIssues" :key="issue.code">
                 {{ tableIssueText(partition, issue) }}
               </li>
@@ -536,12 +523,6 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
   color: var(--color-text-muted);
 }
 
-.repair-wizard__list {
-  margin: 0;
-  padding-left: var(--space-lg);
-  font-size: var(--font-size-small);
-}
-
 .repair-wizard__ok {
   margin: 0;
   font-size: var(--font-size-small);
@@ -562,11 +543,4 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
   gap: var(--space-sm);
 }
 
-/* PartitionFiles 的两栏与复制状态直接排进这个网格（同「找回删除的文件」） */
-.repair-wizard__files {
-  display: grid;
-  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
-  grid-template-rows: auto 1fr auto;
-  gap: var(--space-sm) var(--space-lg);
-}
 </style>
