@@ -1,7 +1,7 @@
 //! 消息循环：从宿主读请求、派发、写答复；后台发心跳；任务结束或宿主断开后退出。
 
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -290,8 +290,8 @@ fn dispatch_now(
             let params: ExtractParams = request.params()?;
             let registry = Registry::builtin();
             check_extract_items(&registry, &params)?;
-            let output_dir = Path::new(&params.output_dir)
-                .join(format!("recovered-{}", short_id(&params.job_id)));
+            // 另存为：直接存进用户选的目录，不另建子目录
+            let output_dir = PathBuf::from(&params.output_dir);
             let device = open_source_for_output(&params.source, &output_dir)?;
             std::fs::create_dir_all(&output_dir)
                 .map_err(|error| output_unavailable(&output_dir, &error))?;

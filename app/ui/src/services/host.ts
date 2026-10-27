@@ -1,7 +1,7 @@
 // 与宿主通信的唯一入口：组件不直接调用 Tauri 命令
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { open } from '@tauri-apps/plugin-dialog'
+import { open, save } from '@tauri-apps/plugin-dialog'
 
 export interface AppInfo {
   version: string
@@ -204,6 +204,8 @@ export interface CopiedFile {
   error: string | null
   /** 复制出的内容全是 0（固态硬盘 TRIM 后的已删除文件常常如此） */
   allZero: boolean
+  /** 保存只扫描的结果时，这个文件在源上的起始偏移：保存成的名字可能改过（另存为、重名加序号），按它对上是哪个文件 */
+  offset?: number
 }
 
 export interface CopySummary {
@@ -328,11 +330,12 @@ export function startCarve(
   return invoke<void>('job_start_carve', { jobId, target, outputDir, extensions })
 }
 
-/** 只扫描时找到的一个文件的位置、长度与格式 */
+/** 只扫描时找到的一个文件的位置、长度与格式；name 是另存为时起的文件名，不给时用恢复时起的 */
 export interface ExtractItem {
   offset: number
   length: number
   extension: string
+  name?: string
 }
 
 /** 预览只扫描、还没保存的文件：宿主回到扫描任务的源上读这一段，由引擎生成预览 */
@@ -346,13 +349,15 @@ export function previewCarveRange(
 
 /**
  * 保存只扫描时选中的文件（任务）：回到源上重新读出并校验，与扫描时对不上的不保存。
- * 保存好的文件按这个任务的 jobId 加文件名打开、在文件夹中显示
+ * 文件直接存进 outputDir，重名时加序号、不覆盖；outputDir 为 null 时是为打开、复制而保存，
+ * 宿主存到程序目录下的 open-cache 并在后台清掉以前的副本。
+ * 保存好的文件按这个任务的 jobId 加保存成的文件名打开、在文件夹中显示
  */
 export function startExtract(
   jobId: string,
   scanJobId: string,
   items: ExtractItem[],
-  outputDir: string,
+  outputDir: string | null,
 ): Promise<void> {
   return invoke<void>('job_start_extract', { jobId, scanJobId, items, outputDir })
 }
@@ -369,6 +374,16 @@ export function previewRecoveredFile(jobId: string, name: string): Promise<FileP
 /** 用系统默认程序打开 */
 export function openRecoveredFile(jobId: string, name: string): Promise<void> {
   return invoke<void>('recovered_open', { jobId, name })
+}
+
+/** 系统的「打开方式」对话框：用户挑一个程序打开。可执行与脚本类文件不打开（executableBlocked） */
+export function openRecoveredFileWith(jobId: string, name: string): Promise<void> {
+  return invoke<void>('recovered_open_with', { jobId, name })
+}
+
+/** 把文件放到剪贴板，之后可以在资源管理器里粘贴 */
+export function copyRecoveredFile(jobId: string, name: string): Promise<void> {
+  return invoke<void>('recovered_copy', { jobId, name })
 }
 
 /** 在系统的文件管理器里显示 */
@@ -464,6 +479,19 @@ export function pickDirectory(title: string): Promise<string | null> {
 /** 系统的选择文件对话框；用户取消时返回 null */
 export function pickFile(title: string): Promise<string | null> {
   return open({ title, directory: false, multiple: false })
+}
+
+/** 系统的「另存为」对话框：defaultPath 是建议的目录加文件名，只列出 extension 类型；用户取消时返回 null */
+export function pickSaveFile(
+  title: string,
+  defaultPath: string,
+  extension: { name: string; extension: string },
+): Promise<string | null> {
+  return save({
+    title,
+    defaultPath,
+    filters: [{ name: extension.name, extensions: [extension.extension] }],
+  })
 }
 
 /** 命令失败时，宿主抛出的是 HostError；其他情况（例如命令不存在）是字符串 */

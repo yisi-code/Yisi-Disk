@@ -650,13 +650,14 @@ fn scan_only_then_preview_and_save_selected_files() {
         )
         .unwrap_err();
     assert_eq!(bogus.code, rpc_error::INVALID_PARAMS);
+    // 另存为：直接存进选的目录（还不存在时建出来），不另建子目录
+    let output = dir.join("saved");
     let started = saver
         .call(
             CARVE_EXTRACT,
-            json!({"jobId": "save-1-xyz", "source": source, "outputDir": dir, "items": items}),
+            json!({"jobId": "save-1-xyz", "source": source, "outputDir": output, "items": items}),
         )
         .unwrap();
-    let output = dir.join("recovered-save-1-x");
     assert_eq!(started, json!({"outputDir": output.display().to_string()}));
     let notifications = saver.notifications_until(COMPLETED);
     let saved: Vec<CopiedFile> = notifications
@@ -668,14 +669,14 @@ fn scan_only_then_preview_and_save_selected_files() {
         .collect();
     let outcome: Vec<_> = saved
         .iter()
-        .map(|file| (file.path.as_str(), file.error.is_none()))
+        .map(|file| (file.path.as_str(), file.error.is_none(), file.offset))
         .collect();
     assert_eq!(
         outcome,
         [
-            (found[0].name.as_str(), true),
-            (found[1].name.as_str(), true),
-            (found[2].name.as_str(), false),
+            (found[0].name.as_str(), true, Some(found[0].offset)),
+            (found[1].name.as_str(), true, Some(found[1].offset)),
+            (found[2].name.as_str(), false, Some(found[2].offset)),
         ]
     );
     let summary: CopySummary =
@@ -690,6 +691,49 @@ fn scan_only_then_preview_and_save_selected_files() {
     }
     assert!(!output.join(&found[2].name).exists());
     assert!(saver.wait_exit().success());
+
+    // 再存一次：同一个文件按原名、按另存为起的名字各一份，重名时加序号，不覆盖已有文件
+    let jpg = &found[0];
+    std::fs::write(output.join("photo.jpg"), b"user's own file").unwrap();
+    let mut again = Engine::start();
+    again
+        .call(
+            CARVE_EXTRACT,
+            json!({"jobId": "save-2", "source": source, "outputDir": output, "items": [
+                {"offset": jpg.offset, "length": jpg.length, "extension": "jpg"},
+                {"offset": jpg.offset, "length": jpg.length, "extension": "jpg", "name": "photo.jpg"},
+                {"offset": jpg.offset, "length": jpg.length, "extension": "jpg", "name": "a/b:c.jpg"},
+            ]}),
+        )
+        .unwrap();
+    let notifications = again.notifications_until(COMPLETED);
+    let paths: Vec<String> = notifications
+        .iter()
+        .filter(|(method, _)| method == COPIED)
+        .flat_map(|(_, params)| {
+            serde_json::from_value::<Vec<CopiedFile>>(params["files"].clone()).unwrap()
+        })
+        .map(|file| file.path)
+        .collect();
+    let renamed = jpg.name.replace(".jpg", " (1).jpg");
+    assert_eq!(paths, [renamed.as_str(), "photo (1).jpg", "a_b_c.jpg"]);
+    assert_eq!(
+        std::fs::read(output.join("photo.jpg")).unwrap(),
+        b"user's own file"
+    );
+    for name in &paths {
+        assert!(
+            std::fs::read(output.join(name)).unwrap() == originals[0].1,
+            "{name}"
+        );
+    }
+    let leftovers: Vec<_> = std::fs::read_dir(&output)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".yisi-saving-") || name.ends_with(".part"))
+        .collect();
+    assert!(leftovers.is_empty(), "暂存目录应已删掉：{leftovers:?}");
+    assert!(again.wait_exit().success());
 }
 
 /// 一块 MBR 盘，1 号分区是 NTFS：现存与删除的文件、删除的目录、找不到原目录的文件。

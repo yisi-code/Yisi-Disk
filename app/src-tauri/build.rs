@@ -11,6 +11,8 @@ fn main() {
         "job_cancel",
         "recovered_preview",
         "recovered_open",
+        "recovered_open_with",
+        "recovered_copy",
         "recovered_reveal",
         "carve_preview_range",
         "job_start_extract",
