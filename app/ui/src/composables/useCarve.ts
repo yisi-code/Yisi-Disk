@@ -55,8 +55,12 @@ export function useCarve() {
     summary,
     failure: job.failure,
     isUnresponsive: job.isUnresponsive,
+    isPaused: job.isPaused,
+    isTogglingPause: job.isTogglingPause,
     isBusy: job.isBusy,
     start,
     cancel: job.cancel,
+    pause: job.pause,
+    resume: job.resume,
   }
 }

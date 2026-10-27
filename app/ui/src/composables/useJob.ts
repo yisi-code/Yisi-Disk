@@ -3,6 +3,7 @@ import type { UnlistenFn } from '@tauri-apps/api/event'
 import {
   cancelJob,
   onJobEvent,
+  setJobPaused,
   toHostError,
   type CopiedFile,
   type FoundFile,
@@ -32,7 +33,7 @@ export interface JobHandlers<TResult> {
 }
 
 /**
- * 一个任务的通用状态：发起、取消、进度与速度、无响应与恢复、终结。
+ * 一个任务的通用状态：发起、取消、暂停与继续（只有支持的任务）、进度与速度、无响应与恢复、终结。
  * 任务 ID 在调用宿主之前生成并记下，事件先于启动命令返回到达时也不会丢；不属于当前任务的事件一律忽略。
  */
 export function useJob<TResult>(handlers: JobHandlers<TResult>) {
@@ -44,10 +45,15 @@ export function useJob<TResult>(handlers: JobHandlers<TResult>) {
   const bytesPerSecond = ref<number | null>(null)
   const failure = ref<HostError | null>(null)
   const isUnresponsive = ref(false)
+  /** 运行中被暂停：状态仍是 running，引擎在检查点等着 */
+  const isPaused = ref(false)
+  /** 暂停或继续的请求还没答复 */
+  const isTogglingPause = ref(false)
   /** 最近一次发起的任务；任务结束后保留，深度恢复的结果还要按它预览、打开 */
   const jobId = ref<string | null>(null)
 
   let startedAt = 0
+  let pausedAt = 0
   let unlisten: UnlistenFn | null = null
   let isDisposed = false
 
@@ -88,6 +94,7 @@ export function useJob<TResult>(handlers: JobHandlers<TResult>) {
     bytesPerSecond.value = null
     failure.value = null
     isUnresponsive.value = false
+    isPaused.value = false
     try {
       await launch(id)
       if (jobId.value === id && status.value === 'starting') {
@@ -114,6 +121,32 @@ export function useJob<TResult>(handlers: JobHandlers<TResult>) {
       if (status.value === 'cancelling') {
         status.value = 'running'
       }
+    }
+  }
+
+  /** 暂停或继续；请求失败（例如任务恰好结束）时保持原状 */
+  async function setPaused(paused: boolean) {
+    const id = jobId.value
+    if (id === null || status.value !== 'running' || isPaused.value === paused || isTogglingPause.value) {
+      return
+    }
+    isTogglingPause.value = true
+    try {
+      await setJobPaused(id, paused)
+      if (jobId.value !== id || status.value !== 'running') {
+        return
+      }
+      isPaused.value = paused
+      if (paused) {
+        pausedAt = performance.now()
+      } else {
+        // 读速只算运行的时间：起点顺延暂停了的那一段
+        startedAt += performance.now() - pausedAt
+      }
+    } catch {
+      // 任务恰好结束：终结事件会更新状态
+    } finally {
+      isTogglingPause.value = false
     }
   }
 
@@ -150,6 +183,7 @@ export function useJob<TResult>(handlers: JobHandlers<TResult>) {
       case 'completed':
         handlers.onCompleted(event.data.result)
         isUnresponsive.value = false
+        isPaused.value = false
         status.value = 'completed'
         break
       case 'failed':
@@ -158,10 +192,12 @@ export function useJob<TResult>(handlers: JobHandlers<TResult>) {
             ? { code: 'engineExited', detail: `exit code ${event.data.exitCode ?? '?'}` }
             : { code: 'jobFailed', detail: event.data.message ?? '' }
         isUnresponsive.value = false
+        isPaused.value = false
         status.value = 'failed'
         break
       case 'cancelled':
         isUnresponsive.value = false
+        isPaused.value = false
         status.value = 'cancelled'
         break
       case 'unresponsive':
@@ -185,8 +221,12 @@ export function useJob<TResult>(handlers: JobHandlers<TResult>) {
     bytesPerSecond,
     failure,
     isUnresponsive,
+    isPaused,
+    isTogglingPause,
     isBusy,
     start,
     cancel,
+    pause: () => setPaused(true),
+    resume: () => setPaused(false),
   }
 }

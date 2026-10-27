@@ -12,6 +12,7 @@
     "allow-job-start-disk-scan",
     "allow-job-start-carve",
     "allow-job-cancel",
+    "allow-job-set-paused",
     "allow-recovered-preview",
     "allow-recovered-open",
     "allow-recovered-open-with",

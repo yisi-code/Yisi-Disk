@@ -99,7 +99,10 @@ pub fn run(
                     })
                     .collect(),
                 unreadable_bytes: report.unreadable_bytes,
-                elapsed_ms: report.elapsed_ms,
+                // 暂停的时长不算
+                elapsed_ms: report.elapsed_ms.saturating_sub(
+                    u64::try_from(context.paused_total().as_millis()).unwrap_or(u64::MAX),
+                ),
             };
             serde_json::to_value(summary)
                 .map(JobOutcome::Completed)
@@ -142,7 +145,9 @@ impl Reporter<'_> {
 }
 
 impl CarveControl for Reporter<'_> {
+    /// 暂停时在这里等着：识别停下，读线程预读满队列后也停下，不再读盘。
     fn is_cancelled(&self) -> bool {
+        self.context.wait_while_paused();
         self.context.is_cancelled()
     }
 

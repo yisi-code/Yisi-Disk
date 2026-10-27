@@ -114,6 +114,16 @@ fn job_cancel(engines: State<'_, Engines>, job_id: String) -> Result<(), HostErr
     engines.cancel(&job_id)
 }
 
+/// 暂停或继续任务；目前只有深度恢复的扫描可以暂停。
+#[tauri::command(async)]
+fn job_set_paused(
+    engines: State<'_, Engines>,
+    job_id: String,
+    paused: bool,
+) -> Result<(), HostError> {
+    engines.set_paused(&job_id, paused)
+}
+
 /// 预览深度恢复找到的文件：只认任务 ID 加恢复时起的文件名，由引擎读取与解码。
 #[tauri::command(async)]
 fn recovered_preview(
@@ -300,6 +310,7 @@ fn main() -> anyhow::Result<()> {
             job_start_disk_scan,
             job_start_carve,
             job_cancel,
+            job_set_paused,
             recovered_preview,
             recovered_open,
             recovered_open_with,

@@ -61,9 +61,13 @@ const {
   summary,
   failure,
   isUnresponsive,
+  isPaused,
+  isTogglingPause,
   isBusy,
   start,
   cancel,
+  pause,
+  resume,
 } = useCarve()
 
 const titleElement = ref<HTMLHeadingElement | null>(null)
@@ -221,6 +225,13 @@ const statusText = computed(() => {
         : t('carve.run.status.starting')
     case 'running':
     case 'cancelling':
+      if (isPaused.value) {
+        return t('carve.run.status.paused', {
+          done: formatBytes(done.value),
+          total: formatBytes(total.value),
+          percent: percent.value,
+        })
+      }
       return t('carve.run.status.running', {
         done: formatBytes(done.value),
         total: formatBytes(total.value),
@@ -569,7 +580,11 @@ function handleAdvancedToggle(event: Event) {
 </script>
 
 <template>
-  <section class="wizard" aria-labelledby="carve-wizard-title">
+  <section
+    class="wizard"
+    :class="{ 'wizard--fill': step === 'scan' }"
+    aria-labelledby="carve-wizard-title"
+  >
     <header class="wizard__header">
       <button
         class="wizard__button wizard__button--secondary"
@@ -630,15 +645,25 @@ function handleAdvancedToggle(event: Event) {
           <button v-else-if="!isBusy" class="wizard__button" type="submit" :disabled="!canStart">
             {{ t('carve.run.restart') }}
           </button>
-          <button
-            v-else
-            class="wizard__button wizard__button--secondary"
-            type="button"
-            :disabled="status !== 'running'"
-            @click="handleCancel"
-          >
-            {{ status === 'cancelling' ? t('carve.run.cancelling') : t('carve.run.cancel') }}
-          </button>
+          <template v-else>
+            <button
+              v-if="status === 'running'"
+              class="wizard__button wizard__button--secondary"
+              type="button"
+              :disabled="isTogglingPause"
+              @click="isPaused ? resume() : pause()"
+            >
+              {{ isPaused ? t('carve.run.resume') : t('carve.run.pause') }}
+            </button>
+            <button
+              class="wizard__button wizard__button--secondary"
+              type="button"
+              :disabled="status !== 'running'"
+              @click="handleCancel"
+            >
+              {{ status === 'cancelling' ? t('carve.run.cancelling') : t('carve.run.cancel') }}
+            </button>
+          </template>
         </div>
       </div>
 
@@ -712,7 +737,7 @@ function handleAdvancedToggle(event: Event) {
         </details>
       </div>
 
-      <div v-else class="wizard__panel">
+      <div v-else class="wizard__panel wizard__fill">
         <dl class="wizard__details">
           <dt>{{ t('carve.run.source') }}</dt>
           <dd class="wizard__path-text">{{ sourceText }}</dd>
@@ -723,7 +748,7 @@ function handleAdvancedToggle(event: Event) {
           <dd v-else class="wizard__path-text">{{ trimmedOutputDir }}</dd>
         </dl>
 
-        <div v-if="status !== 'idle'" class="wizard__job" aria-live="polite">
+        <div v-if="status !== 'idle'" class="wizard__job wizard__fill" aria-live="polite">
           <progress class="wizard__progress" :value="done" :max="total || 1"></progress>
           <p class="wizard__status">{{ statusText }}</p>
           <p v-if="isUnresponsive" class="wizard__error" role="alert">
@@ -736,7 +761,7 @@ function handleAdvancedToggle(event: Event) {
             {{ runScanOnly ? t('carve.run.cancelledScanOnlyNote') : t('carve.run.cancelledNote') }}
           </p>
 
-          <div v-if="hasResults" class="wizard__results">
+          <div v-if="hasResults" class="wizard__results wizard__fill">
             <dl v-if="summary && status === 'completed'" class="carve-wizard__report">
               <div class="carve-wizard__report-item">
                 <dt>{{ t('carve.run.report.files') }}</dt>
@@ -769,7 +794,7 @@ function handleAdvancedToggle(event: Event) {
               </div>
             </dl>
 
-            <div class="carve-wizard__files">
+            <div class="carve-wizard__files wizard__fill">
               <RecoveredBrowser
                 ref="browser"
                 v-model:selected="selectedFile"
@@ -946,7 +971,7 @@ function handleAdvancedToggle(event: Event) {
 .carve-wizard__files {
   display: grid;
   grid-template-columns: minmax(0, 9fr) minmax(0, 11fr);
-  grid-template-rows: auto auto auto;
+  grid-template-rows: auto 1fr auto;
   gap: var(--space-sm) var(--space-lg);
 }
 

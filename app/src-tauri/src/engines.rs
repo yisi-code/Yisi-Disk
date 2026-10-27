@@ -18,9 +18,9 @@ use yisi_engine::protocol::{
     CARVE_EXTRACT, CARVE_START, COMPLETED, COPIED, COPY_FILES, Capabilities, CarveParams,
     CarveStarted, CopyItem, CopyParams, CopyStarted, DiskList, ExtractItem, ExtractParams, FAILED,
     FOUND, FileListPage, FilePreview, FileTypeList, HEARTBEAT, IMAGE_CREATE, IMAGE_RESUME, IMAGING,
-    ImageParams, JobRef, LIST_DISKS, LIST_FILE_TYPES, LIST_FILES, LOG, ListFilesParams,
+    ImageParams, JobRef, LIST_DISKS, LIST_FILE_TYPES, LIST_FILES, LOG, ListFilesParams, PAUSE,
     PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS, PartitionRef, PreviewFsParams,
-    PreviewParams, PreviewRangeParams, READ_SCAN, ReadScanParams, SCAN_DELETED, ScanParams,
+    PreviewParams, PreviewRangeParams, READ_SCAN, RESUME, ReadScanParams, SCAN_DELETED, ScanParams,
     ScanResult, Source, error_code,
 };
 
@@ -551,6 +551,18 @@ impl Engines {
             lock(&self.jobs).remove(&job_id);
         }
         started
+    }
+
+    /// 暂停或继续任务（目前只有深度恢复的扫描可以暂停）。
+    pub fn set_paused(&self, job_id: &str, paused: bool) -> Result<(), HostError> {
+        let params = serde_json::to_value(JobRef {
+            job_id: job_id.to_owned(),
+        })
+        .map_err(|error| HostError::new("engineProtocol", error.to_string()))?;
+        let method = if paused { PAUSE } else { RESUME };
+        self.running(job_id)?
+            .request(method, params, REQUEST_TIMEOUT)?;
+        Ok(())
     }
 
     pub fn cancel(&self, job_id: &str) -> Result<(), HostError> {

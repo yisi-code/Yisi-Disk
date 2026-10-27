@@ -11,9 +11,9 @@ use yisi_engine::protocol::{
     BROWSE_OPEN, BrowseOpened, CANCEL, CANCEL_SCAN, CANCELLED, CAPABILITIES, CARVE_EXTRACT,
     CARVE_START, COMPLETED, COPIED, COPY_FILES, CarveSummary, CopiedFile, CopySummary, FOUND,
     FileListPage, FilePreview, FoundFile, HEARTBEAT, IMAGE_CREATE, IMAGE_RESUME, IMAGING,
-    ImageStarted, ImageSummary, JobImaging, LIST_FILE_TYPES, LIST_FILES, PREVIEW_FILE,
-    PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS, READ_SCAN, ReadScanReport, SCAN_DELETED, ScanResult,
-    error_code,
+    ImageStarted, ImageSummary, JobImaging, LIST_FILE_TYPES, LIST_FILES, PAUSE, PREVIEW_FILE,
+    PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS, READ_SCAN, RESUME, ReadScanReport, SCAN_DELETED,
+    ScanResult, error_code,
 };
 use yisi_formats::samples;
 use yisi_io::{BadMap, SegmentState};
@@ -99,6 +99,23 @@ impl Engine {
                 other => panic!("意外的消息：{other:?}"),
             }
         }
+    }
+
+    /// 收 `duration` 这么久的通知（不含心跳）。
+    fn notifications_for(&self, duration: Duration) -> Vec<(String, Value)> {
+        let deadline = Instant::now() + duration;
+        let mut seen = Vec::new();
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            match self.incoming.recv_timeout(left) {
+                Ok(Message::Notification(notification)) if notification.method != HEARTBEAT => {
+                    seen.push((notification.method, notification.params));
+                }
+                Ok(Message::Notification(_)) => {}
+                Ok(other) => panic!("意外的消息：{other:?}"),
+                Err(_) => break,
+            }
+        }
+        seen
     }
 
     fn close_input(&mut self) {
@@ -227,6 +244,67 @@ fn read_scan_reports_progress_then_completes_and_exits() {
     assert!(report.unreadable.is_empty());
 
     // 任务结束后引擎自行退出
+    assert!(engine.wait_exit().success());
+}
+
+#[test]
+fn carve_scan_pauses_and_resumes() {
+    let size = 128 * 1024 * 1024;
+    let path = make_image("engine-carve-pause.img", size);
+    let source = json!({"type": "image", "path": path, "sectorSize": 512});
+    let started = Instant::now();
+    let mut engine = Engine::start();
+
+    let no_job = engine.call(PAUSE, json!({"jobId": "p1"})).unwrap_err();
+    assert_eq!(no_job.code, error_code::JOB_NOT_FOUND);
+
+    engine
+        .call(CARVE_START, json!({"jobId": "p1", "source": source}))
+        .unwrap();
+    // 接下任务后马上暂停：128 MiB 来不及扫完
+    let (paused, _) = engine.call_noting(PAUSE, json!({"jobId": "p1"}));
+    paused.unwrap();
+    // 闸门之前已经领走的那一段可能还会报一次进度，之后应当没有动静
+    engine.notifications_for(Duration::from_millis(300));
+    let quiet = engine.notifications_for(Duration::from_millis(1200));
+    assert!(
+        quiet
+            .iter()
+            .all(|(method, _)| method != PROGRESS && method != COMPLETED),
+        "暂停后仍有进度或已完成：{quiet:?}"
+    );
+
+    engine.call(RESUME, json!({"jobId": "p1"})).unwrap();
+    let notifications = engine.notifications_until(COMPLETED);
+    let wall_ms = started.elapsed().as_millis() as u64;
+    let (_, completed) = notifications.last().unwrap();
+    let summary: CarveSummary = serde_json::from_value(completed["result"].clone()).unwrap();
+    assert!(
+        summary.elapsed_ms + 1000 < wall_ms,
+        "用时 {} ms 应扣掉暂停的约 1.5 秒（总共 {wall_ms} ms）",
+        summary.elapsed_ms
+    );
+    assert!(engine.wait_exit().success());
+}
+
+#[test]
+fn only_carve_scan_can_be_paused() {
+    // 浏览任务一直运行到取消，不会在暂停请求到达前结束
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-pause-browse");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (image, _, _) = browse_image(&dir);
+    let mut engine = Engine::start();
+    engine
+        .call(
+            BROWSE_OPEN,
+            json!({"jobId": "b2", "source": {"type": "image", "path": image, "sectorSize": 512}}),
+        )
+        .unwrap();
+    let refused = engine.call(PAUSE, json!({"jobId": "b2"})).unwrap_err();
+    assert_eq!(refused.code, rpc_error::INVALID_PARAMS);
+    engine.call(CANCEL, json!({"jobId": "b2"})).unwrap();
+    engine.notifications_until(CANCELLED);
     assert!(engine.wait_exit().success());
 }
 

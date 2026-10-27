@@ -386,7 +386,11 @@ function noteText(note: string): string {
 </script>
 
 <template>
-  <section class="wizard" aria-labelledby="undelete-wizard-title">
+  <section
+    class="wizard"
+    :class="{ 'wizard--fill': step === 'browse' }"
+    aria-labelledby="undelete-wizard-title"
+  >
     <header class="wizard__header">
       <button
         class="wizard__button wizard__button--secondary"
@@ -536,7 +540,7 @@ function noteText(note: string): string {
         </p>
       </div>
 
-      <div v-else-if="currentPartition && browse.jobId.value" class="wizard__panel">
+      <div v-else-if="currentPartition && browse.jobId.value" class="wizard__panel wizard__fill">
         <dl class="wizard__details">
           <dt>{{ t('undelete.browse.source') }}</dt>
           <dd class="wizard__path-text">{{ sourceText }}</dd>
@@ -573,7 +577,7 @@ function noteText(note: string): string {
         <p v-if="!browse.isOpen.value && browse.failure.value" class="wizard__error" role="alert">
           {{ formatHostError(browse.failure.value) }}
         </p>
-        <div class="undelete-wizard__files">
+        <div class="undelete-wizard__files wizard__fill">
           <FsBrowser
             v-model:selected="selectedItem"
             v-model:checked="checkedItems"
@@ -745,7 +749,7 @@ function noteText(note: string): string {
 .undelete-wizard__files {
   display: grid;
   grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
-  grid-template-rows: auto auto auto;
+  grid-template-rows: auto 1fr auto;
   gap: var(--space-sm) var(--space-lg);
 }
 
