@@ -4,10 +4,9 @@ use std::sync::Arc;
 
 use yisi_engine::protocol::{BootCopy, FoundPartition, SearchSummary};
 use yisi_io::BlockDevice;
-use yisi_part::Scheme;
 use yisi_repair::search::{self, FoundBy, Relation, SearchControl};
 
-use crate::browse::fs_key;
+use crate::browse::{fs_key, scheme_name};
 use crate::job::{JobContext, JobOutcome};
 
 pub fn run(device: Arc<dyn BlockDevice>, context: &JobContext) -> Result<JobOutcome, String> {
@@ -17,13 +16,11 @@ pub fn run(device: Arc<dyn BlockDevice>, context: &JobContext) -> Result<JobOutc
     let summary = SearchSummary {
         size: report.size,
         sector_size: device.sector_size(),
-        scheme: match report.table.as_ref().map(|table| table.scheme) {
-            Some(Scheme::Mbr) => "mbr",
-            Some(Scheme::Gpt) => "gpt",
-            Some(Scheme::None) => "none",
-            None => "unreadable",
-        }
-        .to_owned(),
+        scheme: report
+            .table
+            .as_ref()
+            .map_or("unreadable", |table| scheme_name(table.scheme))
+            .to_owned(),
         candidates: report
             .candidates
             .into_iter()

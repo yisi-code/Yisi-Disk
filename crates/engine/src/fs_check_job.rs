@@ -6,6 +6,7 @@ use yisi_engine::protocol::{FsCheckReport, FsIssue, FsIssueTotals, PartitionRef}
 use yisi_io::BlockDevice;
 use yisi_repair::check::{self, Control, Issue, Report, Stage};
 
+use crate::browse::fs_key;
 use crate::job::{JobContext, JobOutcome};
 
 /// 问题清单编码后最多这么多字节，留出余量，保证整条消息不超过 1 MiB。
@@ -63,7 +64,7 @@ fn to_protocol(report: Report, partition_offset: u64, elapsed_ms: u64) -> FsChec
     }
     let omitted = report.omitted + (listed - issues.len()) as u64;
     FsCheckReport {
-        filesystem: report.fs.key().to_owned(),
+        filesystem: fs_key(report.fs).to_owned(),
         cluster_size: report.cluster_size,
         cluster_count: report.cluster_count,
         used_clusters: report.used_clusters,

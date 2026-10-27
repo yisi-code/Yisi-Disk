@@ -1,9 +1,9 @@
 //! JPEG：SOI 之后是一串标记段；SOS 之后是熵编码数据，其中的 0xFF 后面跟 0x00（填充）或 RST 标记，
 //! 遇到其他标记时熵编码数据结束；以 EOI（FF D9）结束。缩略图嵌在 APP 段里，随段长度整段跳过。
 
-use crate::bytes::be16;
 use crate::plugin::{FileFormat, FormatInfo, Recovering, Signature};
 use crate::walker::{Event, Scanner, Step, Structure, Walker};
+use yisi_part::bytes::be16;
 
 const SOI: &[u8] = b"\xFF\xD8\xFF";
 const EOI: u8 = 0xD9;

@@ -61,30 +61,6 @@ pub trait Control {
     fn progress(&self, stage: Stage, done: u64, total: u64);
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FsType {
-    Fat12,
-    Fat16,
-    Fat32,
-    Exfat,
-    Ntfs,
-    /// 主、备引导扇区都认不出。
-    Unknown,
-}
-
-impl FsType {
-    pub fn key(self) -> &'static str {
-        match self {
-            Self::Fat12 => "fat12",
-            Self::Fat16 => "fat16",
-            Self::Fat32 => "fat32",
-            Self::Exfat => "exfat",
-            Self::Ntfs => "ntfs",
-            Self::Unknown => "unknown",
-        }
-    }
-}
-
 /// 检查过的项目；做不了的列在 [`Report::skipped`] 里。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CheckItem {
@@ -136,7 +112,7 @@ impl CheckItem {
 /// 检查结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
-    pub fs: FsType,
+    pub fs: FsKind,
     pub cluster_size: u64,
     pub cluster_count: u64,
     /// FAT 或分配位图里记为已占用的簇数（NTFS 为 0）。
@@ -224,7 +200,7 @@ pub fn check(
 
 /// 各文件系统的检查交回的概况。
 pub(crate) struct Summary {
-    pub fs: FsType,
+    pub fs: FsKind,
     pub cluster_size: u64,
     pub cluster_count: u64,
     pub used_clusters: u64,
@@ -235,7 +211,7 @@ pub(crate) struct Summary {
 impl Summary {
     fn unknown() -> Self {
         Self {
-            fs: FsType::Unknown,
+            fs: FsKind::Unknown,
             cluster_size: 0,
             cluster_count: 0,
             used_clusters: 0,

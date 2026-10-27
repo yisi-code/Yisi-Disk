@@ -7,8 +7,9 @@
 use std::fs;
 use std::time::Instant;
 
+use yisi_fs::FsKind;
 use yisi_io::{BlockDevice, RawImage};
-use yisi_repair::check::{self, Control, FsType, Stage};
+use yisi_repair::check::{self, Control, Stage};
 
 struct Quiet;
 
@@ -55,7 +56,7 @@ fn windows_formatted_volumes_check_clean() {
                 println!("    问题 {issue:?}");
             }
             // 没有文件系统的分区（GPT 的 Microsoft 保留分区）不算误报
-            if report.fs != FsType::Unknown && !report.issues.is_empty() {
+            if report.fs != FsKind::Unknown && !report.issues.is_empty() {
                 false_positives.push(format!(
                     "{} 分区 {}：{:?}，{} 个问题",
                     image.display(),

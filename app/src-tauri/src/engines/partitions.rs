@@ -5,9 +5,7 @@ use yisi_engine::protocol::{
     BootCopy, OPEN_RANGE, OpenRangeParams, PartitionInfo, SEARCH_PARTITIONS, SearchParams,
 };
 
-use super::{
-    BROWSE_TIMEOUT, Engines, HostError, Target, disk_path, from_value, resolve_source, to_params,
-};
+use super::{BROWSE_TIMEOUT, Engines, HostError, Target, from_value, resolve_source, to_params};
 use crate::broker::BrokerSession;
 
 impl Engines {
@@ -19,9 +17,7 @@ impl Engines {
         job_id: String,
         target: Target,
     ) -> Result<(), HostError> {
-        if let Target::Disk { disk_number } = &target {
-            disk_path(*disk_number)?;
-        }
+        target.validate()?;
         let params_job_id = job_id.clone();
         self.start_job(app, job_id, SEARCH_PARTITIONS, |engine_pid| {
             to_params(&SearchParams {

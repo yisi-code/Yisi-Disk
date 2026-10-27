@@ -5,9 +5,9 @@
 //! - 分片文件的 sidx 登记了索引内容的总长度，文件至少要到那里；
 //! - 最后一个 box 不能是 moof：它的样本数据在紧随其后的 mdat 里，mdat 没跟上说明后面还有。
 
-use crate::bytes::{be16, be32, be64};
 use crate::plugin::{FileFormat, FormatInfo, Recovering, Signature};
 use crate::walker::{Event, Step, Structure, Walker};
+use yisi_part::bytes::{be16, be32, be64};
 
 /// 视为合法的顶层 box 类型；遇到其他类型时文件结束。
 const TOP_LEVEL_BOXES: [&[u8; 4]; 17] = [

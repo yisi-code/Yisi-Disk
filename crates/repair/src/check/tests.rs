@@ -147,7 +147,7 @@ fn clean_fat_images_have_no_issues() {
     }
     assert_eq!(
         run(&fat_sample(FatType::Fat16).image.finish()).fs,
-        FsType::Fat16
+        FsKind::Fat16
     );
 }
 
@@ -293,7 +293,7 @@ fn fat_copies_boot_and_flags_are_checked() {
     let mut image = fat_sample(kind).image.finish();
     image[13] = 3;
     let report = run(&image);
-    assert_eq!(report.fs, FsType::Unknown);
+    assert_eq!(report.fs, FsKind::Unknown);
     find(&report, IssueKind::UnknownFilesystem);
 }
 
@@ -391,7 +391,7 @@ fn reseal_boot(image: &mut [u8]) {
 #[test]
 fn clean_exfat_image_has_no_issues() {
     let report = run(&exfat_sample().image);
-    assert_eq!(report.fs, FsType::Exfat);
+    assert_eq!(report.fs, FsKind::Exfat);
     assert!(report.issues.is_empty(), "{:#?}", report.issues);
     assert_eq!((report.files, report.directories), (4, 1));
     for item in [
@@ -455,7 +455,7 @@ fn exfat_falls_back_to_the_backup_boot_region() {
     let mut image = exfat_sample().image;
     image[..512].fill(0);
     let report = run(&image);
-    assert_eq!(report.fs, FsType::Exfat);
+    assert_eq!(report.fs, FsKind::Exfat);
     assert_eq!(kinds(&report), vec![IssueKind::BootUnrecognized]);
     assert_eq!(report.files, 4);
 }
@@ -684,7 +684,7 @@ fn ntfs_boot_and_mft_are_checked() {
     image.add_file(yisi_fs::samples::NTFS_ROOT, "a.txt", b"hello");
     let mut image = image.finish();
     let report = run(&image);
-    assert_eq!(report.fs, FsType::Ntfs);
+    assert_eq!(report.fs, FsKind::Ntfs);
     assert!(report.issues.is_empty(), "{:#?}", report.issues);
     assert!(report.checked.contains(&CheckItem::MftMirror));
     // 备份引导扇区（分区最后一个扇区）没了
@@ -705,7 +705,7 @@ fn ntfs_boot_and_mft_are_checked() {
 #[test]
 fn unknown_volumes_are_reported() {
     let report = run(&vec![0u8; 1 << 20]);
-    assert_eq!(report.fs, FsType::Unknown);
+    assert_eq!(report.fs, FsKind::Unknown);
     assert_eq!(kinds(&report), vec![IssueKind::UnknownFilesystem]);
 }
 

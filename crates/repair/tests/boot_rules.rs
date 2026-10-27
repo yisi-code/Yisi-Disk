@@ -6,12 +6,13 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use yisi_fs::FsKind;
 use yisi_fs::bpb::{check_fat, check_ntfs};
 use yisi_fs::samples::{FatImage, FatType, MemoryDisk, Noise, NtfsImage};
 use yisi_io::{BlockDevice, IoError};
 use yisi_part::{Partition, PartitionKind};
 use yisi_repair::boot::{Verdict, diagnose_partition};
-use yisi_repair::check::{self, Area, Control, FsType, IssueKind, Stage};
+use yisi_repair::check::{self, Area, Control, IssueKind, Stage};
 
 /// 共用一份样本，只把 `at` 起的 512 字节换成改过的引导扇区，免得每轮复制几十 MiB。
 struct Patched {
@@ -107,7 +108,7 @@ fn agree(name: &str, image: Vec<u8>, usable: fn(&[u8]) -> bool, rounds: u32) {
 
         // 主引导扇区不能用时，检查要么认不出，要么改按备份（并记下认不出主引导扇区）
         let report = check::check(device.as_ref(), 0, length, &Quiet).unwrap();
-        let primary_used = report.fs != FsType::Unknown
+        let primary_used = report.fs != FsKind::Unknown
             && !report
                 .issues
                 .iter()

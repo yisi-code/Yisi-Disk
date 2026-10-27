@@ -6,11 +6,10 @@ use yisi_engine::protocol::{
     self, BootCopy, BootCopyReport, BootDiagnosis, BootDifference, BootIssue, PartitionBoot,
 };
 use yisi_io::BlockDevice;
-use yisi_part::Scheme;
 use yisi_repair::boot::{self, CopyReport, Issue, PartitionReport, TableIssue, Verdict};
 use yisi_rpc::ErrorObject;
 
-use crate::browse::{fs_key, note_key, role_key, table_kind};
+use crate::browse::{fs_key, note_key, role_key, scheme_name, table_kind};
 use crate::runtime::error_chain;
 
 pub fn diagnose(device: &Arc<dyn BlockDevice>) -> Result<BootDiagnosis, ErrorObject> {
@@ -23,12 +22,7 @@ pub fn diagnose(device: &Arc<dyn BlockDevice>) -> Result<BootDiagnosis, ErrorObj
     Ok(BootDiagnosis {
         size: device.size(),
         sector_size: device.sector_size(),
-        scheme: match report.table.scheme {
-            Scheme::Mbr => "mbr",
-            Scheme::Gpt => "gpt",
-            Scheme::None => "none",
-        }
-        .to_owned(),
+        scheme: scheme_name(report.table.scheme).to_owned(),
         notes: report.table.notes.iter().map(note_key).collect(),
         partitions: report.partitions.iter().map(partition).collect(),
     })

@@ -5,7 +5,7 @@ use yisi_fs::bpb::{self, NtfsBpb as Geometry, Problem};
 use yisi_fs::{FsKind, mft_self_record_ok};
 
 use crate::check::issue::{Area, Issue, IssueKind};
-use crate::check::{CheckItem, Ctx, FsType, Stage, Summary, check_backup};
+use crate::check::{CheckItem, Ctx, Stage, Summary, check_backup};
 
 /// `$MFTMirr` 至少镜像前 4 条记录（`$MFT`、`$MFTMirr`、`$LogFile`、`$Volume`）。
 const MIRRORED_RECORDS: u64 = 4;
@@ -26,7 +26,7 @@ pub(crate) fn check(ctx: &mut Ctx, sector: &[u8], from_backup: bool) -> Option<S
     };
     ctx.boot_problems(&problems, area);
     let Some(geometry) = geometry else {
-        return Some(summary(FsType::Ntfs, 0, 0));
+        return Some(summary(FsKind::Ntfs, 0, 0));
     };
     ctx.checked(CheckItem::Boot);
     let length = ctx.disk.length();
@@ -44,7 +44,7 @@ pub(crate) fn check(ctx: &mut Ctx, sector: &[u8], from_backup: bool) -> Option<S
         check_backup(ctx, FsKind::Ntfs, sector);
     }
     let clusters = volume_bytes / geometry.cluster_size;
-    let summary = summary(FsType::Ntfs, geometry.cluster_size, clusters);
+    let summary = summary(FsKind::Ntfs, geometry.cluster_size, clusters);
     if !ctx.control.checkpoint() {
         return None;
     }
@@ -94,7 +94,7 @@ pub(crate) fn check(ctx: &mut Ctx, sector: &[u8], from_backup: bool) -> Option<S
     Some(summary)
 }
 
-fn summary(fs: FsType, cluster_size: u64, cluster_count: u64) -> Summary {
+fn summary(fs: FsKind, cluster_size: u64, cluster_count: u64) -> Summary {
     Summary {
         fs,
         cluster_size,

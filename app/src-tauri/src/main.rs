@@ -18,7 +18,7 @@ use yisi_engine::protocol::{
 };
 
 use crate::broker::BrokerSession;
-use crate::engines::{Engines, HostError, Target, is_executable_type, save_fs_check_report};
+use crate::engines::{Engines, HostError, Target, refuse_executable, save_fs_check_report};
 
 #[derive(Serialize)]
 struct AppInfo {
@@ -145,10 +145,7 @@ fn recovered_open(
     name: String,
 ) -> Result<(), HostError> {
     let path = engines.recovered_file(&job_id, &name)?;
-    // 另存为时可以改名，改成可执行类型的不交给系统打开
-    if is_executable_type(&path) {
-        return Err(HostError::new("executableBlocked", name));
-    }
+    refuse_executable(&path, &name)?;
     tauri_plugin_opener::open_path(&path, None::<&str>)
         .map_err(|error| HostError::new("openFailed", error.to_string()))
 }
@@ -161,9 +158,7 @@ fn recovered_open_with(
     name: String,
 ) -> Result<(), HostError> {
     let path = engines.recovered_file(&job_id, &name)?;
-    if is_executable_type(&path) {
-        return Err(HostError::new("executableBlocked", name));
-    }
+    refuse_executable(&path, &name)?;
     shell::open_with(&path)
 }
 
@@ -311,9 +306,7 @@ fn job_start_copy(
 #[tauri::command(async)]
 fn copied_open(engines: State<'_, Engines>, job_id: String, path: String) -> Result<(), HostError> {
     let file = engines.copied_file(&job_id, &path)?;
-    if is_executable_type(&file) {
-        return Err(HostError::new("executableBlocked", path));
-    }
+    refuse_executable(&file, &path)?;
     tauri_plugin_opener::open_path(&file, None::<&str>)
         .map_err(|error| HostError::new("openFailed", error.to_string()))
 }

@@ -5,7 +5,7 @@ use std::path::Path;
 use tauri::AppHandle;
 use yisi_engine::protocol::{FS_CHECK, FsCheckParams, PartitionRef};
 
-use super::{Engines, HostError, Target, disk_path, resolve_source, to_params};
+use super::{Engines, HostError, Target, resolve_source, to_params};
 use crate::broker::BrokerSession;
 
 /// 问题清单最多这么大：1000 个问题、每个几行，远用不了这么多。
@@ -21,9 +21,7 @@ impl Engines {
         target: Target,
         partition: PartitionRef,
     ) -> Result<(), HostError> {
-        if let Target::Disk { disk_number } = &target {
-            disk_path(*disk_number)?;
-        }
+        target.validate()?;
         let params_job_id = job_id.clone();
         self.start_job(app, job_id, FS_CHECK, |engine_pid| {
             to_params(&FsCheckParams {

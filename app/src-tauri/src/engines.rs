@@ -15,6 +15,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter};
+use yisi_broker::protocol::physical_drive_path;
 use yisi_engine::protocol::{
     BROWSE_OPEN, BrowseOpened, BrowseParams, CANCEL, CANCEL_SCAN, CANCELLED, CAPABILITIES,
     CARVE_EXTRACT, CARVE_START, COMPLETED, COPIED, COPY_FILES, Capabilities, CarveParams,
@@ -49,7 +50,6 @@ const CANCEL_GRACE: Duration = Duration::from_secs(5);
 /// 镜像文件不记录扇区大小，按最常见的 512 字节处理。
 const IMAGE_SECTOR_SIZE: u32 = 512;
 /// 磁盘代理只接受 1 到 3 位数字的磁盘编号。
-const MAX_DISK_NUMBER: u32 = 999;
 /// Windows 的 `CREATE_NO_WINDOW`：引擎是控制台程序，不弹出控制台窗口。
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -82,6 +82,16 @@ pub enum Target {
     Disk {
         disk_number: u32,
     },
+}
+
+impl Target {
+    /// 物理磁盘的编号要在代理接受的范围内，免得启动引擎后才被代理拒绝。
+    fn validate(&self) -> Result<(), HostError> {
+        if let Self::Disk { disk_number } = self {
+            disk_path(*disk_number)?;
+        }
+        Ok(())
+    }
 }
 
 /// 发给界面的任务事件。`kind` 为 progress、found、copied、imaging、log、completed、failed、cancelled、unresponsive、responsive。
@@ -176,9 +186,7 @@ impl Engines {
         extensions: Vec<String>,
     ) -> Result<(), HostError> {
         // 磁盘编号不合法时不启动引擎
-        if let Target::Disk { disk_number } = &target {
-            disk_path(*disk_number)?;
-        }
+        target.validate()?;
         let params_job_id = job_id.clone();
         let source_target = target.clone();
         let started = self.start_job(app, job_id.clone(), CARVE_START, |engine_pid| {
@@ -321,9 +329,7 @@ impl Engines {
         broker: &BrokerSession,
         target: Target,
     ) -> Result<BootDiagnosis, HostError> {
-        if let Target::Disk { disk_number } = &target {
-            disk_path(*disk_number)?;
-        }
+        target.validate()?;
         let process = EngineProcess::spawn(None, || {})?;
         let result = resolve_source(target, broker, process.pid)
             .and_then(|source| to_params(&DiagnoseBootParams { source }))
@@ -342,9 +348,7 @@ impl Engines {
         target: Target,
         boot: BootCopy,
     ) -> Result<BrowseOpened, HostError> {
-        if let Target::Disk { disk_number } = &target {
-            disk_path(*disk_number)?;
-        }
+        target.validate()?;
         let params_job_id = job_id.clone();
         let opened =
             self.start_job_with(app, job_id, BROWSE_OPEN, BROWSE_TIMEOUT, |engine_pid| {
@@ -434,9 +438,7 @@ impl Engines {
         output_dir: Option<String>,
         boot: BootCopy,
     ) -> Result<(), HostError> {
-        if let Target::Disk { disk_number } = &target {
-            disk_path(*disk_number)?;
-        }
+        target.validate()?;
         validate_job_id(&job_id)?;
         let output_dir = match output_dir {
             Some(dir) => dir,
@@ -479,9 +481,7 @@ impl Engines {
         image_path: String,
         resume: bool,
     ) -> Result<(), HostError> {
-        if let Target::Disk { disk_number } = &target {
-            disk_path(*disk_number)?;
-        }
+        target.validate()?;
         let method = if resume { IMAGE_RESUME } else { IMAGE_CREATE };
         let params_job_id = job_id.clone();
         self.start_job(app, job_id, method, |engine_pid| {
@@ -848,12 +848,10 @@ fn resolve_source(
     }
 }
 
-/// 磁盘代理只接受 `\\.\PhysicalDriveN` 形式的路径。
+/// 磁盘代理只接受 `\\.\PhysicalDriveN` 形式的路径（规则在 `yisi_io`，代理用同一份核对）。
 fn disk_path(disk_number: u32) -> Result<String, HostError> {
-    if disk_number > MAX_DISK_NUMBER {
-        return Err(HostError::new("invalidDisk", disk_number.to_string()));
-    }
-    Ok(format!(r"\\.\PhysicalDrive{disk_number}"))
+    physical_drive_path(disk_number)
+        .ok_or_else(|| HostError::new("invalidDisk", disk_number.to_string()))
 }
 
 fn to_params(params: &impl Serialize) -> Result<Value, HostError> {
@@ -892,9 +890,19 @@ fn from_value<T: DeserializeOwned>(value: Value) -> Result<T, HostError> {
         .map_err(|error| HostError::new("engineProtocol", error.to_string()))
 }
 
+/// 可执行与脚本类文件不交给系统打开，答复 `executableBlocked`（`detail` 是界面传来的名字或路径）。
+/// 另存为时可以改名，改成可执行类型的同样不打开；深度恢复与复制出的文件共用。
+pub fn refuse_executable(path: &Path, detail: &str) -> Result<(), HostError> {
+    if is_executable_type(path) {
+        Err(HostError::new("executableBlocked", detail))
+    } else {
+        Ok(())
+    }
+}
+
 /// 双击就会被系统直接运行、或会改系统设置的文件类型。找回的文件来路不明，这些类型不交给系统打开，
 /// 只能「在文件夹中显示」。
-pub fn is_executable_type(path: &Path) -> bool {
+fn is_executable_type(path: &Path) -> bool {
     const EXECUTABLE: &[&str] = &[
         "exe",
         "com",
@@ -1073,7 +1081,7 @@ mod tests {
     #[test]
     fn disk_numbers_are_bounded() {
         assert_eq!(disk_path(7).unwrap(), r"\\.\PhysicalDrive7");
-        assert!(disk_path(MAX_DISK_NUMBER + 1).is_err());
+        assert_eq!(disk_path(1000).unwrap_err().code, "invalidDisk");
     }
 
     #[test]
