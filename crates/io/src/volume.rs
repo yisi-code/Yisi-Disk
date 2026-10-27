@@ -69,7 +69,7 @@ pub enum OnSource {
 
 /// `path` 所在的卷落在哪些物理磁盘上，编号与 `\\.\PhysicalDriveN` 的 N 相同；跨盘的卷会有多个。
 ///
-/// `path` 可以还不存在：取最近一级已存在的上级目录，打开它（随目录联接、符号链接走到真实位置），
+/// `path` 可以还不存在：取最近一级已存在的文件或目录，打开它（随目录联接、符号链接走到真实位置），
 /// 再查它所在卷的磁盘区段。还不存在的那几级目录之后才创建，不会改变所在的卷。
 /// 网络路径、查不到磁盘区段的卷都返回错误。
 pub fn volume_disk_numbers(path: impl AsRef<Path>) -> Result<Vec<u32>, IoError> {
@@ -78,15 +78,7 @@ pub fn volume_disk_numbers(path: impl AsRef<Path>) -> Result<Vec<u32>, IoError> 
         path: path.to_path_buf(),
         source,
     };
-    let existing = path
-        .ancestors()
-        .find(|ancestor| !ancestor.as_os_str().is_empty() && ancestor.exists())
-        .ok_or_else(|| {
-            locate(
-                path,
-                io::Error::new(io::ErrorKind::NotFound, "路径及其上级目录都不存在"),
-            )
-        })?;
+    let existing = nearest_existing(path, Existing::Any).map_err(|source| locate(path, source))?;
     let open = |path: &Path, flags: u32| {
         OpenOptions::new()
             .access_mode(0)
@@ -119,6 +111,28 @@ pub fn volume_disk_numbers(path: impl AsRef<Path>) -> Result<Vec<u32>, IoError> 
     .map_err(|source| locate(existing, source))?;
     parse_disk_extents(extents.get(..returned).unwrap_or_default())
         .map_err(|source| locate(existing, source))
+}
+
+/// 往上找最近一级已存在的路径时，停在哪一种上。
+#[derive(Clone, Copy)]
+pub(crate) enum Existing {
+    /// 文件或目录都行：打开它时会随符号链接走到真实位置。
+    Any,
+    /// 只停在目录上：剩余空间只能按目录查，给文件会报「目录名称无效」。
+    Directory,
+}
+
+/// `path` 本身或最近一级已存在的上级（`path` 可以还不存在）。查输出位置所在的卷时共用。
+pub(crate) fn nearest_existing(path: &Path, kind: Existing) -> io::Result<&Path> {
+    path.ancestors()
+        .find(|ancestor| {
+            !ancestor.as_os_str().is_empty()
+                && match kind {
+                    Existing::Any => ancestor.exists(),
+                    Existing::Directory => ancestor.is_dir(),
+                }
+        })
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "路径及其上级目录都不存在"))
 }
 
 /// 以卷的 GUID 路径表示的完整路径，例如 `\\?\Volume{…}\Users\me`，不含结尾的 0。
