@@ -266,7 +266,29 @@ function handleRowDoubleClick(row: TreeRow) {
   }
 }
 
+/** 上级文件夹已勾选：它会连同文件夹一起复制，勾选框显示为已勾选、不能单独取消 */
+function isCoveredByParent(id: string): boolean {
+  for (let end = id.lastIndexOf('/'); end > 0; end = id.lastIndexOf('/', end - 1)) {
+    if (checked.value.has(id.slice(0, end))) {
+      return true
+    }
+  }
+  return false
+}
+
+/** 上级已勾选的项点了不变：拦下浏览器自己的切换，勾选框保持已勾选 */
+function handleCheckClick(event: MouseEvent, row: EntryRow) {
+  if (isCoveredByParent(row.id)) {
+    event.preventDefault()
+    return
+  }
+  toggleChecked(row)
+}
+
 function toggleChecked(row: EntryRow) {
+  if (isCoveredByParent(row.id)) {
+    return
+  }
   const next = new Map(checked.value)
   if (next.has(row.id)) {
     next.delete(row.id)
@@ -443,9 +465,11 @@ function withShownName(entry: FsEntry): FsEntry {
               class="fs-browser__check"
               type="checkbox"
               tabindex="-1"
-              :checked="checked.has(row.id)"
+              :checked="checked.has(row.id) || isCoveredByParent(row.id)"
+              :aria-disabled="isCoveredByParent(row.id) || undefined"
+              :title="isCoveredByParent(row.id) ? t('undelete.browser.checkInherited') : undefined"
               :aria-label="t('undelete.browser.check', { name: row.entry.name })"
-              @click.stop="toggleChecked(row)"
+              @click.stop="handleCheckClick($event, row)"
             />
             <span class="fs-browser__chevron" aria-hidden="true">
               {{ row.entry.isDir ? (row.isExpanded ? '▾' : '▸') : '' }}
@@ -543,6 +567,12 @@ function withShownName(entry: FsEntry): FsEntry {
   flex: none;
   margin: 0;
   accent-color: var(--color-accent);
+}
+
+/* 随上级文件夹一起复制：仍是已勾选的样子，只是淡一些、点了不变 */
+.fs-browser__check[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .fs-browser__chevron {

@@ -343,7 +343,7 @@ const enUS: typeof zhCN = {
       formats: 'Formats',
       scan: 'Scan',
     },
-    previous: 'Back',
+    previous: 'Previous',
     next: 'Next',
     browseFolder: 'Choose folder…',
     source: {
@@ -586,6 +586,7 @@ const enUS: typeof zhCN = {
     browser: {
       title: 'Files in the partition',
       check: 'Select {name}',
+      checkInherited: 'Its folder is selected, so it is copied too; to leave it out, clear the folder first',
       nameUncertain: 'Incomplete name: the first letter was lost when it was deleted',
       orphans: 'Files without their folder',
       hint: 'Click a folder to expand or collapse it, click a file to see its details, double-click a file to open it with its default app. Arrow keys move, Space selects.',
@@ -645,7 +646,7 @@ const enUS: typeof zhCN = {
       executableRevealed: 'This is an executable or script file; for safety it was not opened but shown in its folder.',
     },
     copy: {
-      saveAs: 'Save as… ({count} items)',
+      saveAs: 'Save as… ({count})',
       pickTitle: 'Choose where to save (must be on a different disk; a new restored-… subfolder is created there)',
       fallbackTitle: 'A copy is needed before opening; choose where to save it (must be on a different disk)',
       preparing: 'Preparing the file…',
