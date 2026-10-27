@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import AboutPanel from './components/AboutPanel.vue'
 import BadSectorCheck from './components/BadSectorCheck.vue'
 import CarveWizard from './components/CarveWizard.vue'
+import DiskImage from './components/DiskImage.vue'
 import FeatureCatalog from './components/FeatureCatalog.vue'
 import ProblemGuide from './components/ProblemGuide.vue'
 import ProblemOverview from './components/ProblemOverview.vue'
@@ -144,6 +145,7 @@ function closeFeature() {
         <CarveWizard v-if="featureView === 'carve'" @exit="closeFeature" />
         <UndeleteWizard v-else-if="featureView === 'undelete'" @exit="closeFeature" />
         <BadSectorCheck v-else-if="featureView === 'badSectors'" @exit="closeFeature" />
+        <DiskImage v-else-if="featureView === 'image'" @exit="closeFeature" />
         <ProblemOverview
           v-else-if="page === 'overview'"
           :focus-request="focusRequest"

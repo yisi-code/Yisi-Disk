@@ -25,6 +25,7 @@
     "allow-job-start-copy",
     "allow-copied-open",
     "allow-copied-reveal",
+    "allow-job-start-image",
     "dialog:allow-open",
     "core:event:allow-listen",
     "core:event:allow-unlisten"

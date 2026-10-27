@@ -228,6 +228,39 @@ export interface ReadScanReport {
   elapsedMs: number
 }
 
+/** 制作镜像的读取轮次：复制、修边、细读 */
+export type ImagingRound = 'copy' | 'trim' | 'scrape'
+
+/** 制作镜像的进展；各项字节数取自坏区图，续做时包括以前读的 */
+export interface ImagingStatus {
+  round: ImagingRound
+  size: number
+  readBytes: number
+  badBytes: number
+  untriedBytes: number
+  trimBytes: number
+  scrapeBytes: number
+  /** 最近几秒的读速；刚开始时为 null */
+  bytesPerSecond: number | null
+}
+
+/** 制作镜像的结果 */
+export interface ImageSummary {
+  imagePath: string
+  mapPath: string
+  size: number
+  readBytes: number
+  badBytes: number
+  /** 还没读完的字节数；只在源设备读不到时不为 0 */
+  unfinishedBytes: number
+  /** 读不出的区段，相邻的已合并；最多 1000 段 */
+  badRanges: ByteRange[]
+  badRangesTruncated: boolean
+  /** 源设备读不到了（多半是断开），在这个偏移处停下；检查连接后可以续做 */
+  sourceLostAt: number | null
+  elapsedMs: number
+}
+
 /** 宿主转发的任务事件；`completed` 的结果随任务种类而定（读取扫描为 ReadScanReport，深度恢复为 CarveSummary） */
 export type JobEvent<TResult = unknown> =
   | {
@@ -238,6 +271,7 @@ export type JobEvent<TResult = unknown> =
     }
   | { jobId: string; kind: 'found'; data: { files: FoundFile[] } }
   | { jobId: string; kind: 'copied'; data: { files: CopiedFile[] } }
+  | { jobId: string; kind: 'imaging'; data: ImagingStatus }
   | { jobId: string; kind: 'log'; data: { level: string; message: string } }
   | { jobId: string; kind: 'completed'; data: { result: TResult } }
   | {
@@ -400,6 +434,19 @@ export function openCopiedFile(jobId: string, path: string): Promise<void> {
 
 export function revealCopiedFile(jobId: string, path: string): Promise<void> {
   return invoke<void>('copied_reveal', { jobId, path })
+}
+
+/**
+ * 制作能识别坏区的镜像（resume 时按同一路径的坏区图续做）。新建时镜像或坏区图已存在返回 imageExists，
+ * 续做时坏区图不是这个源做的返回 imageMismatch；物理磁盘的镜像在同一块盘上时返回 outputOnSource
+ */
+export function startImage(
+  jobId: string,
+  target: JobTarget,
+  imagePath: string,
+  resume: boolean,
+): Promise<void> {
+  return invoke<void>('job_start_image', { jobId, target, imagePath, resume })
 }
 
 /** 调用方按自己发起的任务种类给出 TResult：宿主不在事件里标注结果的类型 */

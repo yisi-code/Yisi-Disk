@@ -10,11 +10,13 @@ use serde_json::{Value, json};
 use yisi_engine::protocol::{
     BROWSE_OPEN, BrowseOpened, CANCEL, CANCEL_SCAN, CANCELLED, CAPABILITIES, CARVE_EXTRACT,
     CARVE_START, COMPLETED, COPIED, COPY_FILES, CarveSummary, CopiedFile, CopySummary, FOUND,
-    FileListPage, FilePreview, FoundFile, HEARTBEAT, LIST_FILE_TYPES, LIST_FILES, PREVIEW_FILE,
+    FileListPage, FilePreview, FoundFile, HEARTBEAT, IMAGE_CREATE, IMAGE_RESUME, IMAGING,
+    ImageStarted, ImageSummary, JobImaging, LIST_FILE_TYPES, LIST_FILES, PREVIEW_FILE,
     PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS, READ_SCAN, ReadScanReport, SCAN_DELETED, ScanResult,
     error_code,
 };
 use yisi_formats::samples;
+use yisi_io::{BadMap, SegmentState};
 use yisi_rpc::{Id, Message, Request, error_code as rpc_error, read_message, write_message};
 
 const TIMEOUT: Duration = Duration::from_secs(20);
@@ -872,4 +874,181 @@ fn ntfs_partition_is_scanned_listed_and_copied() {
         gone
     );
     assert!(copier.wait_exit().success());
+}
+
+/// 内容确定、不重复的源镜像。
+fn make_source(path: &Path, len: usize) -> Vec<u8> {
+    let data: Vec<u8> = (0..len)
+        .map(|i| ((i as u32).wrapping_mul(2_654_435_761) >> 24) as u8)
+        .collect();
+    std::fs::write(path, &data).unwrap();
+    data
+}
+
+fn image_summary(notifications: &[(String, Value)]) -> ImageSummary {
+    let (method, params) = notifications.last().unwrap();
+    assert_eq!(method, COMPLETED);
+    serde_json::from_value(params["result"].clone()).unwrap()
+}
+
+#[test]
+fn image_create_copies_the_source_and_guards_existing_files() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-image");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let source_path = dir.join("source.img");
+    let size = 3 * 1024 * 1024 + 1000;
+    let data = make_source(&source_path, size);
+    let source = json!({"type": "image", "path": source_path, "sectorSize": 512});
+    // 上级目录还不存在：核对过源之后才建
+    let image_path = dir.join("out").join("copy.img");
+    let map_path = dir.join("out").join("copy.img.map");
+
+    let mut engine = Engine::start();
+    let started: ImageStarted = serde_json::from_value(
+        engine
+            .call(
+                IMAGE_CREATE,
+                json!({"jobId": "image-1", "source": source, "imagePath": image_path}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(started.image_path, image_path.display().to_string());
+    assert_eq!(started.map_path, map_path.display().to_string());
+    let notifications = engine.notifications_until(COMPLETED);
+    let imaging: Vec<JobImaging> = notifications
+        .iter()
+        .filter(|(method, _)| method == IMAGING)
+        .map(|(_, params)| serde_json::from_value(params.clone()).unwrap())
+        .collect();
+    let last = imaging.last().unwrap();
+    assert_eq!(
+        (last.read_bytes, last.bad_bytes, last.untried_bytes),
+        (size as u64, 0, 0)
+    );
+    let (_, progress) = notifications
+        .iter()
+        .rev()
+        .find(|(method, _)| method == PROGRESS)
+        .unwrap();
+    assert_eq!(progress["stage"], "copy");
+    assert_eq!(progress["done"], size as u64);
+    let summary = image_summary(&notifications);
+    assert_eq!(
+        (
+            summary.size,
+            summary.read_bytes,
+            summary.bad_bytes,
+            summary.unfinished_bytes
+        ),
+        (size as u64, size as u64, 0, 0)
+    );
+    assert!(summary.bad_ranges.is_empty());
+    assert_eq!(summary.source_lost_at, None);
+    assert!(engine.wait_exit().success());
+    assert_eq!(std::fs::read(&image_path).unwrap(), data);
+    let map = BadMap::parse(&std::fs::read_to_string(&map_path).unwrap()).unwrap();
+    assert_eq!(map.bytes(SegmentState::Done), size as u64);
+    assert_eq!(map.segments().len(), 1);
+
+    // 已经有镜像：新建被拒绝，续做立即完成、不再读
+    let mut again = Engine::start();
+    let exists = again
+        .call(
+            IMAGE_CREATE,
+            json!({"jobId": "image-2", "source": source, "imagePath": image_path}),
+        )
+        .unwrap_err();
+    assert_eq!(exists.code, error_code::IMAGE_EXISTS);
+    again
+        .call(
+            IMAGE_RESUME,
+            json!({"jobId": "image-3", "source": source, "imagePath": image_path}),
+        )
+        .unwrap();
+    let resumed = image_summary(&again.notifications_until(COMPLETED));
+    assert_eq!(resumed.read_bytes, size as u64);
+    assert!(again.wait_exit().success());
+
+    // 换了一个源：坏区图记录的来源与容量对不上
+    let other_path = dir.join("other.img");
+    make_source(&other_path, 4096);
+    let mut other = Engine::start();
+    let mismatch = other
+        .call(
+            IMAGE_RESUME,
+            json!({"jobId": "image-4", "source": {"type": "image", "path": other_path, "sectorSize": 512}, "imagePath": image_path}),
+        )
+        .unwrap_err();
+    assert_eq!(mismatch.code, error_code::IMAGE_MISMATCH);
+
+    // 镜像不能写到来源文件上，也不接受相对路径
+    let onto_source = other
+        .call(
+            IMAGE_CREATE,
+            json!({"jobId": "image-5", "source": source, "imagePath": source_path}),
+        )
+        .unwrap_err();
+    assert_eq!(onto_source.code, rpc_error::INVALID_PARAMS);
+    let relative = other
+        .call(
+            IMAGE_CREATE,
+            json!({"jobId": "image-6", "source": source, "imagePath": "copy.img"}),
+        )
+        .unwrap_err();
+    assert_eq!(relative.code, rpc_error::INVALID_PARAMS);
+    assert_eq!(std::fs::read(&source_path).unwrap(), data, "来源没有被改动");
+    other.close_input();
+    assert!(other.wait_exit().success());
+}
+
+#[test]
+fn image_stopped_midway_resumes_to_identical_bytes() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-image-resume");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let source_path = dir.join("source.img");
+    let size = 128 * 1024 * 1024 + 512;
+    let data = make_source(&source_path, size);
+    let source = json!({"type": "image", "path": source_path, "sectorSize": 512});
+    let image_path = dir.join("copy.img");
+
+    let mut engine = Engine::start();
+    engine
+        .call(
+            IMAGE_CREATE,
+            json!({"jobId": "stop-1", "source": source, "imagePath": image_path}),
+        )
+        .unwrap();
+    // 接下任务后马上停：128 MiB 读不完
+    engine.call(CANCEL, json!({"jobId": "stop-1"})).unwrap();
+    let notifications = engine.notifications_until(CANCELLED);
+    assert!(engine.wait_exit().success());
+    let map = BadMap::parse(&std::fs::read_to_string(dir.join("copy.img.map")).unwrap()).unwrap();
+    let untried = map.bytes(SegmentState::Untried);
+    assert!(untried > 0, "停下时应还有没读的部分");
+    assert!(
+        notifications.iter().all(|(method, _)| method != COMPLETED),
+        "已停下，不应完成"
+    );
+
+    let mut resumer = Engine::start();
+    resumer
+        .call(
+            IMAGE_RESUME,
+            json!({"jobId": "stop-2", "source": source, "imagePath": image_path}),
+        )
+        .unwrap();
+    let summary = image_summary(&resumer.notifications_until(COMPLETED));
+    assert_eq!(
+        (summary.read_bytes, summary.unfinished_bytes),
+        (size as u64, 0)
+    );
+    assert!(resumer.wait_exit().success());
+    assert!(
+        std::fs::read(&image_path).unwrap() == data,
+        "续做后的镜像应与源逐字节一致"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

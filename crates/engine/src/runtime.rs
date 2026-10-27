@@ -13,9 +13,10 @@ use yisi_carve::{DirectorySink, ScanOnlySink, Sink};
 use yisi_engine::protocol::{
     self, BROWSE_OPEN, BrowseParams, CANCEL, CANCEL_SCAN, CAPABILITIES, CARVE_EXTRACT, CARVE_START,
     COPY_FILES, Capabilities, CarveParams, CarveStarted, CopyParams, CopyStarted, ExtractParams,
-    HEARTBEAT, HEARTBEAT_INTERVAL, JobRef, LIST_DISKS, LIST_FILE_TYPES, LIST_FILES,
-    ListFilesParams, PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PreviewFsParams, PreviewParams,
-    PreviewRangeParams, READ_SCAN, ReadScanParams, SCAN_DELETED, ScanParams, Source,
+    HEARTBEAT, HEARTBEAT_INTERVAL, IMAGE_CREATE, IMAGE_RESUME, ImageParams, JobRef, LIST_DISKS,
+    LIST_FILE_TYPES, LIST_FILES, ListFilesParams, PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE,
+    PreviewFsParams, PreviewParams, PreviewRangeParams, READ_SCAN, ReadScanParams, SCAN_DELETED,
+    ScanParams, Source,
 };
 #[cfg(windows)]
 use yisi_engine::protocol::{DiskList, DiskSummary};
@@ -29,7 +30,7 @@ use yisi_rpc::{
 use crate::browse::{self, Session};
 use crate::copy_job::{self, Planned};
 use crate::job::{self, JobOutcome, ProgressSender, RunningJob};
-use crate::{carve_job, extract_job, preview, read_scan};
+use crate::{carve_job, extract_job, image_job, preview, read_scan};
 
 /// 浏览任务每隔这么久看一次有没有被取消。
 const BROWSE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
@@ -187,6 +188,8 @@ fn dispatch_now(
                 SCAN_DELETED.to_owned(),
                 CANCEL_SCAN.to_owned(),
                 COPY_FILES.to_owned(),
+                IMAGE_CREATE.to_owned(),
+                IMAGE_RESUME.to_owned(),
             ];
             if cfg!(windows) {
                 methods.push(LIST_DISKS.to_owned());
@@ -382,6 +385,44 @@ fn dispatch_now(
             ));
             to_result(&started)
         }
+        IMAGE_CREATE | IMAGE_RESUME => {
+            if state.job.is_some() {
+                return Err(ErrorObject::new(
+                    protocol::error_code::JOB_ALREADY_RUNNING,
+                    "每个引擎进程只运行一个任务",
+                ));
+            }
+            let params: ImageParams = request.params()?;
+            let image_path = Path::new(&params.image_path);
+            if !image_path.is_absolute() || image_path.file_name().is_none() {
+                return Err(ErrorObject::new(
+                    error_code::INVALID_PARAMS,
+                    format!("镜像应为含文件名的完整路径：{}", params.image_path),
+                ));
+            }
+            let (device, identity) = open_image_source(&params.source, image_path)?;
+            // 确认镜像不在源盘上之后，才创建还不存在的上级目录
+            if let Some(parent) = image_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| output_unavailable(parent, &error))?;
+            }
+            let prepared = if request.method == IMAGE_CREATE {
+                image_job::create(device, image_path, identity)?
+            } else {
+                image_job::resume(device, image_path, identity)?
+            };
+            let started = prepared.started();
+            let finished = events.clone();
+            state.job = Some(job::start(
+                params.job_id,
+                Arc::clone(outbox),
+                move |context| image_job::run(prepared, context),
+                move || {
+                    let _ = finished.send(Event::JobFinished);
+                },
+            ));
+            to_result(&started)
+        }
         PREVIEW_FILE => {
             let PreviewParams { path } = request.params()?;
             let preview = preview::preview(Path::new(&path)).map_err(|error| {
@@ -454,6 +495,63 @@ fn open_source_for_output(
         // 其他平台还打不开物理盘，open_source 直接拒绝，走不到写输出那一步
         _ => open_source(source),
     }
+}
+
+/// 打开要做镜像的源，给出它的标识（续做时据此确认是同一个源）。物理盘先确认镜像不在这块盘上；
+/// 镜像文件不能把自己或自己的坏区图当作输出。
+fn open_image_source(
+    source: &Source,
+    image_path: &Path,
+) -> Result<(Box<dyn BlockDevice>, String), ErrorObject> {
+    match source {
+        Source::Image { path, .. } => {
+            let device = open_source(source)?;
+            let real_source = std::fs::canonicalize(path).map_err(|error| {
+                ErrorObject::new(
+                    protocol::error_code::SOURCE_UNAVAILABLE,
+                    format!("无法确认镜像文件 {path} 的位置：{error}"),
+                )
+            })?;
+            let outputs = [image_path.to_path_buf(), image_job::map_path(image_path)];
+            if outputs
+                .iter()
+                .any(|output| std::fs::canonicalize(output).is_ok_and(|real| real == real_source))
+            {
+                return Err(ErrorObject::new(
+                    error_code::INVALID_PARAMS,
+                    format!("镜像不能写到来源文件 {path} 上"),
+                ));
+            }
+            Ok((device, format!("image {}", real_source.display())))
+        }
+        #[cfg(windows)]
+        Source::Disk { handle } => {
+            let disk = adopt_disk(*handle)?;
+            ensure_output_elsewhere(
+                disk.device_number(),
+                yisi_io::volume_disk_numbers(image_path),
+            )?;
+            let identity = disk_identity(&disk);
+            Ok((Box::new(disk), identity))
+        }
+        #[cfg(not(windows))]
+        Source::Disk { .. } => open_source(source).map(|device| (device, "disk".to_owned())),
+    }
+}
+
+/// 物理盘的标识：厂商、型号、序列号。磁盘编号不算在内，同一块盘重新插拔后编号可能变。
+#[cfg(windows)]
+fn disk_identity(disk: &yisi_io::WindowsDisk) -> String {
+    let info = disk.device_number().ok().and_then(|number| {
+        yisi_io::list_disks()
+            .into_iter()
+            .find(|info| info.number == number)
+    });
+    let words = match &info {
+        Some(info) => format!("disk {} {} {}", info.vendor, info.model, info.serial),
+        None => "disk".to_owned(),
+    };
+    words.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// 输出目录建不起来时的答复。

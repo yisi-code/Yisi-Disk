@@ -160,7 +160,7 @@ const enUS: typeof zhCN = {
   about: {
     title: 'About Yisi-Disk',
     intro:
-      'Yisi-Disk is a disk data recovery tool: recover deleted files, deep recovery by file type, and bad sector checks. Scanning and browsing are read-only, and recovered files are always saved to another disk.',
+      'Yisi-Disk is a disk data recovery tool: recover deleted files, deep recovery by file type, bad sector checks, and bad-sector-aware disk images. Scanning, browsing and imaging only read the source disk, and recovered files and images are always saved to another disk.',
     version: 'Version',
     engine: 'Recovery engine',
     checking: 'Checking…',
@@ -217,7 +217,95 @@ const enUS: typeof zhCN = {
       nextClean:
         'Next: if the disk is still slow or reports errors, copy important files off it soon; to recover deleted files, pick the matching problem in the navigation.',
       nextFound:
-        'Next: if the data matters, image the disk first and recover from the image (disk imaging is still in development). Until then, use the disk as little as possible; if you must recover now, "Recover deleted files" or "Deep recovery by file type" can read it directly, and save recovered files only to another disk.',
+        'Next: if the data matters, use "Create a disk image" first and recover from the image, reading this disk directly as little as possible. If you must recover now, "Recover deleted files" or "Deep recovery by file type" can also read it directly; save recovered files only to another disk.',
+    },
+  },
+  diskImage: {
+    intro:
+      'Copies a whole disk or image file byte for byte into an image file; the source is only read, never changed. Healthy areas are read first and bad areas are revisited bit by bit at the end; unreadable areas are recorded in a bad sector map. Recover from the image afterwards instead of reading the failing disk again and again.',
+    guide: {
+      title: 'How it works',
+      copy: 'Copy: reads in 1 MiB blocks from start to end. When an area cannot be read, a stretch is skipped (the skip doubles on consecutive errors) so the healthy areas are read first; the skipped parts are then read back from the other end.',
+      trimScrape:
+        'Trim and scrape: goes back to the blocks that failed, reads sector by sector inwards from both edges, then reads what is left in the middle one sector at a time to rescue as much as possible. Sectors that still cannot be read are marked bad.',
+      map: 'Bad sector map: a text file with the image name plus .map that records which ranges were read and which could not be. Unreadable areas are zeros in the image, not real data.',
+      resume:
+        'You can stop at any time; progress is saved to the map every few seconds. Later, "Continue" with the same image path skips everything already read. If the disk disconnects midway, imaging stops on its own instead of marking the rest as bad.',
+      space:
+        'Save the image to another disk with free space of at least the source size (reserved up front); FAT32 disks cannot hold files larger than 4 GiB.',
+    },
+    diskHint:
+      'Reading a physical disk needs administrator rights. It is read-only and does not change the disk; a disk with bad sectors reads slowly, and you can stop and continue later.',
+    source: {
+      title: '① Disk to copy (source)',
+      hint: 'Choose the disk to image, usually the failing "Physical disk". It is only read, never changed.',
+      imageHint: 'Enter an existing image file here to make another copy of it. To image a disk, choose "Physical disk" above.',
+    },
+    output: {
+      title: '② Where to save the image',
+      label: 'Save image as',
+      placeholder: 'Full path of the new image file, e.g. F:/images/disk1.img',
+      browse: 'Choose folder…',
+      pickTitle: 'Choose a folder for the image',
+      hint: 'A new image file the same size as the source is created here, with a bad sector map next to it (same name plus .map) recording which areas could not be read. "Choose folder…" fills in a file name for you; you can also edit the path. If an image already exists here, you can choose to continue it.',
+      diskHint: 'The image must be saved on another disk: writing to the disk being read would overwrite data not yet rescued. This is checked again when imaging starts.',
+    },
+    start: 'Start imaging',
+    stop: 'Stop (can continue later)',
+    stopping: 'Stopping…',
+    continue: 'Continue imaging',
+    continueHint: 'Progress is saved in the bad sector map; "Continue imaging" picks up where it stopped (if the source disconnected, check the connection first): {path}',
+    exists: 'An image or bad sector map already exists here. If it is an unfinished image of the same source, you can continue it; otherwise choose another file name.',
+    resumeExisting: 'Continue the existing image',
+    unresponsive: 'The engine has not responded for over 10 seconds (a single read can take that long on bad areas)',
+    round: {
+      copy: 'Pass 1 · Copy',
+      trim: 'Pass 2 · Trim',
+      scrape: 'Pass 3 · Scrape',
+    },
+    status: {
+      starting: 'Starting the engine…',
+      startingDisk: 'Requesting administrator rights and opening the disk…',
+      preparing: 'Preparing the image file…',
+      running: '{round}, {percent}% done',
+      stopping: 'Stopping and saving the bad sector map…',
+      stopped: 'Stopped; progress is saved in the bad sector map',
+      sourceLost: 'The source can no longer be read (it may have disconnected), so imaging stopped; unread areas were not marked bad',
+      completed: 'Image complete',
+      failed: 'Imaging failed',
+    },
+    run: {
+      round: 'Current pass',
+      read: 'Read',
+      bad: 'Unreadable',
+      pending: 'Not finished',
+      pendingValue: '{untried} unread, {trim} to trim, {scrape} to scrape',
+      rate: 'Read speed',
+      rateValue: '{rate}/s',
+      rateUnknown: 'Measuring…',
+      remaining: 'Copy pass time left',
+      remainingUnderMinute: 'Less than a minute',
+      remainingMinutes: 'About {minutes} min',
+      remainingHours: 'About {hours} h {minutes} min',
+    },
+    result: {
+      clean: 'Image complete with no unreadable areas',
+      found: 'Image complete; {bytes} could not be read',
+      read: 'Read',
+      bad: 'Unreadable ranges',
+      badValue: '{count} ranges, {bytes} in total',
+      elapsed: 'Time this run',
+      elapsedValue: '{seconds} s',
+      imagePath: 'Image file',
+      mapPath: 'Bad sector map',
+      rangesCaption: 'Unreadable areas',
+      start: 'Start',
+      length: 'Length',
+      positionValue: '{position} (offset {offset} bytes)',
+      moreRanges: 'Showing the first {shown} of {count} ranges; the bad sector map lists all of them.',
+      truncated: 'Too many unreadable ranges: only the first {count} are shown here; the bad sector map lists all of them.',
+      next: 'Next: in "Recover deleted files" or "Deep recovery by file type", choose "Image file" and enter {path} to recover from the image.',
+      nextBad: 'Unreadable areas are zeros in the image, so files lying in them will be incomplete.',
     },
   },
   disk: {
@@ -369,7 +457,7 @@ const enUS: typeof zhCN = {
     legend: 'Read from',
     image: 'Image file',
     disk: 'Physical disk',
-    imagePath: 'Path',
+    imagePath: 'Image file path',
     imagePathPlaceholder: 'Full path of the image file, e.g. D:/images/disk.img',
     pickTitle: 'Choose an image file',
     browse: 'Choose file…',
@@ -604,6 +692,8 @@ const enUS: typeof zhCN = {
     invalidCopiedPath: 'The path is not a file reported by the copy',
     copiedNotFound: 'This copied file cannot be found',
     executableBlocked: 'Executable and script files are not opened directly',
+    imageExists: 'An image or bad sector map already exists at this location',
+    imageMismatch: 'The existing bad sector map belongs to another source or is damaged, so it cannot be continued',
   },
 }
 

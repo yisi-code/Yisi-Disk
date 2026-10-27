@@ -5,8 +5,8 @@ import DiskPicker from './DiskPicker.vue'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { pickFile, toHostError, type HostError, type JobTarget } from '../services/host'
 
-/** 选磁盘时显示在磁盘列表下方的提示，各向导自己给 */
-defineProps<{ diskHint: string }>()
+/** 选磁盘时显示在磁盘列表下方的提示，各向导自己给；imageHint 是选镜像文件时显示在路径下方的说明，可以不给 */
+defineProps<{ diskHint: string; imageHint?: string }>()
 const sourceKind = defineModel<JobTarget['kind']>('kind', { required: true })
 const imagePath = defineModel<string>('imagePath', { required: true })
 const selectedDisk = defineModel<number | null>('disk', { required: true })
@@ -59,7 +59,8 @@ async function browseImage() {
         {{ t('source.browse') }}
       </button>
     </div>
-    <template v-else>
+    <p v-if="sourceKind === 'image' && imageHint" class="source-picker__hint">{{ imageHint }}</p>
+    <template v-else-if="sourceKind === 'disk'">
       <DiskPicker v-model="selectedDisk" :disabled="false" />
       <p class="source-picker__hint">{{ diskHint }}</p>
     </template>
