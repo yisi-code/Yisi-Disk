@@ -1,9 +1,15 @@
 /** 首页按问题导航：有哪些功能、哪些问题、每个问题按什么顺序推荐哪些功能。文案在 features.* 与 problems.* 下 */
 
 /** 能进入的功能页；没有对应页面的功能还在开发中 */
-export type FeatureView = 'undelete' | 'carve' | 'badSectors' | 'image' | 'repairPartition'
+export type FeatureView =
+  | 'undelete'
+  | 'carve'
+  | 'badSectors'
+  | 'image'
+  | 'repairPartition'
+  | 'fsCheck'
 
-export type FeatureKey = FeatureView | 'findPartitions' | 'fsCheck'
+export type FeatureKey = FeatureView | 'findPartitions'
 
 /** 每个功能进入哪个功能页；null 表示还在开发中 */
 export const FEATURE_VIEWS: Record<FeatureKey, FeatureView | null> = {
@@ -13,7 +19,7 @@ export const FEATURE_VIEWS: Record<FeatureKey, FeatureView | null> = {
   image: 'image',
   findPartitions: null,
   repairPartition: 'repairPartition',
-  fsCheck: null,
+  fsCheck: 'fsCheck',
 }
 
 /** 「全部功能」页的顺序：能用的在前 */
@@ -23,8 +29,8 @@ export const ALL_FEATURES: FeatureKey[] = [
   'badSectors',
   'image',
   'repairPartition',
-  'findPartitions',
   'fsCheck',
+  'findPartitions',
 ]
 
 export type ProblemKey = 'deleted' | 'unopenable' | 'lostPartition' | 'failingDisk'

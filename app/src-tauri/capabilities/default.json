@@ -30,6 +30,8 @@
     "allow-copied-reveal",
     "allow-job-start-image",
     "allow-boot-diagnose",
+    "allow-job-start-fs-check",
+    "allow-fs-check-save-report",
     "dialog:allow-open",
     "dialog:allow-save",
     "core:event:allow-listen",

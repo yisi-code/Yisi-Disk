@@ -329,12 +329,57 @@ export interface ImageSummary {
   elapsedMs: number
 }
 
+/** 检查出的问题有多严重：会丢数据、结构错误、可以忽略 */
+export type FsIssueSeverity = 'dataLoss' | 'structure' | 'minor'
+
+/** 文件系统检查发现的一个问题；界面按 kind 给出说明与以后的修法，没用到的位置信息为 null */
+export interface FsIssue {
+  kind: string
+  severity: FsIssueSeverity
+  /** 问题出在哪个结构上（boot、fat、bitmap 等），按 fsCheck.areas.* 显示 */
+  area: string | null
+  /** 涉及的文件或目录，以 / 开头；$Bitmap、$UpCase 是 exFAT 的分配位图与大写表 */
+  path: string | null
+  /** 交叉链接的另一个文件 */
+  otherPath: string | null
+  cluster: number | null
+  count: number | null
+  /** 在源上的字节偏移（读不出的区段） */
+  offset: number | null
+  expected: number | null
+  actual: number | null
+  /** 引导扇区里出问题的那一项，如 bytesPerSector */
+  field: string | null
+}
+
+/** 文件系统检查的结果 */
+export interface FsCheckReport {
+  /** fat12、fat16、fat32、exfat、ntfs、unknown */
+  filesystem: string
+  clusterSize: number
+  clusterCount: number
+  usedClusters: number
+  files: number
+  directories: number
+  /** 按发现的顺序，最多 1000 项 */
+  issues: FsIssue[]
+  /** 没有列出的问题数 */
+  omittedIssues: number
+  /** 各严重程度的问题数，含没有列出的 */
+  totals: Record<FsIssueSeverity, number>
+  unreadableBytes: number
+  /** 做了的与没能做的检查，按 fsCheck.checks.* 显示 */
+  checked: string[]
+  skipped: string[]
+  elapsedMs: number
+}
+
 /** 宿主转发的任务事件；`completed` 的结果随任务种类而定（读取扫描为 ReadScanReport，深度恢复为 CarveSummary） */
 export type JobEvent<TResult = unknown> =
   | {
       jobId: string
       kind: 'progress'
-      /** stage：任务里的哪个阶段，只有一个阶段的任务不给；目前只有 scanMft（扫描 MFT） */
+      /** stage：任务里的哪个阶段，只有一个阶段的任务不给；浏览与复制是 scanMft，文件系统检查见 FsCheckReport */
       data: { done: number; total: number; stage?: string }
     }
   | { jobId: string; kind: 'found'; data: { files: FoundFile[] } }
@@ -432,7 +477,7 @@ export function cancelJob(jobId: string): Promise<void> {
   return invoke<void>('job_cancel', { jobId })
 }
 
-/** 暂停或继续任务；目前只有深度恢复的扫描可以暂停 */
+/** 暂停或继续任务；目前只有深度恢复的扫描与文件系统检查可以暂停 */
 export function setJobPaused(jobId: string, paused: boolean): Promise<void> {
   return invoke<void>('job_set_paused', { jobId, paused })
 }
@@ -547,6 +592,22 @@ export function startImage(
   resume: boolean,
 ): Promise<void> {
   return invoke<void>('job_start_image', { jobId, target, imagePath, resume })
+}
+
+/**
+ * 检查分区的文件系统（任务，只读）：结果是 FsCheckReport，进度按阶段（boot、fat、directories、clusters、mft）送达。
+ * 分区与源上的分区表对不上时返回 fsUnavailable；物理磁盘与扫描一样可能先等提权
+ */
+export function startFsCheck(jobId: string, target: JobTarget, partition: PartitionRef): Promise<void> {
+  return invoke<void>('job_start_fs_check', { jobId, target, partition })
+}
+
+/**
+ * 把问题清单（界面按当前语言生成的文本）存到另存为对话框选的 .txt 文件。
+ * 检查的是物理磁盘时，存到这块盘上会返回 outputOnSource
+ */
+export function saveFsCheckReport(target: JobTarget, path: string, text: string): Promise<void> {
+  return invoke<void>('fs_check_save_report', { target, path, text })
 }
 
 /** 调用方按自己发起的任务种类给出 TResult：宿主不在事件里标注结果的类型 */

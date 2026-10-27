@@ -10,10 +10,10 @@ use serde_json::{Value, json};
 use yisi_engine::protocol::{
     BROWSE_OPEN, BrowseOpened, CANCEL, CANCEL_SCAN, CANCELLED, CAPABILITIES, CARVE_EXTRACT,
     CARVE_START, COMPLETED, COPIED, COPY_FILES, CarveSummary, CopiedFile, CopySummary, FOUND,
-    FileListPage, FilePreview, FoundFile, HEARTBEAT, IMAGE_CREATE, IMAGE_RESUME, IMAGING,
-    ImageStarted, ImageSummary, JobImaging, LIST_FILE_TYPES, LIST_FILES, PAUSE, PREVIEW_FILE,
-    PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS, READ_SCAN, RESUME, ReadScanReport, SCAN_DELETED,
-    ScanResult, error_code,
+    FS_CHECK, FileListPage, FilePreview, FoundFile, FsCheckReport, HEARTBEAT, IMAGE_CREATE,
+    IMAGE_RESUME, IMAGING, ImageStarted, ImageSummary, JobImaging, LIST_FILE_TYPES, LIST_FILES,
+    PAUSE, PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS, READ_SCAN, RESUME,
+    ReadScanReport, SCAN_DELETED, ScanResult, error_code,
 };
 use yisi_formats::samples;
 use yisi_io::{BadMap, SegmentState};
@@ -1379,4 +1379,212 @@ fn boot_sectors_are_diagnosed_and_backups_browsed_and_copied() {
         content
     );
     assert!(copier.wait_exit().success());
+}
+
+/// 一块 MBR 盘：1 号分区是干净的 FAT16，2 号分区是改坏了的 exFAT（一个没人用的簇在位图里是已分配、卷标记为未正常卸下）。
+fn fs_check_image(dir: &Path) -> (String, Vec<(u32, u64, u64)>) {
+    use yisi_fs::samples::{ExfatImage, FatImage, FatType, Layout, pattern};
+    use yisi_part::samples::{MbrEntry, mbr_disk};
+
+    let mut fat = FatImage::new(FatType::Fat16);
+    let root = fat.root();
+    let docs = fat.mkdir(root, "Documents").as_dir();
+    fat.add_file(
+        docs,
+        "report final.docx",
+        &pattern(1, 5000),
+        Layout::Fragmented,
+    );
+    let fat = fat.finish();
+
+    let mut exfat = ExfatImage::new();
+    let root = exfat.root();
+    exfat.add_file(root, "notes.txt", &pattern(2, 9000), Layout::Contiguous);
+    let mut exfat = exfat.finish();
+    let heap = u32::from_le_bytes(exfat[88..92].try_into().unwrap()) as usize * 512;
+    let lost = 1500usize;
+    exfat[heap + (lost - 2) / 8] |= 1 << ((lost - 2) % 8);
+    exfat[106] |= 0x02;
+
+    let fat_start = 2048u32;
+    let exfat_start = fat_start + (fat.len() / 512) as u32;
+    let mut image = mbr_disk(
+        exfat_start as usize * 512 + exfat.len(),
+        &[
+            MbrEntry::new(0x06, fat_start, (fat.len() / 512) as u32),
+            MbrEntry::new(0x07, exfat_start, (exfat.len() / 512) as u32),
+        ],
+    );
+    image[fat_start as usize * 512..][..fat.len()].copy_from_slice(&fat);
+    image[exfat_start as usize * 512..][..exfat.len()].copy_from_slice(&exfat);
+    let path = dir.join("fs-check.img");
+    std::fs::write(&path, &image).unwrap();
+    let partitions = vec![
+        (1, u64::from(fat_start) * 512, fat.len() as u64),
+        (2, u64::from(exfat_start) * 512, exfat.len() as u64),
+    ];
+    (path.to_string_lossy().into_owned(), partitions)
+}
+
+fn fs_check_report(notifications: &[(String, Value)]) -> FsCheckReport {
+    let (method, params) = notifications.last().unwrap();
+    assert_eq!(method, COMPLETED, "{notifications:?}");
+    serde_json::from_value(params["result"].clone()).unwrap()
+}
+
+#[test]
+fn fs_check_reports_problems_by_stage() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-fs-check");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (image, partitions) = fs_check_image(&dir);
+    let source = json!({"type": "image", "path": image, "sectorSize": 512});
+
+    let mut engine = Engine::start();
+    let capabilities = engine.call(CAPABILITIES, Value::Null).unwrap();
+    assert!(
+        capabilities["methods"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::from(FS_CHECK))
+    );
+    // 分区的位置与分区表对不上：拒绝，不开始检查
+    let (number, offset, length) = partitions[0];
+    let moved = engine
+        .call(
+            FS_CHECK,
+            json!({"jobId": "c0", "source": source,
+                   "partition": {"number": number, "offset": offset + 512, "length": length}}),
+        )
+        .unwrap_err();
+    assert_eq!(moved.code, error_code::FS_UNAVAILABLE);
+    engine
+        .call(
+            FS_CHECK,
+            json!({"jobId": "c1", "source": source,
+                   "partition": {"number": number, "offset": offset, "length": length}}),
+        )
+        .unwrap();
+    let notifications = engine.notifications_until(COMPLETED);
+    let report = fs_check_report(&notifications);
+    assert!(engine.wait_exit().success());
+    assert_eq!(report.filesystem, "fat16");
+    assert!(report.issues.is_empty(), "{:#?}", report.issues);
+    assert_eq!((report.files, report.directories), (1, 1));
+    assert!(report.checked.contains(&"lostClusters".to_owned()));
+    let stages: Vec<&str> = notifications
+        .iter()
+        .filter(|(method, _)| method == PROGRESS)
+        .filter_map(|(_, params)| params["stage"].as_str())
+        .collect();
+    for stage in ["boot", "fat", "directories", "clusters"] {
+        assert!(stages.contains(&stage), "没有阶段 {stage}：{stages:?}");
+    }
+
+    let mut engine = Engine::start();
+    let (number, offset, length) = partitions[1];
+    engine
+        .call(
+            FS_CHECK,
+            json!({"jobId": "c2", "source": source,
+                   "partition": {"number": number, "offset": offset, "length": length}}),
+        )
+        .unwrap();
+    let report = fs_check_report(&engine.notifications_until(COMPLETED));
+    assert!(engine.wait_exit().success());
+    assert_eq!(report.filesystem, "exfat");
+    let kinds: Vec<(&str, &str)> = report
+        .issues
+        .iter()
+        .map(|issue| (issue.kind.as_str(), issue.severity.as_str()))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![("volumeDirty", "minor"), ("lostClusters", "structure")]
+    );
+    assert_eq!(report.issues[1].cluster, Some(1500));
+    assert_eq!((report.totals.structure, report.totals.minor), (1, 1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 100 万个簇的 FAT32（512 字节一簇）：只写引导扇区与两份 FAT 的开头，其余是 0。读一遍 FAT 要好几秒，来得及暂停。
+fn large_fat32(path: &Path) -> (u64, u64) {
+    use std::io::{Seek, SeekFrom, Write};
+    use yisi_part::samples::{MbrEntry, mbr_disk};
+
+    let clusters: u64 = 1 << 20;
+    let reserved = 32u64;
+    let fat_sectors = ((clusters + 2) * 4).div_ceil(512);
+    let total = reserved + 2 * fat_sectors + clusters;
+    let start = 2048u64;
+    let mut boot = [0u8; 512];
+    boot[..3].copy_from_slice(&[0xEB, 0x58, 0x90]);
+    boot[3..11].copy_from_slice(b"MSDOS5.0");
+    boot[11..13].copy_from_slice(&512u16.to_le_bytes());
+    boot[13] = 1;
+    boot[14..16].copy_from_slice(&(reserved as u16).to_le_bytes());
+    boot[16] = 2;
+    boot[21] = 0xF8;
+    boot[32..36].copy_from_slice(&(total as u32).to_le_bytes());
+    boot[36..40].copy_from_slice(&(fat_sectors as u32).to_le_bytes());
+    boot[44..48].copy_from_slice(&2u32.to_le_bytes());
+    boot[510] = 0x55;
+    boot[511] = 0xAA;
+    let mut fat = Vec::new();
+    for value in [0x0FFF_FFF8u32, 0x0FFF_FFFF, 0x0FFF_FFFF] {
+        fat.extend_from_slice(&value.to_le_bytes());
+    }
+    let mbr = mbr_disk(512, &[MbrEntry::new(0x0C, start as u32, total as u32)]);
+    let mut file = std::fs::File::create(path).unwrap();
+    file.write_all(&mbr).unwrap();
+    file.seek(SeekFrom::Start(start * 512)).unwrap();
+    file.write_all(&boot).unwrap();
+    for copy in 0..2 {
+        file.seek(SeekFrom::Start(
+            (start + reserved + copy * fat_sectors) * 512,
+        ))
+        .unwrap();
+        file.write_all(&fat).unwrap();
+    }
+    file.set_len((start + total) * 512).unwrap();
+    (start * 512, total * 512)
+}
+
+#[test]
+fn fs_check_pauses_resumes_and_cancels() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-fs-check-pause");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("large-fat32.img");
+    let (offset, length) = large_fat32(&path);
+    let source = json!({"type": "image", "path": path.to_string_lossy(), "sectorSize": 512});
+    let mut engine = Engine::start();
+    engine
+        .call(
+            FS_CHECK,
+            json!({"jobId": "p1", "source": source,
+                   "partition": {"number": 1, "offset": offset, "length": length}}),
+        )
+        .unwrap();
+    engine.call(PAUSE, json!({"jobId": "p1"})).unwrap();
+    // 闸门之前的那一段可能还会报一次进度，之后应当没有动静
+    engine.notifications_for(Duration::from_millis(300));
+    let quiet = engine.notifications_for(Duration::from_millis(1200));
+    assert!(
+        quiet
+            .iter()
+            .all(|(method, _)| method != PROGRESS && method != COMPLETED),
+        "暂停后仍有进度或已完成：{quiet:?}"
+    );
+    engine.call(RESUME, json!({"jobId": "p1"})).unwrap();
+    let resumed = engine.notifications_for(Duration::from_millis(500));
+    assert!(
+        resumed.iter().any(|(method, _)| method == PROGRESS),
+        "继续后应有进度：{resumed:?}"
+    );
+    engine.call(CANCEL, json!({"jobId": "p1"})).unwrap();
+    let notifications = engine.notifications_until(CANCELLED);
+    assert!(notifications.iter().all(|(method, _)| method != COMPLETED));
+    assert!(engine.wait_exit().success());
+    let _ = std::fs::remove_dir_all(&dir);
 }
