@@ -78,8 +78,8 @@ const enUS: typeof zhCN = {
         'The whole disk shows as "Not initialized" or without partitions.',
       ],
       steps: {
-        findPartitions: 'The best option: find the lost partition and get all of its files back.',
-        carve: 'Available now: finds files by format across the whole disk, but without original names.',
+        findPartitions: 'The best option: find the lost partition and save its files, with names and folders, to another disk.',
+        carve: 'If no partition is found or its files cannot be read: finds files by format across the whole disk, but without original names.',
       },
       notes: [
         'Do not create a new partition in the empty space or initialize the disk: that overwrites the old partition information.',
@@ -134,9 +134,9 @@ const enUS: typeof zhCN = {
     },
     findPartitions: {
       name: 'Find lost partitions',
-      summary: 'Searches the whole disk for partitions lost to deletion or a damaged partition table, and writes them back after you confirm.',
+      summary: 'Searches the whole disk for partitions lost to deletion or a damaged partition table, so you can browse their files and save them to another disk.',
       suits: 'A drive letter is gone, Disk Management shows "Unallocated", or a partition vanished after partitioning.',
-      notSuits: 'If the partition still exists but will not open, use "Repair a partition that will not open".',
+      notSuits: 'If the partition still exists but will not open, use "Repair a partition that will not open". This version cannot write found partitions back to the partition table yet.',
     },
     repairPartition: {
       name: 'Repair a partition that will not open',
@@ -668,6 +668,71 @@ const enUS: typeof zhCN = {
         elapsed: 'Time',
         outputDir: 'Saved in',
       },
+    },
+  },
+  findPartitions: {
+    steps: {
+      source: 'Source',
+      search: 'Search',
+      results: 'Results',
+    },
+    intro:
+      'Reads the whole disk or image from start to end, looks at every sector for FAT, exFAT and NTFS boot sectors (including the backup copies partitions keep), checks the file system structures and lists the partitions it finds. You can then browse their files and save them to another disk.',
+    diskHint:
+      'Reading a physical disk needs administrator rights. It is read-only and does not change the disk. The whole disk is read, which can take hours on a large disk; you can pause or cancel. If the disk has reported read errors, make an image first and search the image.',
+    start: 'Start search',
+    restart: 'Search again',
+    status: {
+      starting: 'Starting the search…',
+      startingDisk: 'Requesting administrator rights and opening the disk…',
+      running: 'Searched {done} / {total} ({percent}%), {rate}/s',
+      paused: 'Paused at {done} / {total} ({percent}%); the disk is not read while paused',
+      completed: 'Search finished',
+      failed: 'Search failed',
+      cancelled: 'Search cancelled; search again to see results',
+    },
+    results: {
+      separator: ' ',
+      summary: 'Found {count} partition. | Found {count} partitions.',
+      none: 'No FAT, exFAT or NTFS partitions were found. You can still try "Recover files by type" for the files.',
+      table: 'Current partition table: {scheme}.',
+      scheme: {
+        mbr: 'MBR',
+        gpt: 'GPT',
+        none: 'none',
+        unreadable: 'unreadable',
+      },
+      elapsed: 'Took {seconds} s.',
+      unreadable: '{size} could not be read and was skipped; partitions there cannot be found.',
+      truncated: 'Too many partitions were found; only the first {count} are listed.',
+      readOnly:
+        'This version is read-only: it does not write the partition table back or change the disk. Save the files you need to another disk first; writing found partitions back to the partition table will come in a later version.',
+      opening: 'Opening for browsing…',
+      openingDisk: 'Requesting administrator rights and opening the disk…',
+    },
+    list: {
+      title: 'Partitions found',
+      noLabel: 'no label',
+      name: '{filesystem} · {size}',
+      start: 'Starts at {offset}',
+      relation: {
+        inTable: 'Already in the partition table (partition {number})',
+        overlaps: 'Overlaps partition {number}',
+        lost: 'Lost',
+      },
+      backup: 'Boot sector damaged, found by its backup',
+      overlapsCandidate: 'Overlaps another found partition',
+      truncated: 'Runs past the end of the disk, shortened',
+      hint: '"Lost" means the partition table does not list it. When found partitions overlap, at least one of them is not real (for example a disk image file stored inside a partition); browsing their files tells them apart.',
+    },
+    files: {
+      title: 'Files in the partition',
+      pick: 'Choose a found partition on the left to browse its files.',
+      opening: 'Opening the partition…',
+      openFailed: 'Cannot open this partition: {reason}',
+      unbrowsable: 'This partition cannot be browsed: {reason}',
+      scanCancelled: 'MFT scan stopped. An NTFS partition is scanned once before browsing, to find its deleted files.',
+      retry: 'Open again',
     },
   },
   errors: {

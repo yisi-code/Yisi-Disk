@@ -10,6 +10,7 @@ mod job;
 mod preview;
 mod read_scan;
 mod runtime;
+mod search_job;
 
 fn main() {
     // stdout 是与宿主之间的 JSON-RPC 通道，日志一律写 stderr

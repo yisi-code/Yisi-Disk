@@ -20,6 +20,7 @@ use yisi_engine::protocol::{
 };
 #[cfg(windows)]
 use yisi_engine::protocol::{DiskList, DiskSummary};
+use yisi_engine::protocol::{OPEN_RANGE, OpenRangeParams, SEARCH_PARTITIONS, SearchParams};
 use yisi_formats::Registry;
 use yisi_io::{BlockDevice, RawImage};
 use yisi_rpc::{
@@ -30,7 +31,7 @@ use yisi_rpc::{
 use crate::browse::{self, Session};
 use crate::copy_job::{self, Planned};
 use crate::job::{self, JobOutcome, ProgressSender, RunningJob};
-use crate::{carve_job, extract_job, image_job, preview, read_scan};
+use crate::{carve_job, extract_job, image_job, preview, read_scan, search_job};
 
 /// 浏览任务每隔这么久看一次有没有被取消。
 const BROWSE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
@@ -116,7 +117,7 @@ fn dispatch(
     events: &Sender<Event>,
 ) -> Option<Result<Value, ErrorObject>> {
     match request.method.as_str() {
-        LIST_FILES | PREVIEW_FS_FILE | SCAN_DELETED => {
+        LIST_FILES | PREVIEW_FS_FILE | SCAN_DELETED | OPEN_RANGE => {
             let session = match session_for(request, state) {
                 Ok(session) => session,
                 Err(error) => return Some(Err(error)),
@@ -133,6 +134,10 @@ fn dispatch(
                         .params::<ScanParams>()
                         .and_then(|params| session.scan(params.partition))
                         .and_then(|result| to_result(&result)),
+                    OPEN_RANGE => request
+                        .params::<OpenRangeParams>()
+                        .and_then(|params| session.open_range(&params))
+                        .and_then(|info| to_result(&info)),
                     _ => request
                         .params::<PreviewFsParams>()
                         .and_then(|params| session.preview(params.partition, &params.file))
@@ -192,6 +197,8 @@ fn dispatch_now(
                 COPY_FILES.to_owned(),
                 IMAGE_CREATE.to_owned(),
                 IMAGE_RESUME.to_owned(),
+                SEARCH_PARTITIONS.to_owned(),
+                OPEN_RANGE.to_owned(),
             ];
             if cfg!(windows) {
                 methods.push(LIST_DISKS.to_owned());
@@ -224,6 +231,29 @@ fn dispatch_now(
             Ok(json!({}))
         }
         LIST_FILE_TYPES => to_result(&carve_job::file_types(&Registry::builtin())),
+        SEARCH_PARTITIONS => {
+            if state.job.is_some() {
+                return Err(ErrorObject::new(
+                    protocol::error_code::JOB_ALREADY_RUNNING,
+                    "每个引擎进程只运行一个任务",
+                ));
+            }
+            let params: SearchParams = request.params()?;
+            let device: Arc<dyn BlockDevice> = Arc::from(open_source(&params.source)?);
+            let finished = events.clone();
+            state.job = Some(
+                job::start(
+                    params.job_id,
+                    Arc::clone(outbox),
+                    move |context| search_job::run(device, context),
+                    move || {
+                        let _ = finished.send(Event::JobFinished);
+                    },
+                )
+                .pausable(),
+            );
+            Ok(json!({}))
+        }
         CARVE_START => {
             if state.job.is_some() {
                 return Err(ErrorObject::new(
@@ -629,12 +659,35 @@ fn copy_items(params: &CopyParams) -> Result<Vec<Planned>, ErrorObject> {
 }
 
 /// 重新读分区表，核对浏览时看到的分区还在原处，再打开它上面的卷。
+/// 按位置打开的分区（搜索找到的）不在表里，只核对范围在设备之内。
 fn copy_volume(
     device: Arc<dyn BlockDevice>,
     partition: protocol::PartitionRef,
 ) -> Result<yisi_fs::Volume, ErrorObject> {
     let unavailable =
         |message: String| ErrorObject::new(protocol::error_code::FS_UNAVAILABLE, message);
+    if partition.outside_table {
+        let size = device.size();
+        let inside = |offset: u64, length: u64| {
+            length > 0 && offset.checked_add(length).is_some_and(|end| end <= size)
+        };
+        if !inside(partition.offset, partition.length)
+            || partition
+                .backup_boot
+                .is_some_and(|backup| !inside(backup, 512))
+        {
+            return Err(ErrorObject::new(
+                error_code::INVALID_PARAMS,
+                format!(
+                    "偏移 {} 起 {} 字节超出了设备范围",
+                    partition.offset, partition.length
+                ),
+            ));
+        }
+        let device = browse::range_device(&device, partition.offset, partition.backup_boot)?;
+        return yisi_fs::Volume::open(device, partition.offset, partition.length)
+            .map_err(|error| unavailable(error_chain(&error)));
+    }
     let table =
         yisi_part::read_table(device.as_ref()).map_err(|error| unavailable(error_chain(&error)))?;
     let found = table.partitions.iter().any(|candidate| {

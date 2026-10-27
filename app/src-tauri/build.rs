@@ -22,6 +22,8 @@ fn main() {
         "browse_preview",
         "browse_scan",
         "browse_cancel_scan",
+        "job_start_partition_search",
+        "browse_open_range",
         "job_start_copy",
         "copied_open",
         "copied_reveal",

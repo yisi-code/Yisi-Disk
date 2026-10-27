@@ -4,11 +4,13 @@ import {
   cancelJob,
   cancelScan,
   openBrowse,
+  openBrowseRange,
   scanDeleted,
   toHostError,
   type BrowseOpened,
   type HostError,
   type JobTarget,
+  type PartitionInfo,
   type ScanResult,
 } from '../services/host'
 
@@ -59,6 +61,19 @@ export function useBrowse() {
     opened.value = null
     resetScans()
     await job.cancel()
+  }
+
+  /** 按位置打开一个不在分区表里的分区（丢失分区搜索找到的），之后用答复里的编号浏览 */
+  async function openRange(
+    offset: number,
+    length: number,
+    backupBoot: number | null,
+  ): Promise<PartitionInfo | null> {
+    const jobId = job.jobId.value
+    if (jobId === null || !isOpen.value) {
+      return null
+    }
+    return openBrowseRange(jobId, offset, length, backupBoot)
   }
 
   /** 扫描分区里已删除的项；扫过的分区引擎直接给出上次的结果。被停下或失败时返回 null */
@@ -127,6 +142,7 @@ export function useBrowse() {
     scanPercent: job.percent,
     open,
     close,
+    openRange,
     scan,
     stopScan,
   }

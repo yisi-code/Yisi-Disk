@@ -13,7 +13,8 @@ pub const READ_SCAN: &str = "disk.readScan";
 /// 取消任务：参数 [`JobRef`]。
 pub const CANCEL: &str = "job.cancel";
 /// 暂停任务：参数 [`JobRef`]，立即返回空对象，任务在下一个检查点停下，不再读盘。
-/// 目前只有深度恢复（[`CARVE_START`]）可以暂停，其他任务答复 `INVALID_PARAMS`。暂停的时长不计入报告的用时。
+/// 目前只有深度恢复（[`CARVE_START`]）与丢失分区搜索（[`SEARCH_PARTITIONS`]）可以暂停，其他任务答复 `INVALID_PARAMS`。
+/// 暂停的时长不计入报告的用时。
 pub const PAUSE: &str = "job.pause";
 /// 继续暂停的任务：参数 [`JobRef`]，立即返回空对象。没暂停时什么也不做。
 pub const RESUME: &str = "job.resume";
@@ -51,6 +52,13 @@ pub const CANCEL_SCAN: &str = "repair.cancelScan";
 /// 复制好的文件经 [`COPIED`] 通知分批送达，结果是 [`CopySummary`]。源为物理磁盘时，输出目录必须在另一块盘上，
 /// 否则答复 [`error_code::OUTPUT_ON_SOURCE`]。
 pub const COPY_FILES: &str = "repair.copyFiles";
+/// 搜索丢失的分区（任务，只读，可以暂停）：参数 [`SearchParams`]，立即返回空对象；从头到尾读一遍源，
+/// 进度经 [`PROGRESS`] 送达，结果是 [`SearchSummary`]。
+pub const SEARCH_PARTITIONS: &str = "repair.search";
+/// 在浏览会话里按位置打开一个分区（不在分区表里，例如搜索找到的）：参数 [`OpenRangeParams`]，
+/// 结果是 [`PartitionInfo`]，编号从 [`RANGE_PARTITION_BASE`] 起，之后像表里的分区一样列目录、预览、扫描、复制。
+/// 同一位置再打开时答复同一个编号。范围超出设备时答复 `INVALID_PARAMS`。
+pub const OPEN_RANGE: &str = "repair.openRange";
 /// 制作能识别坏区的镜像（任务）：参数 [`ImageParams`]，建好镜像文件与坏区图后答复 [`ImageStarted`]；
 /// 进展经 [`IMAGING`] 送达，结果是 [`ImageSummary`]。镜像文件或坏区图已经存在时答复 [`error_code::IMAGE_EXISTS`]；
 /// 源为物理磁盘时，镜像必须在另一块盘上，否则答复 [`error_code::OUTPUT_ON_SOURCE`]。取消时保存坏区图，之后可以续做。
@@ -504,6 +512,12 @@ pub struct PartitionRef {
     pub number: u32,
     pub offset: u64,
     pub length: u64,
+    /// 按位置打开的分区（[`OPEN_RANGE`]）：不核对分区表，只核对范围在设备之内。
+    #[serde(default)]
+    pub outside_table: bool,
+    /// 按位置打开时给的备份引导扇区位置（[`OpenRangeParams::backup_boot`]）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_boot: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -554,6 +568,67 @@ pub struct CopySummary {
     pub bytes: u64,
     pub failed: u64,
     pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchParams {
+    pub job_id: String,
+    pub source: Source,
+}
+
+/// 丢失分区搜索的结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchSummary {
+    pub size: u64,
+    pub sector_size: u32,
+    /// 现有分区表：mbr、gpt、none 之一；读不出时为 unreadable。
+    pub scheme: String,
+    /// 找到的分区，按起点排序。
+    pub candidates: Vec<FoundPartition>,
+    /// 候选分区太多，后面的没有列出。
+    pub candidates_truncated: bool,
+    /// 读不出、跳过的字节数；那些位置上的引导扇区找不到。
+    pub unreadable_bytes: u64,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FoundPartition {
+    pub offset: u64,
+    /// 卷的字节数，已截到设备末尾。
+    pub length: u64,
+    /// fat12、fat16、fat32、exfat、ntfs 之一。
+    pub filesystem: String,
+    pub label: Option<String>,
+    /// 靠哪个引导扇区找到：primary（分区开头的主引导扇区）、backup（主引导扇区已坏，靠备份）、both。
+    pub found_by: String,
+    /// 只靠备份找到时，备份引导扇区在源上的位置；浏览、复制时原样传给 [`OPEN_RANGE`] 与 [`PartitionRef`]。
+    pub backup_boot: Option<u64>,
+    /// 卷超出了设备末尾，长度已截短。
+    pub truncated: bool,
+    /// 与现有分区表的关系：inTable（表里有起点相同的分区）、overlaps（与表里的分区部分重叠）、lost（丢失）。
+    pub relation: String,
+    /// inTable、overlaps 时是表里哪个分区。
+    pub table_partition: Option<u32>,
+    /// 与别的候选分区重叠：其中至少一个不是真的分区。
+    pub overlaps_candidate: bool,
+}
+
+/// 按位置打开的分区从这个编号起，与分区表里的编号（最多几千）分开。
+pub const RANGE_PARTITION_BASE: u32 = 100_000;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenRangeParams {
+    pub job_id: String,
+    pub offset: u64,
+    pub length: u64,
+    /// 主引导扇区已坏时，用这个位置的备份引导扇区代替（只在内存里替换，不写盘）。
+    #[serde(default)]
+    pub backup_boot: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -638,5 +713,20 @@ mod tests {
             serde_json::to_value(&params).unwrap(),
             json!({"jobId": "j1", "source": {"type": "image", "path": "a.img", "sectorSize": 512}})
         );
+    }
+
+    #[test]
+    fn partition_ref_outside_table_fields_are_optional() {
+        let listed: PartitionRef =
+            serde_json::from_value(json!({"number": 2, "offset": 1024, "length": 4096})).unwrap();
+        assert!(!listed.outside_table);
+        assert_eq!(listed.backup_boot, None);
+        let found: PartitionRef = serde_json::from_value(json!({
+            "number": RANGE_PARTITION_BASE, "offset": 1024, "length": 4096,
+            "outsideTable": true, "backupBoot": 7168
+        }))
+        .unwrap();
+        assert!(found.outside_table);
+        assert_eq!(found.backup_boot, Some(7168));
     }
 }

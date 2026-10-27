@@ -1,5 +1,5 @@
 //! 浏览分区：读分区表、按需打开卷、扫描已删除的项（NTFS 扫 MFT）、列目录（排好序缓存、分页给出）、
-//! 预览文件。只读源盘。
+//! 预览文件。不在分区表里的分区（丢失分区搜索找到的）可以按位置打开，之后同样浏览。只读源盘。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,11 +8,12 @@ use std::time::Instant;
 
 use yisi_engine::protocol::{
     self, BrowseOpened, FileListPage, FilePreview, FsEntry, ListFilesParams, MAX_PAGE,
-    PartitionInfo, ScanResult,
+    OpenRangeParams, PartitionInfo, RANGE_PARTITION_BASE, ScanResult,
 };
 use yisi_fs::{FileRef, FsKind, State, Unsupported, Volume};
 use yisi_io::BlockDevice;
 use yisi_part::{Note, Partition, PartitionKind, PartitionTable, Role, Scheme};
+use yisi_repair::search::BackupBootDevice;
 use yisi_rpc::{ErrorObject, error_code};
 
 use crate::job::ProgressSender;
@@ -25,6 +26,8 @@ const PAGE_BYTES: usize = 768 * 1024;
 const MAX_CACHED_DIRS: usize = 64;
 /// 扫描进度里的阶段名。
 pub const STAGE_SCAN_MFT: &str = "scanMft";
+/// 一个会话里最多按位置打开这么多个分区。
+const MAX_RANGES: usize = 1000;
 
 pub struct Session {
     device: Arc<dyn BlockDevice>,
@@ -36,6 +39,16 @@ pub struct Session {
     scans: Mutex<HashMap<u32, Arc<AtomicBool>>>,
     /// 浏览任务已取消：正在进行的扫描都停下。
     closing: AtomicBool,
+    /// 按位置打开的分区，编号是 [`RANGE_PARTITION_BASE`] 加下标。
+    ranges: Mutex<Vec<Range>>,
+}
+
+/// 按位置打开的分区。靠备份引导扇区找到的，读卷时用 [`BackupBootDevice`] 换掉已坏的主引导扇区。
+struct Range {
+    offset: u64,
+    length: u64,
+    backup_boot: Option<u64>,
+    device: Arc<dyn BlockDevice>,
 }
 
 struct SortedDir {
@@ -64,6 +77,7 @@ impl Session {
             progress,
             scans: Mutex::new(HashMap::new()),
             closing: AtomicBool::new(false),
+            ranges: Mutex::new(Vec::new()),
         };
         let partitions = session
             .table
@@ -87,11 +101,6 @@ impl Session {
     }
 
     fn describe(&self, partition: &Partition) -> PartitionInfo {
-        let detected = yisi_fs::detect(self.device.as_ref(), partition.offset, partition.length);
-        let volume = match detected {
-            Ok(kind) if kind.is_browsable() => self.volume(partition.number).ok(),
-            _ => None,
-        };
         let (type_id, name, bootable, logical) = match &partition.kind {
             PartitionKind::Mbr {
                 type_id,
@@ -109,14 +118,42 @@ impl Session {
             PartitionKind::Whole => (String::new(), String::new(), false, false),
         };
         PartitionInfo {
-            number: partition.number,
-            offset: partition.offset,
-            length: partition.length,
             type_id,
             role: partition.role().map(|role| role_key(role).to_owned()),
             name,
             bootable,
             logical,
+            ..self.describe_volume(
+                partition.number,
+                self.device.as_ref(),
+                partition.offset,
+                partition.length,
+            )
+        }
+    }
+
+    /// 分区上的文件系统与卷；分区表里的信息（类型、用途、名字等）留空。
+    fn describe_volume(
+        &self,
+        number: u32,
+        device: &dyn BlockDevice,
+        offset: u64,
+        length: u64,
+    ) -> PartitionInfo {
+        let detected = yisi_fs::detect(device, offset, length);
+        let volume = match detected {
+            Ok(kind) if kind.is_browsable() => self.volume(number).ok(),
+            _ => None,
+        };
+        PartitionInfo {
+            number,
+            offset,
+            length,
+            type_id: String::new(),
+            role: None,
+            name: String::new(),
+            bootable: false,
+            logical: false,
             filesystem: match detected {
                 Ok(kind) => fs_key(kind),
                 Err(_) => "unreadable",
@@ -193,30 +230,95 @@ impl Session {
         self.closing.store(true, Ordering::Relaxed);
     }
 
+    /// 在会话里按位置打开一个分区（不在分区表里，例如搜索找到的），之后用答复里的编号浏览。
+    /// 同一位置再打开时给出同一个编号。
+    pub fn open_range(&self, params: &OpenRangeParams) -> Result<PartitionInfo, ErrorObject> {
+        let invalid = |message: String| ErrorObject::new(error_code::INVALID_PARAMS, message);
+        let size = self.device.size();
+        let inside = |offset: u64, length: u64| {
+            length > 0 && offset.checked_add(length).is_some_and(|end| end <= size)
+        };
+        if !inside(params.offset, params.length) {
+            return Err(invalid(format!(
+                "偏移 {} 起 {} 字节超出了设备范围（{size} 字节）",
+                params.offset, params.length
+            )));
+        }
+        if params
+            .backup_boot
+            .is_some_and(|backup| !inside(backup, 512))
+        {
+            return Err(invalid("备份引导扇区的位置超出了设备范围".to_owned()));
+        }
+        let (number, device) = {
+            let mut ranges = lock(&self.ranges);
+            let existing = ranges.iter().position(|range| {
+                range.offset == params.offset
+                    && range.length == params.length
+                    && range.backup_boot == params.backup_boot
+            });
+            let index = match existing {
+                Some(index) => index,
+                None => {
+                    if ranges.len() >= MAX_RANGES {
+                        return Err(invalid(format!(
+                            "一次浏览最多按位置打开 {MAX_RANGES} 个分区"
+                        )));
+                    }
+                    let device = range_device(&self.device, params.offset, params.backup_boot)?;
+                    ranges.push(Range {
+                        offset: params.offset,
+                        length: params.length,
+                        backup_boot: params.backup_boot,
+                        device,
+                    });
+                    ranges.len() - 1
+                }
+            };
+            let device = ranges
+                .get(index)
+                .map(|range| Arc::clone(&range.device))
+                .ok_or_else(|| fs_error("按位置打开的分区不见了".to_owned()))?;
+            let number = u32::try_from(index)
+                .ok()
+                .and_then(|index| RANGE_PARTITION_BASE.checked_add(index))
+                .ok_or_else(|| fs_error("分区编号溢出".to_owned()))?;
+            (number, device)
+        };
+        Ok(self.describe_volume(number, device.as_ref(), params.offset, params.length))
+    }
+
+    /// 分区 `number` 所在的设备（按位置打开、靠备份找到的分区换掉了主引导扇区）、偏移与长度。
+    fn locate(&self, number: u32) -> Option<(Arc<dyn BlockDevice>, u64, u64)> {
+        if let Some(index) = number.checked_sub(RANGE_PARTITION_BASE) {
+            let ranges = lock(&self.ranges);
+            let range = ranges.get(usize::try_from(index).ok()?)?;
+            return Some((Arc::clone(&range.device), range.offset, range.length));
+        }
+        self.table
+            .partitions
+            .iter()
+            .find(|partition| partition.number == number)
+            .map(|partition| (Arc::clone(&self.device), partition.offset, partition.length))
+    }
+
     /// 打开（或取出已打开的）分区 `number` 上的卷。
     pub fn volume(&self, number: u32) -> Result<Arc<Volume>, ErrorObject> {
         if let Some(volume) = lock(&self.volumes).get(&number) {
             return Ok(Arc::clone(volume));
         }
-        let partition = self
-            .table
-            .partitions
-            .iter()
-            .find(|partition| partition.number == number)
+        let (device, offset, length) = self
+            .locate(number)
             .ok_or_else(|| fs_error(format!("没有分区 {number}")))?;
-        let volume = Volume::open(Arc::clone(&self.device), partition.offset, partition.length)
-            .map_err(|error| fs_error(error_chain(&error)))?;
+        let volume =
+            Volume::open(device, offset, length).map_err(|error| fs_error(error_chain(&error)))?;
         let volume = Arc::new(volume);
         lock(&self.volumes).insert(number, Arc::clone(&volume));
         Ok(volume)
     }
 
     fn partition_offset(&self, number: u32) -> u64 {
-        self.table
-            .partitions
-            .iter()
-            .find(|partition| partition.number == number)
-            .map_or(0, |partition| partition.offset)
+        self.locate(number).map_or(0, |(_, offset, _)| offset)
     }
 
     pub fn list(&self, params: &ListFilesParams) -> Result<FileListPage, ErrorObject> {
@@ -319,6 +421,20 @@ impl Session {
     }
 }
 
+/// 按位置打开的分区读卷用的设备：给了备份引导扇区时，读分区开头那 512 字节换成备份的内容。
+pub fn range_device(
+    device: &Arc<dyn BlockDevice>,
+    offset: u64,
+    backup_boot: Option<u64>,
+) -> Result<Arc<dyn BlockDevice>, ErrorObject> {
+    match backup_boot {
+        Some(backup) => BackupBootDevice::new(Arc::clone(device), offset, backup)
+            .map(|device| Arc::new(device) as Arc<dyn BlockDevice>)
+            .map_err(|error| fs_error(format!("读不出备份引导扇区：{}", error_chain(&error)))),
+        None => Ok(Arc::clone(device)),
+    }
+}
+
 pub fn decode(token: &str) -> Result<FileRef, ErrorObject> {
     FileRef::from_token(token).ok_or_else(|| {
         ErrorObject::new(
@@ -354,7 +470,7 @@ fn unsupported_key(reason: Unsupported) -> &'static str {
     }
 }
 
-fn fs_key(kind: FsKind) -> &'static str {
+pub(crate) fn fs_key(kind: FsKind) -> &'static str {
     match kind {
         FsKind::Fat12 => "fat12",
         FsKind::Fat16 => "fat16",
