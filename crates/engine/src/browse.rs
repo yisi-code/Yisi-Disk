@@ -92,12 +92,7 @@ impl Session {
         let opened = BrowseOpened {
             size: session.device.size(),
             sector_size: session.device.sector_size(),
-            scheme: match session.table.scheme {
-                Scheme::Mbr => "mbr",
-                Scheme::Gpt => "gpt",
-                Scheme::None => "none",
-            }
-            .to_owned(),
+            scheme: scheme_name(session.table.scheme).to_owned(),
             notes: session.table.notes.iter().map(note_key).collect(),
             partitions,
         };
@@ -393,6 +388,15 @@ impl Session {
             .map_err(|error| unavailable(error_chain(&error)))?;
         let length = reader.size();
         preview::preview_from(reader, length).map_err(|error| unavailable(error_chain(&error)))
+    }
+}
+
+/// 分区表方案在协议里的名字：`mbr`、`gpt`、`none`（浏览、诊断、丢失分区搜索的答复共用）。
+pub(crate) fn scheme_name(scheme: Scheme) -> &'static str {
+    match scheme {
+        Scheme::Mbr => "mbr",
+        Scheme::Gpt => "gpt",
+        Scheme::None => "none",
     }
 }
 

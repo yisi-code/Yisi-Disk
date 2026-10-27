@@ -299,7 +299,7 @@ pub(crate) mod tests {
             match (self.phase, event) {
                 (0, Event::Bytes { at, bytes }) => {
                     self.phase = 1;
-                    let Some(length) = crate::bytes::be32(bytes, 0) else {
+                    let Some(length) = yisi_part::bytes::be32(bytes, 0) else {
                         return Step::Invalid;
                     };
                     Step::Scan {

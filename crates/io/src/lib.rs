@@ -6,6 +6,7 @@
 mod device;
 #[cfg(windows)]
 mod disk_list;
+mod disk_path;
 mod error;
 mod imaging;
 #[cfg(windows)]
@@ -21,6 +22,7 @@ mod windows_disk;
 pub use device::BlockDevice;
 #[cfg(windows)]
 pub use disk_list::{BusType, DiskInfo, list_disks};
+pub use disk_path::{MAX_DISK_NUMBER, physical_drive_number, physical_drive_path};
 pub use error::IoError;
 pub use imaging::{
     BadMap, ImageStore, ImagingControl, ImagingOptions, ImagingOutcome, MapError, MapHeader, Round,

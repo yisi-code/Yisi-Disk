@@ -1,9 +1,9 @@
 //! ZIP：依次是各文件的本地文件头与数据、中央目录，最后是中央目录结束记录（带注释）。
 //! 本地文件头里没有写大小（用数据描述符）时，往后找下一条记录的签名。
 
-use crate::bytes::{le16, le32, le64};
 use crate::plugin::{FileFormat, FormatInfo, Recovering, Signature};
 use crate::walker::{Event, Scanner, Step, Structure, Walker};
+use yisi_part::bytes::{le16, le32, le64};
 
 const LOCAL_FILE: u32 = 0x0403_4B50;
 const CENTRAL_DIRECTORY: u32 = 0x0201_4B50;

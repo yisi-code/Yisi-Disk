@@ -13,9 +13,10 @@ use windows_sys::Win32::System::Threading::{
     WaitForSingleObject,
 };
 use yisi_broker::protocol::{DiskOpened, FailureData, OPEN_DISK, OpenDiskParams, SHUTDOWN};
-use yisi_io::{BlockDevice, IoError, WindowsDisk};
+use yisi_io::{BlockDevice, IoError, WindowsDisk, physical_drive_number};
 use yisi_rpc::{
-    ErrorObject, FrameError, Message, Response, error_code, read_message, write_message,
+    ErrorObject, FrameError, Message, Response, error_chain, error_code, read_message,
+    write_message,
 };
 
 pub fn run(pipe_name: &str, parent_pid: u32) -> anyhow::Result<()> {
@@ -65,7 +66,8 @@ pub fn run(pipe_name: &str, parent_pid: u32) -> anyhow::Result<()> {
 }
 
 fn open_disk(path: &str, target_pid: u32) -> Result<Value, ErrorObject> {
-    if !is_physical_drive_path(path) {
+    // 管理员权限下任何文件都能打开，所以只接受物理磁盘路径，不替宿主打开任意文件
+    if physical_drive_number(path).is_none() {
         return Err(failed(
             format!("只接受 \\\\.\\PhysicalDriveN 形式的路径，收到 {path}"),
             None,
@@ -87,14 +89,6 @@ fn open_disk(path: &str, target_pid: u32) -> Result<Value, ErrorObject> {
     serde_json::to_value(opened).map_err(|error| {
         ErrorObject::new(error_code::INTERNAL_ERROR, format!("无法编码答复：{error}"))
     })
-}
-
-/// 管理员权限下任何文件都能打开，所以只接受物理磁盘路径，不替宿主打开任意文件。
-fn is_physical_drive_path(path: &str) -> bool {
-    path.strip_prefix(r"\\.\PhysicalDrive")
-        .is_some_and(|number| {
-            (1..=3).contains(&number.len()) && number.bytes().all(|byte| byte.is_ascii_digit())
-        })
 }
 
 /// 把句柄复制进目标进程，返回它在目标进程里的值。复制出的句柄与源句柄权限相同（只读）。
@@ -167,45 +161,5 @@ fn os_error(error: &IoError) -> Option<i32> {
         | IoError::Locate { source, .. }
         | IoError::Adopt { source, .. } => source.raw_os_error(),
         IoError::UnexpectedEof { .. } | IoError::InvalidSectorSize(_) => None,
-    }
-}
-
-/// 把错误及其来源串成一句话，答复里带上系统给出的原因。
-fn error_chain(error: &dyn std::error::Error) -> String {
-    let mut message = error.to_string();
-    let mut source = error.source();
-    while let Some(cause) = source {
-        message.push('：');
-        message.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    message
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_physical_drive_paths_are_accepted() {
-        for path in [
-            r"\\.\PhysicalDrive0",
-            r"\\.\PhysicalDrive12",
-            r"\\.\PhysicalDrive127",
-        ] {
-            assert!(is_physical_drive_path(path), "{path}");
-        }
-        for path in [
-            r"\\.\PhysicalDrive",
-            r"\\.\PhysicalDrive1234",
-            r"\\.\PhysicalDrive1\x",
-            r"\\.\PhysicalDrive-1",
-            r"\\.\C:",
-            r"C:\Windows\System32\config\SAM",
-            r"\\?\PhysicalDrive0",
-            "",
-        ] {
-            assert!(!is_physical_drive_path(path), "{path}");
-        }
     }
 }

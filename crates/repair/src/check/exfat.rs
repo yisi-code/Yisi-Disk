@@ -15,7 +15,7 @@ use crate::check::disk::Span;
 use crate::check::fat::join;
 use crate::check::issue::{Area, Issue, IssueKind};
 use crate::check::table::{FatTable, Owners, ROOT, Width};
-use crate::check::{CheckItem, Ctx, FsType, Stage, Summary, check_backup};
+use crate::check::{CheckItem, Ctx, Stage, Summary, check_backup};
 
 const ENTRY: usize = 32;
 const TYPE_UPCASE: u8 = 0x82;
@@ -145,7 +145,7 @@ pub(crate) fn check(ctx: &mut Ctx, region: &[u8], from_backup: bool) -> Option<S
         }
     }
     Some(Summary {
-        fs: FsType::Exfat,
+        fs: FsKind::Exfat,
         cluster_size,
         cluster_count: u64::from(count),
         used_clusters: volume.used,
@@ -156,7 +156,7 @@ pub(crate) fn check(ctx: &mut Ctx, region: &[u8], from_backup: bool) -> Option<S
 
 fn unknown() -> Summary {
     Summary {
-        fs: FsType::Exfat,
+        fs: FsKind::Exfat,
         cluster_size: 0,
         cluster_count: 0,
         used_clusters: 0,

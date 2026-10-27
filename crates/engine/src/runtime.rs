@@ -31,7 +31,7 @@ use yisi_rpc::{
 
 use crate::browse::{self, Session};
 use crate::copy_job::{self, Planned};
-use crate::job::{self, JobOutcome, ProgressSender, RunningJob};
+use crate::job::{self, JobContext, JobOutcome, ProgressSender, RunningJob};
 use crate::{
     boot_check, carve_job, extract_job, fs_check_job, image_job, preview, read_scan, search_job,
 };
@@ -110,6 +110,30 @@ pub fn serve(reader: impl Read + Send + 'static, writer: impl Write + Send + 'st
 struct State {
     job: Option<RunningJob>,
     session: Option<Arc<Session>>,
+}
+
+impl State {
+    /// 每个引擎进程只运行一个任务：已有任务时拒绝。
+    fn ensure_idle(&self) -> Result<(), ErrorObject> {
+        if self.job.is_some() {
+            return Err(ErrorObject::new(
+                protocol::error_code::JOB_ALREADY_RUNNING,
+                "每个引擎进程只运行一个任务",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// 启动任务：结束时通知事件循环收尾。
+fn start_job<W>(job_id: String, outbox: &Arc<Outbox>, events: &Sender<Event>, work: W) -> RunningJob
+where
+    W: FnOnce(&JobContext) -> Result<JobOutcome, String> + Send + 'static,
+{
+    let finished = events.clone();
+    job::start(job_id, Arc::clone(outbox), work, move || {
+        let _ = finished.send(Event::JobFinished);
+    })
 }
 
 /// 处理一个请求。返回 `None` 表示答复由后台线程稍后发出：列目录、预览、扫描可能要读很多数据，不能挡住取消请求。
@@ -216,56 +240,29 @@ fn dispatch_now(
         #[cfg(windows)]
         LIST_DISKS => to_result(&disk_list()),
         READ_SCAN => {
-            if state.job.is_some() {
-                return Err(ErrorObject::new(
-                    protocol::error_code::JOB_ALREADY_RUNNING,
-                    "每个引擎进程只运行一个任务",
-                ));
-            }
+            state.ensure_idle()?;
             let params: ReadScanParams = request.params()?;
             let device = open_source(&params.source)?;
-            let finished = events.clone();
-            state.job = Some(job::start(
-                params.job_id,
-                Arc::clone(outbox),
-                move |context| read_scan::run(device.as_ref(), context),
-                move || {
-                    let _ = finished.send(Event::JobFinished);
-                },
-            ));
+            state.job = Some(start_job(params.job_id, outbox, events, move |context| {
+                read_scan::run(device.as_ref(), context)
+            }));
             Ok(json!({}))
         }
         LIST_FILE_TYPES => to_result(&carve_job::file_types(&Registry::builtin())),
         SEARCH_PARTITIONS => {
-            if state.job.is_some() {
-                return Err(ErrorObject::new(
-                    protocol::error_code::JOB_ALREADY_RUNNING,
-                    "每个引擎进程只运行一个任务",
-                ));
-            }
+            state.ensure_idle()?;
             let params: SearchParams = request.params()?;
             let device: Arc<dyn BlockDevice> = Arc::from(open_source(&params.source)?);
-            let finished = events.clone();
             state.job = Some(
-                job::start(
-                    params.job_id,
-                    Arc::clone(outbox),
-                    move |context| search_job::run(device, context),
-                    move || {
-                        let _ = finished.send(Event::JobFinished);
-                    },
-                )
+                start_job(params.job_id, outbox, events, move |context| {
+                    search_job::run(device, context)
+                })
                 .pausable(),
             );
             Ok(json!({}))
         }
         CARVE_START => {
-            if state.job.is_some() {
-                return Err(ErrorObject::new(
-                    protocol::error_code::JOB_ALREADY_RUNNING,
-                    "每个引擎进程只运行一个任务",
-                ));
-            }
+            state.ensure_idle()?;
             let params: CarveParams = request.params()?;
             let registry = Registry::builtin();
             let enabled = carve_job::enabled_formats(&registry, params.extensions.as_deref())
@@ -297,36 +294,23 @@ fn dispatch_now(
             let started = CarveStarted {
                 output_dir: output_dir.as_ref().map(|dir| dir.display().to_string()),
             };
-            let finished = events.clone();
             state.job = Some(
-                job::start(
-                    params.job_id,
-                    Arc::clone(outbox),
-                    move |context| {
-                        carve_job::run(
-                            device.as_ref(),
-                            &registry,
-                            enabled,
-                            sink.as_mut(),
-                            output_dir.as_deref(),
-                            context,
-                        )
-                    },
-                    move || {
-                        let _ = finished.send(Event::JobFinished);
-                    },
-                )
+                start_job(params.job_id, outbox, events, move |context| {
+                    carve_job::run(
+                        device.as_ref(),
+                        &registry,
+                        enabled,
+                        sink.as_mut(),
+                        output_dir.as_deref(),
+                        context,
+                    )
+                })
                 .pausable(),
             );
             to_result(&started)
         }
         CARVE_EXTRACT => {
-            if state.job.is_some() {
-                return Err(ErrorObject::new(
-                    protocol::error_code::JOB_ALREADY_RUNNING,
-                    "每个引擎进程只运行一个任务",
-                ));
-            }
+            state.ensure_idle()?;
             let params: ExtractParams = request.params()?;
             let registry = Registry::builtin();
             check_extract_items(&registry, &params)?;
@@ -338,18 +322,10 @@ fn dispatch_now(
             let started = CopyStarted {
                 output_dir: output_dir.display().to_string(),
             };
-            let finished = events.clone();
             let items = params.items;
-            state.job = Some(job::start(
-                params.job_id,
-                Arc::clone(outbox),
-                move |context| {
-                    extract_job::run(device.as_ref(), &registry, items, &output_dir, context)
-                },
-                move || {
-                    let _ = finished.send(Event::JobFinished);
-                },
-            ));
+            state.job = Some(start_job(params.job_id, outbox, events, move |context| {
+                extract_job::run(device.as_ref(), &registry, items, &output_dir, context)
+            }));
             to_result(&started)
         }
         DIAGNOSE_BOOT => {
@@ -370,12 +346,7 @@ fn dispatch_now(
             to_result(&preview)
         }
         BROWSE_OPEN => {
-            if state.job.is_some() {
-                return Err(ErrorObject::new(
-                    protocol::error_code::JOB_ALREADY_RUNNING,
-                    "每个引擎进程只运行一个任务",
-                ));
-            }
+            state.ensure_idle()?;
             let params: BrowseParams = request.params()?;
             let device: Arc<dyn BlockDevice> = Arc::from(open_source(&params.source)?);
             let progress = ProgressSender::new(params.job_id.clone(), Arc::clone(outbox));
@@ -383,31 +354,18 @@ fn dispatch_now(
                 Session::open(device, progress, boot_check::fs_copy(params.boot))?;
             let session = Arc::new(session);
             state.session = Some(Arc::clone(&session));
-            let finished = events.clone();
             // 浏览任务本身只等取消或宿主断开；列目录、预览、扫描由会话在别的线程里答复
-            state.job = Some(job::start(
-                params.job_id,
-                Arc::clone(outbox),
-                move |context| {
-                    while !context.is_cancelled() {
-                        thread::sleep(BROWSE_POLL);
-                    }
-                    session.close();
-                    Ok(JobOutcome::Cancelled)
-                },
-                move || {
-                    let _ = finished.send(Event::JobFinished);
-                },
-            ));
+            state.job = Some(start_job(params.job_id, outbox, events, move |context| {
+                while !context.is_cancelled() {
+                    thread::sleep(BROWSE_POLL);
+                }
+                session.close();
+                Ok(JobOutcome::Cancelled)
+            }));
             to_result(&opened)
         }
         COPY_FILES => {
-            if state.job.is_some() {
-                return Err(ErrorObject::new(
-                    protocol::error_code::JOB_ALREADY_RUNNING,
-                    "每个引擎进程只运行一个任务",
-                ));
-            }
+            state.ensure_idle()?;
             let params: CopyParams = request.params()?;
             let items = copy_items(&params)?;
             let output_dir = Path::new(&params.output_dir)
@@ -420,24 +378,13 @@ fn dispatch_now(
             let started = CopyStarted {
                 output_dir: output_dir.display().to_string(),
             };
-            let finished = events.clone();
-            state.job = Some(job::start(
-                params.job_id,
-                Arc::clone(outbox),
-                move |context| copy_job::run(&volume, items, &output_dir, context),
-                move || {
-                    let _ = finished.send(Event::JobFinished);
-                },
-            ));
+            state.job = Some(start_job(params.job_id, outbox, events, move |context| {
+                copy_job::run(&volume, items, &output_dir, context)
+            }));
             to_result(&started)
         }
         IMAGE_CREATE | IMAGE_RESUME => {
-            if state.job.is_some() {
-                return Err(ErrorObject::new(
-                    protocol::error_code::JOB_ALREADY_RUNNING,
-                    "每个引擎进程只运行一个任务",
-                ));
-            }
+            state.ensure_idle()?;
             let params: ImageParams = request.params()?;
             let image_path = Path::new(&params.image_path);
             if !image_path.is_absolute() || image_path.file_name().is_none() {
@@ -458,38 +405,21 @@ fn dispatch_now(
                 image_job::resume(device, image_path, identity)?
             };
             let started = prepared.started();
-            let finished = events.clone();
-            state.job = Some(job::start(
-                params.job_id,
-                Arc::clone(outbox),
-                move |context| image_job::run(prepared, context),
-                move || {
-                    let _ = finished.send(Event::JobFinished);
-                },
-            ));
+            state.job = Some(start_job(params.job_id, outbox, events, move |context| {
+                image_job::run(prepared, context)
+            }));
             to_result(&started)
         }
         FS_CHECK => {
-            if state.job.is_some() {
-                return Err(ErrorObject::new(
-                    protocol::error_code::JOB_ALREADY_RUNNING,
-                    "每个引擎进程只运行一个任务",
-                ));
-            }
+            state.ensure_idle()?;
             let params: FsCheckParams = request.params()?;
             let device = open_source(&params.source)?;
             browse::verify_partition(device.as_ref(), params.partition)?;
             let partition = params.partition;
-            let finished = events.clone();
             state.job = Some(
-                job::start(
-                    params.job_id,
-                    Arc::clone(outbox),
-                    move |context| fs_check_job::run(device.as_ref(), partition, context),
-                    move || {
-                        let _ = finished.send(Event::JobFinished);
-                    },
-                )
+                start_job(params.job_id, outbox, events, move |context| {
+                    fs_check_job::run(device.as_ref(), partition, context)
+                })
                 .pausable(),
             );
             Ok(json!({}))
@@ -813,14 +743,4 @@ fn spawn_heartbeat(outbox: Arc<Outbox>) -> Arc<AtomicBool> {
     stop
 }
 
-/// 把错误及其来源串成一句话。
-pub(crate) fn error_chain(error: &dyn std::error::Error) -> String {
-    let mut message = error.to_string();
-    let mut source = error.source();
-    while let Some(cause) = source {
-        message.push('：');
-        message.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    message
-}
+pub(crate) use yisi_rpc::error_chain;

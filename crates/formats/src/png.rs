@@ -1,8 +1,8 @@
 //! PNG：8 字节签名之后是一串块（长度、类型、数据、CRC），以 IEND 块结束。
 
-use crate::bytes::be32;
 use crate::plugin::{FileFormat, FormatInfo, Recovering, Signature};
 use crate::walker::{Event, Step, Structure, Walker};
+use yisi_part::bytes::be32;
 use yisi_part::crc32::crc32;
 
 const MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";

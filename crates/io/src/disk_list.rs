@@ -58,7 +58,7 @@ pub fn list_disks() -> Vec<DiskInfo> {
 }
 
 fn query_disk(number: u32) -> Option<DiskInfo> {
-    let path = format!(r"\\.\PhysicalDrive{number}");
+    let path = crate::physical_drive_path(number)?;
     let device = OpenOptions::new()
         .access_mode(0)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)

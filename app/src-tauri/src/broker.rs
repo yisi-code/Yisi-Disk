@@ -42,7 +42,7 @@ impl BrokerSession {
                 Err(HostError::new("brokerRejected", error.message))
             }
             // 代理已经不可用（例如被结束）：丢掉这个连接，下次重新启动
-            Err(error) => Err(HostError::new("brokerIo", describe(&error))),
+            Err(error) => Err(HostError::new("brokerIo", yisi_rpc::error_chain(&error))),
         }
     }
 
@@ -57,19 +57,6 @@ fn launch() -> Result<BrokerConnection, HostError> {
     let program = sibling_program("yisi-broker", "brokerNotFound")?;
     BrokerConnection::launch(&program, LAUNCH_TIMEOUT).map_err(|error| match error {
         LaunchError::Cancelled => HostError::new("elevationCancelled", ""),
-        other => HostError::new("brokerStart", describe(&other)),
+        other => HostError::new("brokerStart", yisi_rpc::error_chain(&other)),
     })
-}
-
-/// 把错误及其来源串成一句话。
-#[cfg(windows)]
-fn describe(error: &dyn std::error::Error) -> String {
-    let mut message = error.to_string();
-    let mut source = error.source();
-    while let Some(cause) = source {
-        message.push('：');
-        message.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    message
 }

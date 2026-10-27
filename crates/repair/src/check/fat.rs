@@ -13,7 +13,7 @@ use crate::check::chains::{Layout, MAX_DEPTH, Volume};
 use crate::check::disk::Span;
 use crate::check::issue::{Area, Issue, IssueKind};
 use crate::check::table::{FatTable, Link, Owners, ROOT};
-use crate::check::{CheckItem, Ctx, FsType, Stage, Summary, check_backup};
+use crate::check::{CheckItem, Ctx, Stage, Summary, check_backup};
 
 const ENTRY: usize = 32;
 const ATTR_LFN: u8 = 0x0F;
@@ -57,11 +57,7 @@ pub(crate) fn check(ctx: &mut Ctx, sector: &[u8], from_backup: bool) -> Option<S
     // 簇数与打开卷时算的相同：受 FAT 能装下的表项数限制，分区被截短时只算到分区末尾
     let count = u32::try_from(geometry.usable_clusters(length)).unwrap_or(u32::MAX);
     let is_fat32 = geometry.kind == FsKind::Fat32;
-    let fs = match geometry.kind {
-        FsKind::Fat12 => FsType::Fat12,
-        FsKind::Fat16 => FsType::Fat16,
-        _ => FsType::Fat32,
-    };
+    let fs = geometry.kind;
 
     if !from_backup {
         check_backup(ctx, geometry.kind, sector);
@@ -131,7 +127,7 @@ pub(crate) fn check(ctx: &mut Ctx, sector: &[u8], from_backup: bool) -> Option<S
 
 fn unknown() -> Summary {
     Summary {
-        fs: FsType::Unknown,
+        fs: FsKind::Unknown,
         cluster_size: 0,
         cluster_count: 0,
         used_clusters: 0,
