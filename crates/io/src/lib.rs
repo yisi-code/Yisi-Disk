@@ -28,7 +28,10 @@ mod windows_disk;
 pub use device::BlockDevice;
 #[cfg(windows)]
 pub use disk_list::{BusType, DiskInfo, PartitionStyle, list_disks};
-pub use disk_path::{MAX_DISK_NUMBER, physical_drive_number, physical_drive_path};
+pub use disk_path::{
+    MAX_DISK_NUMBER, physical_drive_number, physical_drive_path, volume_letter, volume_path,
+    volume_root,
+};
 pub use error::IoError;
 pub use imaging::{
     BadMap, ImageStore, ImagingControl, ImagingOptions, ImagingOutcome, MapError, MapHeader,
@@ -40,9 +43,9 @@ pub use scan::{SCAN_BLOCK, ScanControl, scan_device};
 #[cfg(windows)]
 pub use sparse::{is_sparse, make_sparse};
 #[cfg(windows)]
-pub use volume::{OnSource, ensure_off_source, volume_disk_numbers};
+pub use volume::{OnSource, ensure_off_source, ensure_off_volume, volume_disk_numbers};
 #[cfg(windows)]
-pub use volume_info::{MountedVolume, VolumeInfo, mounted_volumes, volume_info};
+pub use volume_info::{MountedVolume, VolumeInfo, mounted_volumes, volume_guid, volume_info};
 pub use window::Window;
 #[cfg(windows)]
 pub use windows_disk::WindowsDisk;

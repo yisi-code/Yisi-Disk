@@ -13,7 +13,7 @@ use windows_sys::Win32::System::Threading::{
     WaitForSingleObject,
 };
 use yisi_broker::protocol::{DiskOpened, FailureData, OPEN_DISK, OpenDiskParams, SHUTDOWN};
-use yisi_io::{BlockDevice, IoError, WindowsDisk, physical_drive_number};
+use yisi_io::{BlockDevice, IoError, WindowsDisk, physical_drive_number, volume_letter};
 use yisi_rpc::{
     ErrorObject, FrameError, Message, Response, error_chain, error_code, read_message,
     write_message,
@@ -66,10 +66,10 @@ pub fn run(pipe_name: &str, parent_pid: u32) -> anyhow::Result<()> {
 }
 
 fn open_disk(path: &str, target_pid: u32) -> Result<Value, ErrorObject> {
-    // 管理员权限下任何文件都能打开，所以只接受物理磁盘路径，不替宿主打开任意文件
-    if physical_drive_number(path).is_none() {
+    // 管理员权限下任何文件都能打开，所以只接受物理磁盘与卷的设备路径，不替宿主打开任意文件
+    if physical_drive_number(path).is_none() && volume_letter(path).is_none() {
         return Err(failed(
-            format!("只接受 \\\\.\\PhysicalDriveN 形式的路径，收到 {path}"),
+            format!("只接受 \\\\.\\PhysicalDriveN 或 \\\\.\\C: 形式的路径，收到 {path}"),
             None,
         ));
     }

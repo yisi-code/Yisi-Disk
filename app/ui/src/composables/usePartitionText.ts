@@ -33,14 +33,19 @@ export function usePartitionText() {
     return te(key) ? t(key) : note
   }
 
-  /** 来源：镜像文件的路径或磁盘编号 */
+  /** 来源：镜像文件的路径、磁盘编号或盘符 */
   function sourceName(source: JobTarget | null): string {
     if (source === null) {
       return ''
     }
-    return source.kind === 'image'
-      ? t('partition.sourceImage', { path: source.path })
-      : t('partition.sourceDisk', { number: source.diskNumber })
+    switch (source.kind) {
+      case 'image':
+        return t('partition.sourceImage', { path: source.path })
+      case 'disk':
+        return t('partition.sourceDisk', { number: source.diskNumber })
+      case 'volume':
+        return t('partition.sourceVolume', { letter: source.letter })
+    }
   }
 
   /** 磁盘的名字：厂商加型号，都没有时是「未命名的磁盘」 */

@@ -524,9 +524,11 @@ fn open_source(source: &Source) -> Result<Box<dyn BlockDevice>, ErrorObject> {
                 )
             }),
         #[cfg(windows)]
-        Source::Disk { handle } => adopt_disk(*handle).map(|disk| reading::metered(Box::new(disk))),
+        Source::Disk { handle } | Source::Volume { handle, .. } => {
+            adopt_disk(*handle).map(|disk| reading::metered(Box::new(disk)))
+        }
         #[cfg(not(windows))]
-        Source::Disk { .. } => Err(ErrorObject::new(
+        Source::Disk { .. } | Source::Volume { .. } => Err(ErrorObject::new(
             protocol::error_code::SOURCE_UNAVAILABLE,
             "当前平台还不支持扫描物理磁盘",
         )),
@@ -548,6 +550,13 @@ fn open_source_for_output(
                 disk.device_number(),
                 yisi_io::volume_disk_numbers(output_dir),
             )?;
+            Ok(reading::metered(Box::new(disk)))
+        }
+        #[cfg(windows)]
+        Source::Volume { handle, letter } => {
+            let letter = letter_param(letter)?;
+            let disk = adopt_disk(*handle)?;
+            ensure_output_off_volume(letter, output_dir)?;
             Ok(reading::metered(Box::new(disk)))
         }
         // 其他平台还打不开物理盘，open_source 直接拒绝，走不到写输出那一步
@@ -592,8 +601,23 @@ fn open_image_source(
             let identity = disk_identity(&disk);
             Ok((reading::metered(Box::new(disk)), identity))
         }
+        #[cfg(windows)]
+        Source::Volume { handle, letter } => {
+            let letter = letter_param(letter)?;
+            let disk = adopt_disk(*handle)?;
+            ensure_output_off_volume(letter, image_path)?;
+            let guid = yisi_io::volume_guid(yisi_io::volume_root(letter)).map_err(|error| {
+                ErrorObject::new(
+                    protocol::error_code::SOURCE_UNAVAILABLE,
+                    format!("查不到 {letter}: 是哪个卷：{error}"),
+                )
+            })?;
+            Ok((reading::metered(Box::new(disk)), volume_identity(&guid)))
+        }
         #[cfg(not(windows))]
-        Source::Disk { .. } => open_source(source).map(|device| (device, "disk".to_owned())),
+        Source::Disk { .. } | Source::Volume { .. } => {
+            open_source(source).map(|device| (device, "disk".to_owned()))
+        }
     }
 }
 
@@ -694,6 +718,37 @@ fn adopt_disk(handle: u64) -> Result<yisi_io::WindowsDisk, ErrorObject> {
     })
 }
 
+/// 盘符参数：一个英文字母，统一成大写。
+#[cfg(windows)]
+fn letter_param(letter: &str) -> Result<char, ErrorObject> {
+    let mut chars = letter.chars();
+    match (chars.next(), chars.next()) {
+        (Some(first), None) if first.is_ascii_alphabetic() => Ok(first.to_ascii_uppercase()),
+        _ => Err(ErrorObject::new(
+            error_code::INVALID_PARAMS,
+            format!("盘符应为一个字母：{letter}"),
+        )),
+    }
+}
+
+/// 卷的标识：卷的 GUID 名。列出磁盘时给界面的标识也用它，与坏区图里记的一致。
+#[cfg(windows)]
+fn volume_identity(guid: &str) -> String {
+    format!("volume {guid}")
+}
+
+/// 源是一个卷时，输出不能写到这个卷上（规则见 [`yisi_io::ensure_off_volume`]）。
+#[cfg(windows)]
+fn ensure_output_off_volume(letter: char, output: &Path) -> Result<(), ErrorObject> {
+    let query = |what: &'static str| move |source| yisi_io::IoError::Query { what, source };
+    yisi_io::ensure_off_volume(
+        letter,
+        yisi_io::volume_guid(yisi_io::volume_root(letter)).map_err(query("源卷")),
+        yisi_io::volume_guid(output).map_err(query("输出位置所在的卷")),
+    )
+    .map_err(|error| ErrorObject::new(protocol::error_code::OUTPUT_ON_SOURCE, error_chain(&error)))
+}
+
 /// 输出不能写到源盘上（规则见 [`yisi_io::ensure_off_source`]）。
 #[cfg(windows)]
 fn ensure_output_elsewhere(
@@ -727,6 +782,7 @@ fn disk_list() -> DiskList {
                 .filter(|volume| volume.disks.contains(&disk.number))
                 .map(|volume| DiskVolume {
                     letter: volume.letter.to_string(),
+                    identity: volume_identity(&volume.guid),
                     label: volume.info.label.clone(),
                     file_system: volume.info.file_system.clone(),
                     total_bytes: volume.info.total_bytes,

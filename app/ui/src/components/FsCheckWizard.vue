@@ -10,14 +10,15 @@ import { useBrowse } from '../composables/useBrowse'
 import { useFsCheck } from '../composables/useFsCheck'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { usePartitionText } from '../composables/usePartitionText'
+import { useSourceSelection } from '../composables/useSourceSelection'
 import {
+  isDeviceKind,
   pickSaveFile,
   saveFsCheckReport,
   toHostError,
   type FsIssue,
   type FsIssueSeverity,
   type HostError,
-  type JobTarget,
   type PartitionInfo,
 } from '../services/host'
 import { formatBytes, formatDateTime, formatHex, formatSeconds } from '../utils/format'
@@ -42,9 +43,7 @@ const fsCheck = useFsCheck()
 
 const titleElement = ref<HTMLHeadingElement | null>(null)
 const step = ref<WizardStep>('source')
-const sourceKind = ref<JobTarget['kind']>('image')
-const imagePath = ref('')
-const selectedDisk = ref<number | null>(null)
+const { sourceKind, imagePath, device, target } = useSourceSelection()
 const selectedPartition = ref<number | null>(null)
 const exportError = ref<HostError | null>(null)
 const exportedPath = ref<string | null>(null)
@@ -54,13 +53,6 @@ const finishedAt = ref<Date | null>(null)
 
 const stepIndex = computed(() => STEPS.indexOf(step.value))
 
-const target = computed<JobTarget | null>(() => {
-  if (sourceKind.value === 'image') {
-    const path = imagePath.value.trim()
-    return path === '' ? null : { kind: 'image', path }
-  }
-  return selectedDisk.value === null ? null : { kind: 'disk', diskNumber: selectedDisk.value }
-})
 
 const partitions = computed(() => browse.opened.value?.partitions ?? [])
 const currentPartition = computed(
@@ -97,7 +89,7 @@ const checkStatusText = computed(() => {
   const stageName = stage !== null && te(`fsCheck.stages.${stage}`) ? t(`fsCheck.stages.${stage}`) : ''
   switch (fsCheck.status.value) {
     case 'starting':
-      return fsCheck.target.value?.kind === 'disk' ? t('fsCheck.run.startingDisk') : t('fsCheck.run.starting')
+      return isDeviceKind(fsCheck.target.value?.kind) ? t('fsCheck.run.startingDisk') : t('fsCheck.run.starting')
     case 'running':
     case 'cancelling':
       if (fsCheck.isPaused.value) {
@@ -505,13 +497,13 @@ function buildReportText(): string {
         <SourcePicker
           v-model:kind="sourceKind"
           v-model:image-path="imagePath"
-          v-model:disk="selectedDisk"
+          v-model:device="device"
           :disk-hint="t('fsCheck.diskHint')"
         />
         <p class="wizard__hint wizard__hint--warning">{{ t('fsCheck.notes.imageFirst') }}</p>
         <p class="wizard__hint">{{ t('fsCheck.notes.readOnly') }}</p>
         <p v-if="browse.status.value === 'starting'" class="wizard__note" aria-live="polite">
-          {{ target?.kind === 'disk' ? t('partition.openingDisk') : t('partition.opening') }}
+          {{ isDeviceKind(target?.kind) ? t('partition.openingDisk') : t('partition.opening') }}
         </p>
         <p v-if="browse.failure.value" class="wizard__error" role="alert">
           {{ formatHostError(browse.failure.value) }}
@@ -558,7 +550,7 @@ function buildReportText(): string {
           <p class="wizard__status">{{ checkStatusText }}</p>
           <ReadHealthHint
             :health="fsCheck.readHealth.value"
-            :source-is-disk="fsCheck.target.value?.kind === 'disk'"
+            :source-is-disk="isDeviceKind(fsCheck.target.value?.kind)"
             context="scan"
           />
         </div>

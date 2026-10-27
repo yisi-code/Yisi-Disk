@@ -11,7 +11,10 @@ import { useHostErrorText } from '../composables/useHostErrorText'
 import { useImageHistory } from '../composables/useImageHistory'
 import { useImageInspection } from '../composables/useImageInspection'
 import { usePartitionText } from '../composables/usePartitionText'
+import { useSourceSelection } from '../composables/useSourceSelection'
 import {
+  isDeviceKind,
+  sameTarget,
   listDisks,
   pickFile,
   toHostError,
@@ -61,9 +64,12 @@ const { dialogError, pickFolder } = useHostDialog()
 const titleElement = ref<HTMLHeadingElement | null>(null)
 const pathInput = ref<HTMLInputElement | null>(null)
 // 做镜像通常是为了出问题的物理盘，默认选它
-const sourceKind = ref<JobTarget['kind']>('disk')
-const sourcePath = ref('')
-const selectedDisk = ref<number | null>(null)
+const {
+  sourceKind,
+  imagePath: sourcePath,
+  device,
+  target: imageTarget,
+} = useSourceSelection('disk')
 const imagePath = ref('')
 /** 整盘，或者只做选中的几段 */
 const scopeMode = ref<'whole' | 'select'>('whole')
@@ -79,13 +85,6 @@ const historyNote = ref('')
 const pickError = ref<HostError | null>(null)
 let inspectTimer: ReturnType<typeof setTimeout> | null = null
 
-const imageTarget = computed<JobTarget | null>(() => {
-  if (sourceKind.value === 'image') {
-    const path = sourcePath.value.trim()
-    return path === '' ? null : { kind: 'image', path }
-  }
-  return selectedDisk.value === null ? null : { kind: 'disk', diskNumber: selectedDisk.value }
-})
 const trimmedImagePath = computed(() => imagePath.value.trim())
 
 /** 手上的查看结果正是当前的源与路径的 */
@@ -95,12 +94,9 @@ const current = computed(() => {
   if (target === null || seen === null || inspection.value === null) {
     return null
   }
-  const sameTarget =
-    target.kind === seen.target.kind &&
-    (target.kind === 'image'
-      ? seen.target.kind === 'image' && target.path === seen.target.path
-      : seen.target.kind === 'disk' && target.diskNumber === seen.target.diskNumber)
-  return sameTarget && seen.imagePath === trimmedImagePath.value ? inspection.value : null
+  return sameTarget(target, seen.target) && seen.imagePath === trimmedImagePath.value
+    ? inspection.value
+    : null
 })
 const existing = computed(() => current.value?.existing ?? null)
 /** 这个位置已有能续做的镜像 */
@@ -266,7 +262,7 @@ const statusText = computed(() => {
     case 'idle':
       return ''
     case 'starting':
-      return lastRequest.value?.target.kind === 'disk'
+      return isDeviceKind(lastRequest.value?.target.kind)
         ? t('common.startingDisk')
         : t('common.startingEngine')
     case 'running':
@@ -370,13 +366,28 @@ function handleExit() {
 }
 
 function sourceLabel(target: JobTarget): string {
-  if (target.kind === 'image') {
-    return target.path
+  switch (target.kind) {
+    case 'image':
+      return target.path
+    case 'disk': {
+      const disk = disks.value.find((candidate) => candidate.number === target.diskNumber)
+      return disk === undefined
+        ? sourceName(target)
+        : t('diskImage.history.diskLabel', { name: diskName(disk), size: formatBytes(disk.size) })
+    }
+    case 'volume': {
+      const volume = disks.value
+        .flatMap((disk) => disk.volumes)
+        .find((candidate) => candidate.letter === target.letter)
+      return volume === undefined
+        ? sourceName(target)
+        : t('diskImage.history.volumeLabel', {
+            letter: volume.letter,
+            label: volume.label,
+            size: formatBytes(volume.totalBytes),
+          })
+    }
   }
-  const disk = disks.value.find((candidate) => candidate.number === target.diskNumber)
-  return disk === undefined
-    ? sourceName(target)
-    : t('diskImage.history.diskLabel', { name: diskName(disk), size: formatBytes(disk.size) })
 }
 
 function handleSubmit() {
@@ -421,15 +432,22 @@ async function useHistory(item: ImageHistoryItem) {
     sourceKind.value = 'image'
     sourcePath.value = record.target.path
   } else {
+    // 盘号、盘符都可能变了：按记下的标识找现在的那一块盘或那个卷
     await loadDisks()
     const disk = disks.value.find((candidate) => candidate.identity === record.sourceIdentity)
-    if (disk === undefined) {
+    const volume = disks.value
+      .flatMap((candidate) => candidate.volumes)
+      .find((candidate) => candidate.identity === record.sourceIdentity)
+    if (disk !== undefined) {
+      sourceKind.value = 'disk'
+      device.value = { kind: 'disk', diskNumber: disk.number }
+    } else if (volume !== undefined) {
+      sourceKind.value = 'disk'
+      device.value = { kind: 'volume', letter: volume.letter }
+    } else {
       historyNote.value = t('diskImage.history.diskMissing', {
         source: record.sourceLabel || record.sourceIdentity,
       })
-    } else {
-      sourceKind.value = 'disk'
-      selectedDisk.value = disk.number
     }
   }
   imagePath.value = record.imagePath
@@ -458,10 +476,14 @@ function removeHistory(item: ImageHistoryItem) {
   void history.remove(item.record.imagePath)
 }
 
-/** 物理磁盘取编号，镜像文件取原文件名：同一个源每次给出同一个名字，续做时容易对上 */
+/** 物理磁盘取编号、卷取盘符，镜像文件取原文件名：同一个源每次给出同一个名字，续做时容易对上 */
 function defaultImageName(): string {
   if (sourceKind.value === 'disk') {
-    return selectedDisk.value === null ? 'disk.img' : `disk${selectedDisk.value}.img`
+    const current = device.value
+    if (current === null) {
+      return 'disk.img'
+    }
+    return current.kind === 'disk' ? `disk${current.diskNumber}.img` : `volume-${current.letter}.img`
   }
   const fileName = sourcePath.value.trim().split(/[\\/]/).pop() ?? ''
   const stem = fileName.replace(/\.[^.]*$/, '')
@@ -573,7 +595,7 @@ function changeText(change: { kind: string; number: number; before: ByteRange | 
           <SourcePicker
             v-model:kind="sourceKind"
             v-model:image-path="sourcePath"
-            v-model:disk="selectedDisk"
+            v-model:device="device"
             :disk-hint="t('diskImage.diskHint')"
             :image-hint="t('diskImage.source.imageHint')"
           />

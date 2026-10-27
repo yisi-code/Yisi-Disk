@@ -7,7 +7,9 @@ import WizardSteps from './WizardSteps.vue'
 import { useBrowse } from '../composables/useBrowse'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { usePartitionText } from '../composables/usePartitionText'
+import { useSourceSelection } from '../composables/useSourceSelection'
 import {
+  isDeviceKind,
   diagnoseBoot,
   toHostError,
   type BootCopyReport,
@@ -33,9 +35,7 @@ const browse = useBrowse()
 
 const titleElement = ref<HTMLHeadingElement | null>(null)
 const step = ref<WizardStep>('source')
-const sourceKind = ref<JobTarget['kind']>('image')
-const imagePath = ref('')
-const selectedDisk = ref<number | null>(null)
+const { sourceKind, imagePath, device, target } = useSourceSelection()
 const diagnosis = shallowRef<BootDiagnosis | null>(null)
 /** 诊断时的源：用备份浏览时打开同一个源 */
 const diagnosedTarget = shallowRef<JobTarget | null>(null)
@@ -50,13 +50,6 @@ const isCopying = ref(false)
 
 const stepIndex = computed(() => STEPS.indexOf(step.value))
 
-const target = computed<JobTarget | null>(() => {
-  if (sourceKind.value === 'image') {
-    const path = imagePath.value.trim()
-    return path === '' ? null : { kind: 'image', path }
-  }
-  return selectedDisk.value === null ? null : { kind: 'disk', diskNumber: selectedDisk.value }
-})
 
 /** 用备份浏览时，浏览会话里这个分区的信息 */
 const browsingPartition = computed(() =>
@@ -82,7 +75,7 @@ const canGoNext = computed(() => step.value === 'source' && target.value !== nul
 const sourceText = computed(() => sourceName(diagnosedTarget.value))
 
 const diagnosingText = computed(() =>
-  diagnosedTarget.value?.kind === 'disk' ? t('repair.diagnose.runningDisk') : t('repair.diagnose.running'),
+  isDeviceKind(diagnosedTarget.value?.kind) ? t('repair.diagnose.runningDisk') : t('repair.diagnose.running'),
 )
 
 onMounted(() => {
@@ -314,7 +307,7 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
         <SourcePicker
           v-model:kind="sourceKind"
           v-model:image-path="imagePath"
-          v-model:disk="selectedDisk"
+          v-model:device="device"
           :disk-hint="t('repair.diskHint')"
         />
       </div>
@@ -342,7 +335,7 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
           <dd>{{ partitionLine(browsingPartition) }}</dd>
         </dl>
         <p class="wizard__hint wizard__hint--warning">{{ t('repair.browse.intro') }}</p>
-        <p v-if="browse.target.value.kind === 'disk'" class="wizard__hint">{{ t('partitionFiles.browse.liveHint') }}</p>
+        <p v-if="isDeviceKind(browse.target.value.kind)" class="wizard__hint">{{ t('partitionFiles.browse.liveHint') }}</p>
         <p v-if="browse.isUnresponsive.value" class="wizard__error" role="alert">
           {{ t('common.unresponsive') }}
         </p>

@@ -39,15 +39,32 @@ pub fn ensure_off_source(
     Ok(())
 }
 
-/// [`ensure_off_source`] 不通过的原因。
+/// 源是一个卷（盘符 `letter`）时的判断：输出所在的卷（[`crate::volume_guid`] 的结果）不能就是它。
+/// 同一块盘上的别的卷可以：写在那里不会覆盖源卷的空闲空间。任何一项查不到都不通过。
+pub fn ensure_off_volume(
+    letter: char,
+    source_volume: Result<String, IoError>,
+    output_volume: Result<String, IoError>,
+) -> Result<(), OnSource> {
+    let source_volume = source_volume.map_err(OnSource::SourceUnknown)?;
+    let output_volume = output_volume.map_err(OnSource::OutputUnknown)?;
+    if source_volume.eq_ignore_ascii_case(&output_volume) {
+        return Err(OnSource::OnSourceVolume(letter));
+    }
+    Ok(())
+}
+
+/// [`ensure_off_source`]、[`ensure_off_volume`] 不通过的原因。
 #[derive(Debug, thiserror::Error)]
 pub enum OnSource {
-    #[error("无法确认源盘的编号")]
+    #[error("无法确认源在哪里")]
     SourceUnknown(#[source] IoError),
-    #[error("无法确认输出位置所在的磁盘")]
+    #[error("无法确认输出位置所在的磁盘或卷")]
     OutputUnknown(#[source] IoError),
     #[error("输出位置在源盘（磁盘 {0}）上")]
     OnSource(u32),
+    #[error("输出位置就在源卷（{0}:）上")]
+    OnSourceVolume(char),
 }
 
 /// `path` 所在的卷落在哪些物理磁盘上，编号与 `\\.\PhysicalDriveN` 的 N 相同；跨盘的卷会有多个。
@@ -204,6 +221,36 @@ mod tests {
             ensure_off_source(Ok(0), Err(query_failed())),
             Err(OnSource::OutputUnknown(_))
         ));
+    }
+
+    #[test]
+    fn output_must_be_off_the_source_volume() {
+        let c = || Ok(r"\\?\Volume{aaaa}\".to_owned());
+        let d = || Ok(r"\\?\Volume{bbbb}\".to_owned());
+        // 同一块盘上的别的卷可以
+        assert!(ensure_off_volume('C', c(), d()).is_ok());
+        assert!(matches!(
+            ensure_off_volume('C', c(), Ok(r"\\?\VOLUME{AAAA}\".to_owned())),
+            Err(OnSource::OnSourceVolume('C'))
+        ));
+        assert!(matches!(
+            ensure_off_volume('C', Err(query_failed()), d()),
+            Err(OnSource::SourceUnknown(_))
+        ));
+        assert!(matches!(
+            ensure_off_volume('C', c(), Err(query_failed())),
+            Err(OnSource::OutputUnknown(_))
+        ));
+    }
+
+    #[test]
+    fn the_system_volume_has_a_guid_and_is_not_another_volume() {
+        let system = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_owned());
+        let root = format!(r"{system}\");
+        let guid = crate::volume_guid(&root).unwrap();
+        assert!(guid.starts_with(VOLUME_PREFIX), "{guid}");
+        let inside = crate::volume_guid(std::env::temp_dir());
+        assert!(inside.is_ok());
     }
 
     fn wide(text: &str) -> Vec<u16> {

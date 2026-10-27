@@ -52,26 +52,16 @@ fn carve_file_types(engines: State<'_, Engines>) -> Result<FileTypeList, HostErr
     engines.file_types()
 }
 
+/// 读取扫描（坏道检测）。第一次读物理磁盘或卷时会弹出 UAC，命令一直等到用户作答、代理打开设备为止。
 #[tauri::command(async)]
-fn job_start_image_scan(
-    app: AppHandle,
-    engines: State<'_, Engines>,
-    job_id: String,
-    path: String,
-) -> Result<(), HostError> {
-    engines.start_image_scan(app, job_id, path)
-}
-
-/// 第一次扫描物理磁盘时会弹出 UAC，命令一直等到用户作答、代理打开磁盘为止。
-#[tauri::command(async)]
-fn job_start_disk_scan(
+fn job_start_read_scan(
     app: AppHandle,
     engines: State<'_, Engines>,
     broker: State<'_, BrokerSession>,
     job_id: String,
-    disk_number: u32,
+    target: Target,
 ) -> Result<(), HostError> {
-    engines.start_disk_scan(app, &broker, job_id, disk_number)
+    engines.start_read_scan(app, &broker, job_id, target)
 }
 
 /// 深度恢复。源为物理磁盘时与读取扫描一样，第一次需要时提权启动磁盘代理。
@@ -497,8 +487,7 @@ fn main() -> anyhow::Result<()> {
             engine_capabilities,
             disk_list,
             carve_file_types,
-            job_start_image_scan,
-            job_start_disk_scan,
+            job_start_read_scan,
             job_start_carve,
             job_cancel,
             job_set_paused,

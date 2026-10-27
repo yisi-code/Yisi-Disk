@@ -1,11 +1,6 @@
 import { ref } from 'vue'
 import { useJob } from './useJob'
-import {
-  startDiskScan,
-  startImageScan,
-  type JobTarget,
-  type ReadScanReport,
-} from '../services/host'
+import { startReadScan, type JobTarget, type ReadScanReport } from '../services/host'
 
 /** 一次读取扫描：在通用任务状态之上记下扫描对象的种类和扫描报告 */
 export function useReadScan() {
@@ -26,11 +21,7 @@ export function useReadScan() {
     }
     targetKind.value = target.kind
     report.value = null
-    await job.start((jobId) =>
-      target.kind === 'image'
-        ? startImageScan(jobId, target.path)
-        : startDiskScan(jobId, target.diskNumber),
-    )
+    await job.start((jobId) => startReadScan(jobId, target))
   }
 
   return {

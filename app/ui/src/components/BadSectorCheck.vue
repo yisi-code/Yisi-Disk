@@ -7,7 +7,8 @@ import JobControls from './JobControls.vue'
 import ReadHealthHint from './ReadHealthHint.vue'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { useReadScan } from '../composables/useReadScan'
-import type { JobTarget } from '../services/host'
+import { useSourceSelection } from '../composables/useSourceSelection'
+import { isDeviceKind } from '../services/host'
 import { formatBytes, formatSeconds } from '../utils/format'
 
 /** 报告里最多列出的读不出区段数；其余只计入总数 */
@@ -34,17 +35,8 @@ const {
 } = useReadScan()
 
 const titleElement = ref<HTMLHeadingElement | null>(null)
-const sourceKind = ref<JobTarget['kind']>('image')
-const imagePath = ref('')
-const selectedDisk = ref<number | null>(null)
+const { sourceKind, imagePath, device, target: scanTarget } = useSourceSelection()
 
-const scanTarget = computed<JobTarget | null>(() => {
-  if (sourceKind.value === 'image') {
-    const path = imagePath.value.trim()
-    return path === '' ? null : { kind: 'image', path }
-  }
-  return selectedDisk.value === null ? null : { kind: 'disk', diskNumber: selectedDisk.value }
-})
 
 const canStart = computed(() => scanTarget.value !== null && !isBusy.value)
 
@@ -58,7 +50,7 @@ const statusText = computed(() => {
     case 'idle':
       return ''
     case 'starting':
-      return targetKind.value === 'disk'
+      return isDeviceKind(targetKind.value)
         ? t('common.startingDisk')
         : t('common.startingEngine')
     case 'running':
@@ -136,7 +128,7 @@ function handleCancel() {
           <SourcePicker
             v-model:kind="sourceKind"
             v-model:image-path="imagePath"
-            v-model:disk="selectedDisk"
+            v-model:device="device"
             :disk-hint="t('badSectors.diskHint')"
           />
         </fieldset>
@@ -155,7 +147,7 @@ function handleCancel() {
         <p class="wizard__status">{{ statusText }}</p>
         <ReadHealthHint
           :health="readHealth"
-          :source-is-disk="targetKind === 'disk'"
+          :source-is-disk="isDeviceKind(targetKind)"
           context="badSectors"
         />
         <p v-if="isUnresponsive" class="wizard__error" role="alert">

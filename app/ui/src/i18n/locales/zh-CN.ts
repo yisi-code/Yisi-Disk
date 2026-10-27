@@ -301,6 +301,7 @@ export default {
       remove: '从列表移除',
       removeHint: '只删这条记录，不删镜像文件',
       diskLabel: '{name} · {size}',
+      volumeLabel: '{letter}: {label} · {size}',
       diskMissing: '原来的盘（{source}）现在没有接上：接上后再点「选用」；也可以在下面手动选源。',
     },
     inspect: {
@@ -470,9 +471,12 @@ export default {
     },
     solidState: '固态',
     spinning: '机械',
-    volume: '{letters} {fileSystem}',
-    letterSeparator: '、',
-    noLetters: '没有盘符（分区可能丢失或未格式化）',
+    chooseHint: '选卡片顶上那一项读整块盘；只读某个盘符时，选它下面对应的那一项。',
+    wholeDisk: '整块盘 · {size}',
+    volumeName: '{label}（{letter}:）',
+    volumeNoLabel: '本地磁盘',
+    volumeUsage: '已用 {used} / {total} · {fileSystem}',
+    noLetters: '没有盘符（分区可能丢失或未格式化），只能整块盘读',
     details: '详情',
     facts: {
       bus: '接口',
@@ -480,9 +484,6 @@ export default {
       sectorValue: '{size} 字节',
       serial: '序列号',
       unknown: '查不到',
-      volume: '{letter}: 盘',
-      volumeValue: '{label} · {fileSystem} · 已用 {used} / {total}',
-      noLabel: '无卷标',
     },
     bus: {
       ata: 'ATA',
@@ -614,6 +615,10 @@ export default {
     imagePathPlaceholder: '镜像文件的完整路径，例如 D:/images/disk.img',
     pickTitle: '选择镜像文件',
     browse: '选择文件…',
+    folder: '文件夹',
+    folderPath: '文件夹路径',
+    folderPathPlaceholder: '要找回删掉的文件的文件夹，例如 D:/照片/2024',
+    pickFolderTitle: '选择要找回删掉的文件的文件夹',
   },
   preview: {
     loading: '正在读取…',
@@ -699,6 +704,7 @@ export default {
     openingDisk: '正在请求管理员权限并读取分区表…',
     sourceImage: '镜像文件 {path}',
     sourceDisk: '磁盘 {number}',
+    sourceVolume: '{letter}: 盘',
   },
   undelete: {
     steps: {
@@ -707,7 +713,10 @@ export default {
       browse: '浏览与复制',
     },
     diskHint:
-      '读取物理磁盘需要管理员权限，只读、不会改动这块盘。找回的文件必须复制到另一块磁盘上；已经报过读错误的盘，请先制作镜像，再从镜像找回。',
+      '读取物理磁盘需要管理员权限，只读、不会改动这块盘。找回的文件不能复制回正在读的地方：选整块盘时复制到另一块磁盘，只选一个盘符时复制到别的盘符即可；已经报过读错误的盘，请先制作镜像，再从镜像找回。',
+    folderHint:
+      '只看这个文件夹里删掉的文件：程序读它所在的盘符（需要管理员权限，只读），扫描后直接打开这个文件夹。找回的文件要复制到别的盘符。',
+    folderInvalid: '请填写带盘符的完整路径，例如 D:/照片/2024（网络路径不行）。',
   },
   partitionFiles: {
     browse: {
@@ -718,6 +727,7 @@ export default {
       stateHint:
         '「可能完整」只表示存放它的位置还没被别的文件占用，不保证内容一定对；复制出来后请打开核对。固态硬盘开了 TRIM 时，删除的文件常常已被清零。在这里找不到的文件，可以试试「按文件类型深度恢复」。',
       timesUtc: '这个分区记录的是 UTC 时间，与资源管理器里显示的本地时间可能差几个小时。',
+      revealMissing: '没找到文件夹「{name}」（可能已被删除或改名），下面停在它的上一级。',
     },
     browser: {
       title: '分区里的文件',
@@ -1370,7 +1380,8 @@ export default {
     unsupportedPlatform: '当前平台还不支持这项操作',
     sourceUnavailable: '打不开要读取的磁盘或镜像',
     outputUnavailable: '无法创建或写入输出目录',
-    outputOnSource: '输出目录必须在另一块磁盘上：写回被扫描的盘，会覆盖还没找回的数据',
+    outputOnSource:
+      '保存位置不能在正在读的地方：选整块盘时要放到另一块磁盘，选一个盘符时要放到别的盘符。写回去会覆盖还没找回的数据',
     previewUnavailable: '无法读取这个文件',
     recoveredNotFound: '找不到这个恢复出的文件',
     invalidRecoveredName: '文件名不是恢复时起的名字',

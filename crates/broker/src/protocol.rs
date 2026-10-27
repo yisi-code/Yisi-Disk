@@ -2,8 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-/// 物理磁盘的路径规则（代理只接受 `\\.\PhysicalDriveN`），宿主据此拼路径。
-pub use yisi_io::{MAX_DISK_NUMBER, physical_drive_path};
+/// 物理磁盘与卷的路径规则（代理只接受 `\\.\PhysicalDriveN` 与 `\\.\C:`），宿主据此拼路径。
+pub use yisi_io::{MAX_DISK_NUMBER, physical_drive_path, volume_path};
 
 /// 以只读方式打开物理磁盘，把句柄复制进 `targetPid` 进程。参数 [`OpenDiskParams`]，结果 [`DiskOpened`]。
 pub const OPEN_DISK: &str = "broker.openDisk";
