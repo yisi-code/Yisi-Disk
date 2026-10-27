@@ -2,10 +2,10 @@
 //! `$MFT` 第一条记录、`$MFTMirr` 与 `$MFT` 前几条记录是否一致。
 
 use yisi_fs::bpb::{self, NtfsBpb as Geometry, Problem};
-use yisi_part::bytes::le16;
+use yisi_fs::{FsKind, mft_self_record_ok};
 
 use crate::check::issue::{Area, Issue, IssueKind};
-use crate::check::{CheckItem, Ctx, FsType, Stage, Summary};
+use crate::check::{CheckItem, Ctx, FsType, Stage, Summary, check_backup};
 
 /// `$MFTMirr` 至少镜像前 4 条记录（`$MFT`、`$MFTMirr`、`$LogFile`、`$Volume`）。
 const MIRRORED_RECORDS: u64 = 4;
@@ -16,14 +16,15 @@ fn parse(sector: &[u8]) -> (Option<Geometry>, Vec<Problem>) {
     (checked.geometry, checked.problems)
 }
 
-pub(crate) fn looks_valid(sector: &[u8]) -> bool {
-    parse(sector).0.is_some()
-}
-
 /// 检查一个 NTFS 卷。被取消时返回 `None`。
 pub(crate) fn check(ctx: &mut Ctx, sector: &[u8], from_backup: bool) -> Option<Summary> {
     let (geometry, problems) = parse(sector);
-    ctx.boot_problems(&problems, Area::Boot);
+    let area = if from_backup {
+        Area::BackupBoot
+    } else {
+        Area::Boot
+    };
+    ctx.boot_problems(&problems, area);
     let Some(geometry) = geometry else {
         return Some(summary(FsType::Ntfs, 0, 0));
     };
@@ -40,7 +41,7 @@ pub(crate) fn check(ctx: &mut Ctx, sector: &[u8], from_backup: bool) -> Option<S
         );
     }
     if !from_backup {
-        check_backup(ctx, &geometry, sector);
+        check_backup(ctx, FsKind::Ntfs, sector);
     }
     let clusters = volume_bytes / geometry.cluster_size;
     let summary = summary(FsType::Ntfs, geometry.cluster_size, clusters);
@@ -56,9 +57,8 @@ pub(crate) fn check(ctx: &mut Ctx, sector: &[u8], from_backup: bool) -> Option<S
     };
     ctx.checked(CheckItem::Mft);
     let first = mft.get(..geometry.record_size as usize).unwrap_or_default();
-    // 第一条记录就是 $MFT 自己：签名是 FILE，并且在用
-    let in_use = le16(first, 22).is_some_and(|flags| flags & 0x01 != 0);
-    if first.get(..4) != Some(b"FILE".as_slice()) || !in_use {
+    // 第一条记录就是 $MFT 自己：判断与打开卷相同（签名、更新序列、记录头都对，在用，是基本记录）
+    if !mft_self_record_ok(first) {
         ctx.issues
             .push(Issue::new(IssueKind::MftInvalid).area(Area::Mft));
     }
@@ -129,26 +129,4 @@ fn read_records(
     let mut data = vec![0u8; length as usize];
     let bad = ctx.read(start, &mut data, area, None)?;
     bad.is_empty().then_some(data)
-}
-
-/// 备份引导扇区在 BPB 记录的扇区数处（分区最后一个扇区）：应能认出，参数应与主引导扇区一致。
-fn check_backup(ctx: &mut Ctx, geometry: &Geometry, main: &[u8]) {
-    ctx.checked(CheckItem::BackupBoot);
-    let at = geometry
-        .total_sectors
-        .saturating_mul(geometry.bytes_per_sector);
-    let mut backup = vec![0u8; 512];
-    let readable = ctx
-        .read(at, &mut backup, Area::BackupBoot, None)
-        .is_some_and(|bad| bad.is_empty());
-    if !readable || parse(&backup).0.is_none() {
-        ctx.issues
-            .push(Issue::new(IssueKind::BackupBootInvalid).area(Area::BackupBoot));
-        return;
-    }
-    // 比到卷序列号为止（0x0B 到 0x50）
-    if backup.get(0x0B..0x50) != main.get(0x0B..0x50) {
-        ctx.issues
-            .push(Issue::new(IssueKind::BackupBootMismatch).area(Area::BackupBoot));
-    }
 }

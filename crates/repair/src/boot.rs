@@ -13,7 +13,6 @@ use yisi_fs::boot::{
 use yisi_fs::bpb::{self, Problem, Rule};
 use yisi_fs::{BootCopy, FsKind, Volume};
 use yisi_io::BlockDevice;
-use yisi_part::bytes::{le16, le32, le64};
 use yisi_part::{PartError, Partition, PartitionKind, PartitionTable, Role};
 
 /// 分区比引导扇区记的卷大这么多以上，才算长度不符（对齐、分区工具留的零头不算）。
@@ -74,6 +73,8 @@ pub enum Issue {
     BadRootCluster(u64),
     /// FAT32 不镜像时指定的那一份 FAT 不存在（值为扩展标志）。
     BadActiveFat(u64),
+    /// FAT32 记的备份引导扇区不在保留区里，等于没有备份（值为扇区号）。
+    BadBackupSector(u64),
     /// NTFS 的 MFT 记录大小、索引块大小不合法。
     BadRecordSize,
     BadIndexSize,
@@ -98,13 +99,8 @@ pub enum TableIssue {
     VolumeSmaller { volume: u64, partition: u64 },
 }
 
-/// 主备之间不一样的一个字段。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Difference {
-    pub field: &'static str,
-    pub primary: u64,
-    pub backup: u64,
-}
+/// 主备之间不一样的一个字段：比哪些字段在 [`bpb::significant_fields`]，与文件系统检查共用。
+pub use yisi_fs::bpb::FieldDifference as Difference;
 
 /// 一份引导扇区的核对结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,7 +190,7 @@ pub fn diagnose_partition(device: &Arc<dyn BlockDevice>, partition: &Partition) 
         .or_else(|| {
             candidates.iter().find_map(|candidate| {
                 let sector = reader.read(candidate.offset, 512)?;
-                matches_family(candidate, &sector).then_some(family_kind(candidate.family))
+                matches_family(candidate, &sector).then_some(candidate.family.kind())
             })
         })
         .or_else(|| hinted_by_table(partition))
@@ -219,7 +215,7 @@ pub fn diagnose_partition(device: &Arc<dyn BlockDevice>, partition: &Partition) 
     }
 
     report.primary = reader.check(filesystem, 0, primary.as_deref(), None);
-    let family = backup_family(filesystem);
+    let family = BackupFamily::of(filesystem);
     if let Some(family) = family {
         let mine: Vec<&Candidate> = candidates
             .iter()
@@ -258,7 +254,7 @@ pub fn diagnose_partition(device: &Arc<dyn BlockDevice>, partition: &Partition) 
                 && primary_kind == Some(filesystem)
                 && recognised
             {
-                report.differences = differences(filesystem, primary_bytes, backup_bytes);
+                report.differences = bpb::differing_fields(filesystem, primary_bytes, backup_bytes);
             }
             report.backup = Some(backup);
         }
@@ -431,6 +427,7 @@ fn issue_from(problem: &Problem) -> Issue {
         Rule::FatSize => Issue::BadFatSize(value),
         Rule::Layout | Rule::ClusterCount => Issue::BadLayout,
         Rule::ActiveFat => Issue::BadActiveFat(value),
+        Rule::BackupBoot => Issue::BadBackupSector(value),
         Rule::RootCluster => Issue::BadRootCluster(value),
         Rule::RecordSize => Issue::BadRecordSize,
         Rule::IndexSize => Issue::BadIndexSize,
@@ -441,25 +438,8 @@ fn issue_from(problem: &Problem) -> Issue {
 
 /// 候选位置上的扇区看起来是不是这种文件系统的引导扇区（参数可以是坏的）。
 fn matches_family(candidate: &Candidate, sector: &[u8]) -> bool {
-    remnant_kind(sector) == Some(family_kind(candidate.family))
+    remnant_kind(sector) == Some(candidate.family.kind())
         || backup_kind(candidate, sector).is_some()
-}
-
-fn family_kind(family: BackupFamily) -> FsKind {
-    match family {
-        BackupFamily::Fat32 => FsKind::Fat32,
-        BackupFamily::Exfat => FsKind::Exfat,
-        BackupFamily::Ntfs => FsKind::Ntfs,
-    }
-}
-
-fn backup_family(kind: FsKind) -> Option<BackupFamily> {
-    match kind {
-        FsKind::Fat32 => Some(BackupFamily::Fat32),
-        FsKind::Exfat => Some(BackupFamily::Exfat),
-        FsKind::Ntfs => Some(BackupFamily::Ntfs),
-        _ => None,
-    }
 }
 
 /// 两处都认不出时，按分区表里的类型推测（只认 FAT 的几种类型；NTFS 与 exFAT 共用 0x07，推不出是哪种）。
@@ -530,82 +510,6 @@ fn type_matches(partition: &Partition, kind: FsKind) -> bool {
                     | Role::LdmMetadata
             )
         ),
-    }
-}
-
-/// 主备之间不一样的字段。exFAT 的卷标志与使用百分比允许不同（只在主引导扇区里更新）。
-fn differences(kind: FsKind, primary: &[u8], backup: &[u8]) -> Vec<Difference> {
-    let left = fields(kind, primary);
-    let right = fields(kind, backup);
-    left.into_iter()
-        .zip(right)
-        .filter(|((_, a), (_, b))| a != b)
-        .map(|((field, primary), (_, backup))| Difference {
-            field,
-            primary,
-            backup,
-        })
-        .collect()
-}
-
-fn fields(kind: FsKind, sector: &[u8]) -> Vec<(&'static str, u64)> {
-    let u8_at = |at| u64::from(sector.get(at).copied().unwrap_or(0));
-    let u16_at = |at| u64::from(le16(sector, at).unwrap_or(0));
-    let u32_at = |at| u64::from(le32(sector, at).unwrap_or(0));
-    let u64_at = |at| le64(sector, at).unwrap_or(0);
-    match kind {
-        FsKind::Exfat => vec![
-            ("partitionOffset", u64_at(64)),
-            ("volumeLength", u64_at(72)),
-            ("fatOffset", u32_at(80)),
-            ("fatLength", u32_at(84)),
-            ("clusterHeapOffset", u32_at(88)),
-            ("clusterCount", u32_at(92)),
-            ("rootCluster", u32_at(96)),
-            ("volumeSerial", u32_at(100)),
-            (
-                "bytesPerSector",
-                1u64.checked_shl(u8_at(108) as u32).unwrap_or(0),
-            ),
-            (
-                "sectorsPerCluster",
-                1u64.checked_shl(u8_at(109) as u32).unwrap_or(0),
-            ),
-            ("fatCount", u8_at(110)),
-        ],
-        FsKind::Ntfs => vec![
-            ("bytesPerSector", u16_at(0x0B)),
-            ("sectorsPerCluster", u8_at(0x0D)),
-            ("totalSectors", u64_at(0x28)),
-            ("mftCluster", u64_at(0x30)),
-            ("mirrorCluster", u64_at(0x38)),
-            ("recordSize", u8_at(0x40)),
-            ("indexSize", u8_at(0x44)),
-            ("volumeSerial", u64_at(0x48)),
-        ],
-        _ => {
-            let is_fat32 = kind == FsKind::Fat32;
-            let total = match u16_at(19) {
-                0 => u32_at(32),
-                total => total,
-            };
-            let mut list = vec![
-                ("bytesPerSector", u16_at(11)),
-                ("sectorsPerCluster", u8_at(13)),
-                ("reservedSectors", u16_at(14)),
-                ("fatCount", u8_at(16)),
-                ("rootEntries", u16_at(17)),
-                ("totalSectors", total),
-                ("media", u8_at(21)),
-                ("fatSize", if is_fat32 { u32_at(36) } else { u16_at(22) }),
-                ("volumeSerial", u32_at(if is_fat32 { 67 } else { 39 })),
-            ];
-            if is_fat32 {
-                list.push(("rootCluster", u32_at(44)));
-                list.push(("backupSector", u16_at(50)));
-            }
-            list
-        }
     }
 }
 

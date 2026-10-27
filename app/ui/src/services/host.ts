@@ -118,7 +118,7 @@ export interface BootIssue {
   expected: number | null
 }
 
-/** 主备之间不一样的一个字段，界面按 repair.field.<field> 显示字段名 */
+/** 主备之间不一样的一个字段，`field` 是规范里的字段名，界面按 bootField.<field> 显示（与检查文件系统共用） */
 export interface BootDifference {
   field: string
   primary: number

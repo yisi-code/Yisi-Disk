@@ -181,6 +181,24 @@ fn deleted_fragmented_fat_file_is_read_as_contiguous() {
 }
 
 #[test]
+fn fat16_ignores_the_high_cluster_word() {
+    // FAT12/16 目录项的第 20、21 字节不是首簇的高位（OS/2 等系统另有用途），不为 0 也不影响读
+    let mut sample = FatImage::new(FatType::Fat16);
+    let root = sample.root();
+    let data = pattern(7, 100);
+    sample.add_short_file(root, "README.TXT", &data);
+    let mut image = sample.finish();
+    let at = image
+        .windows(11)
+        .position(|window| window == b"README  TXT")
+        .unwrap();
+    image[at + 20..at + 22].copy_from_slice(&0x1234u16.to_le_bytes());
+    let volume = open(image);
+    let entries = volume.list(&volume.root()).unwrap().entries;
+    assert_eq!(read_all(&volume, &find(&entries, "README.TXT").file), data);
+}
+
+#[test]
 fn fat32_cleared_high_word_makes_overwritten_files_unknown() {
     let mut sample = FatImage::new(FatType::Fat32);
     let root = sample.root();

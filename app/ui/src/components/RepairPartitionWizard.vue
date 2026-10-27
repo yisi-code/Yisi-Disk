@@ -11,25 +11,22 @@ import {
   toHostError,
   type BootCopyReport,
   type BootDiagnosis,
-  type BootDifference,
   type BootIssue,
   type HostError,
   type JobTarget,
   type PartitionBoot,
   type PartitionRef,
 } from '../services/host'
-import { formatBytes } from '../utils/format'
+import { formatBytes, formatHex } from '../utils/format'
 
 const STEPS = ['source', 'diagnose', 'result'] as const
 type WizardStep = (typeof STEPS)[number]
-/** 这些字段按十六进制显示 */
-const HEX_FIELDS = ['volumeSerial', 'media']
 
 const emit = defineEmits<{ exit: [] }>()
 
 const { t, te, locale } = useI18n()
 const { formatHostError } = useHostErrorText()
-const { tableNote, sourceName } = usePartitionText()
+const { tableNote, sourceName, bootFieldName, bootFieldValue } = usePartitionText()
 const browse = useBrowse()
 
 const titleElement = ref<HTMLHeadingElement | null>(null)
@@ -217,10 +214,6 @@ function volumeText(copy: BootCopyReport): string | null {
   })
 }
 
-function hex(value: number, digits: number): string {
-  return `0x${value.toString(16).toUpperCase().padStart(digits, '0')}`
-}
-
 function plain(value: number | null): string {
   return value === null ? '' : value.toLocaleString(locale.value)
 }
@@ -236,11 +229,11 @@ function issueText(issue: BootIssue): string {
       return t(key, { value: formatBytes(issue.value ?? 0), expected: formatBytes(issue.expected ?? 0) })
     case 'checksumMismatch':
       if (issue.value === null) {
-        return t('repair.issue.checksumUneven', { expected: hex(issue.expected ?? 0, 8) })
+        return t('repair.issue.checksumUneven', { expected: formatHex(issue.expected ?? 0, 8) })
       }
-      return t(key, { value: hex(issue.value, 8), expected: hex(issue.expected ?? 0, 8) })
+      return t(key, { value: formatHex(issue.value, 8), expected: formatHex(issue.expected ?? 0, 8) })
     case 'badMedia':
-      return t(key, { value: hex(issue.value ?? 0, 2) })
+      return t(key, { value: formatHex(issue.value ?? 0, 2) })
     default:
       return t(key, { value: plain(issue.value), expected: plain(issue.expected) })
   }
@@ -255,15 +248,6 @@ function tableIssueText(partition: PartitionBoot, issue: BootIssue): string {
     })
   }
   return issueText(issue)
-}
-
-function fieldName(difference: BootDifference): string {
-  const key = `repair.field.${difference.field}`
-  return te(key) ? t(key) : difference.field
-}
-
-function fieldValue(difference: BootDifference, value: number): string {
-  return HEX_FIELDS.includes(difference.field) ? hex(value, 2) : value.toLocaleString(locale.value)
 }
 
 /** 引导扇区正常、却打不开卷：问题在文件系统内部 */
@@ -492,9 +476,9 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
             </thead>
             <tbody>
               <tr v-for="difference in partition.differences" :key="difference.field">
-                <th scope="row">{{ fieldName(difference) }}</th>
-                <td class="wizard__number">{{ fieldValue(difference, difference.primary) }}</td>
-                <td class="wizard__number">{{ fieldValue(difference, difference.backup) }}</td>
+                <th scope="row">{{ bootFieldName(difference.field) }}</th>
+                <td class="wizard__number">{{ bootFieldValue(difference.field, difference.primary) }}</td>
+                <td class="wizard__number">{{ bootFieldValue(difference.field, difference.backup) }}</td>
               </tr>
             </tbody>
           </table>

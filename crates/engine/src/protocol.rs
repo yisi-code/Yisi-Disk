@@ -784,7 +784,7 @@ pub struct BootCopyReport {
 
 /// 一个问题。`code` 为 unreadable、blank、missingSignature、badJump、badOemId、badLegacyFields、badBytesPerSector、
 /// sectorSizeMismatch、badSectorsPerCluster、badReservedSectors、badFatCount、badFatSize、badMedia、badRootEntries、
-/// badTotalSectors、badLayout、badRootCluster、badActiveFat、badRecordSize、badIndexSize、mftOutside、mirrorOutside、checksumMismatch
+/// badTotalSectors、badLayout、badRootCluster、badActiveFat、badBackupSector、badRecordSize、badIndexSize、mftOutside、mirrorOutside、checksumMismatch
 /// 之一（分区表的问题见 [`PartitionBoot::table_issues`]）。`value` 是引导扇区里记的值，`expected` 是应有的值（有的话）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -796,7 +796,8 @@ pub struct BootIssue {
     pub expected: Option<u64>,
 }
 
-/// 主备之间不一样的一个字段：`field` 为 bytesPerSector、sectorsPerCluster、totalSectors、volumeSerial 这样的名字。
+/// 主备之间不一样的一个字段：`field` 为规范里的字段名（bytesPerSector、clusterHeapOffset、volumeSerial 这样），
+/// 与文件系统检查里的 `field` 同名，界面按 `bootField.<field>` 显示。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BootDifference {

@@ -17,6 +17,7 @@ use self::record::{
 };
 use self::scan::Scan;
 use self::stream::Stream;
+use crate::bpb::NtfsBpb;
 use crate::entry::{Entry, FileRef, Listing, Location, State, Unsupported, nt_time};
 use crate::reader::{FileReader, Piece};
 use crate::region::Region;
@@ -45,28 +46,9 @@ const TAG_SYMLINK: u32 = 0xA000_000C;
 const MAX_ATTRIBUTE_LIST: u64 = 1 << 20;
 const MAX_EXTENSIONS: usize = 4096;
 
-/// 引导扇区里的几何参数。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Geometry {
-    pub bytes_per_sector: u64,
-    pub cluster_size: u64,
-    pub total_bytes: u64,
-    pub mft_lcn: u64,
-    pub mirror_lcn: u64,
-    pub record_size: u64,
-}
-
 /// 解析引导扇区；有致命问题时返回 `None`（规则在 [`bpb`](crate::bpb)）。
-pub(crate) fn parse_boot(sector: &[u8]) -> Option<Geometry> {
-    let bpb = bpb::check_ntfs(sector).geometry?;
-    Some(Geometry {
-        bytes_per_sector: bpb.bytes_per_sector,
-        cluster_size: bpb.cluster_size,
-        total_bytes: bpb.total_bytes(),
-        mft_lcn: bpb.mft_lcn,
-        mirror_lcn: bpb.mirror_lcn,
-        record_size: bpb.record_size,
-    })
+pub(crate) fn parse_boot(sector: &[u8]) -> Option<NtfsBpb> {
+    bpb::check_ntfs(sector).geometry
 }
 
 /// 一个属性的内容（数据流、索引等）。
@@ -129,12 +111,22 @@ pub(crate) struct Ntfs {
     scan_lock: Mutex<()>,
 }
 
+/// `$MFT` 的第一条记录（`$MFT` 自己）可用：签名、更新序列、记录头都对，在用，且是基本记录。
+/// 打开卷、文件系统检查与丢失分区搜索都按这一条判断 `$MFT`（或 `$MFTMirr`）在不在。
+pub fn mft_self_record_ok(bytes: &[u8]) -> bool {
+    Record::parse(bytes.to_vec(), MFT_RECORD).is_some_and(|record| is_mft_self(&record))
+}
+
+fn is_mft_self(record: &Record) -> bool {
+    record.in_use() && record.is_base()
+}
+
 impl Ntfs {
     /// 按引导扇区 `boot`（主的或备份的）打开。
     pub fn open(region: Region, boot: &[u8]) -> Result<Self, FsError> {
         let geometry = parse_boot(boot).ok_or(FsError::Invalid("NTFS 引导扇区的参数不自洽"))?;
         let cluster_size = geometry.cluster_size;
-        let cluster_count = geometry.total_bytes.min(region.length()) / cluster_size;
+        let cluster_count = geometry.total_bytes().min(region.length()) / cluster_size;
         let record_size = geometry.record_size;
 
         // $MFT 自己的记录：主表读不出时用 $MFTMirr 里的副本
@@ -143,7 +135,7 @@ impl Ntfs {
             region
                 .read_exact(lcn.checked_mul(cluster_size)?, &mut bytes)
                 .ok()?;
-            Record::parse(bytes, MFT_RECORD).filter(|record| record.in_use() && record.is_base())
+            Record::parse(bytes, MFT_RECORD).filter(is_mft_self)
         };
         let base = read_first(geometry.mft_lcn)
             .or_else(|| read_first(geometry.mirror_lcn))

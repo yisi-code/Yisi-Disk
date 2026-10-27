@@ -1,6 +1,10 @@
-//! FAT 表（FAT12/16/32 与 exFAT 共用）的按块读取与表项解释，以及「哪个簇归哪个文件」的认领表。
+//! FAT 表（FAT12/16/32 与 exFAT 共用）的按块读取，以及「哪个簇归哪个文件」的认领表。
+//! 表项的位置与含义按 [`yisi_fs::format`]，与浏览共用。
 
 use std::collections::HashMap;
+
+pub(crate) use yisi_fs::format::FatWidth as Width;
+use yisi_fs::format::{FatEntry, decode_fat_entry, fat_entry_raw, fat_entry_span, is_cluster};
 
 use crate::check::Ctx;
 use crate::check::disk::Span;
@@ -13,14 +17,6 @@ const MAX_CHUNKS: usize = 512;
 /// 认领表最多跟踪这么多个簇（每簇 4 字节，256 MiB）；更大的卷不做交叉链接、丢失簇与位图的检查。
 pub(crate) const MAX_TRACKED_CLUSTERS: u64 = 64 << 20;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Width {
-    Fat12,
-    Fat16,
-    Fat32,
-    Exfat,
-}
-
 /// 一个 FAT 表项的含义。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Link {
@@ -28,7 +24,7 @@ pub(crate) enum Link {
     Next(u32),
     End,
     Bad,
-    /// 指向簇区之外，或者是保留值。
+    /// 不是合法的簇号，也不是标记值。
     Invalid(u32),
     /// 表项所在的扇区读不出，或者 FAT 太短、没有这一项。
     Unknown,
@@ -69,56 +65,30 @@ impl FatTable {
     }
 
     pub fn is_valid(&self, cluster: u32) -> bool {
-        cluster >= 2 && u64::from(cluster) < u64::from(self.count) + 2
+        is_cluster(cluster, self.count)
     }
 
     /// 表项 `cluster` 的原始值；读不出或超出 FAT 时为 `None`。
     pub fn raw(&mut self, ctx: &mut Ctx, cluster: u32) -> Option<u32> {
-        let cluster = u64::from(cluster);
-        Some(match self.width {
-            Width::Fat12 => {
-                let at = cluster + cluster / 2;
-                let pair = u16::from_le_bytes([self.byte(ctx, at)?, self.byte(ctx, at + 1)?]);
-                u32::from(if cluster % 2 == 1 {
-                    pair >> 4
-                } else {
-                    pair & 0x0FFF
-                })
-            }
-            Width::Fat16 => u32::from(u16::from_le_bytes(self.bytes::<2>(ctx, cluster * 2)?)),
-            Width::Fat32 | Width::Exfat => u32::from_le_bytes(self.bytes::<4>(ctx, cluster * 4)?),
-        })
+        let (at, len) = fat_entry_span(self.width, cluster);
+        let mut bytes = [0u8; 4];
+        for (index, slot) in bytes.iter_mut().take(len).enumerate() {
+            *slot = self.byte(ctx, at.checked_add(index as u64)?)?;
+        }
+        fat_entry_raw(self.width, cluster, &bytes)
     }
 
     pub fn link(&mut self, ctx: &mut Ctx, cluster: u32) -> Link {
         let Some(raw) = self.raw(ctx, cluster) else {
             return Link::Unknown;
         };
-        let (value, bad, end, reserved) = match self.width {
-            Width::Fat12 => (raw, 0xFF7, 0xFF8, 0xFF0),
-            Width::Fat16 => (raw, 0xFFF7, 0xFFF8, 0xFFF0),
-            Width::Fat32 => (raw & 0x0FFF_FFFF, 0x0FFF_FFF7, 0x0FFF_FFF8, 0x0FFF_FFF0),
-            Width::Exfat => (raw, 0xFFFF_FFF7, 0xFFFF_FFF8, 0xFFFF_FFF7),
-        };
-        if value == 0 {
-            Link::Free
-        } else if value == bad {
-            Link::Bad
-        } else if value >= end {
-            Link::End
-        } else if value >= reserved || !self.is_valid(value) {
-            Link::Invalid(value)
-        } else {
-            Link::Next(value)
+        match decode_fat_entry(self.width, raw, self.count) {
+            FatEntry::Free => Link::Free,
+            FatEntry::Next(next) => Link::Next(next),
+            FatEntry::End => Link::End,
+            FatEntry::Bad => Link::Bad,
+            FatEntry::Invalid(value) => Link::Invalid(value),
         }
-    }
-
-    fn bytes<const N: usize>(&mut self, ctx: &mut Ctx, at: u64) -> Option<[u8; N]> {
-        let mut out = [0u8; N];
-        for (index, slot) in out.iter_mut().enumerate() {
-            *slot = self.byte(ctx, at.checked_add(index as u64)?)?;
-        }
-        Some(out)
     }
 
     fn byte(&mut self, ctx: &mut Ctx, at: u64) -> Option<u8> {

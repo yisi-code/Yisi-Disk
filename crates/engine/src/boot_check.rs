@@ -125,6 +125,7 @@ fn issue(issue: &Issue) -> BootIssue {
         Issue::BadLayout => ("badLayout", None, None),
         Issue::BadRootCluster(value) => ("badRootCluster", Some(value), None),
         Issue::BadActiveFat(value) => ("badActiveFat", Some(value), None),
+        Issue::BadBackupSector(value) => ("badBackupSector", Some(value), None),
         Issue::BadRecordSize => ("badRecordSize", None, None),
         Issue::BadIndexSize => ("badIndexSize", None, None),
         Issue::MftOutside(value) => ("mftOutside", Some(value), None),

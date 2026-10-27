@@ -152,11 +152,17 @@ fn broken_primary_with_intact_backup_can_be_browsed_from_the_backup() {
                 .any(|issue| matches!(issue, Issue::BadBytesPerSector(_))),
             "{skewed:#?}"
         );
+        // 字段用规范里的名字，exFAT 记的是扇区大小的位移
+        let field = if kind == FsKind::Exfat {
+            "bytesPerSectorShift"
+        } else {
+            "bytesPerSector"
+        };
         assert!(
             skewed
                 .differences
                 .iter()
-                .any(|difference| difference.field == "bytesPerSector"),
+                .any(|difference| difference.field == field),
             "{skewed:#?}"
         );
     }

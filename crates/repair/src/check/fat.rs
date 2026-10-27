@@ -1,112 +1,51 @@
 //! FAT12 / FAT16 / FAT32 的检查：引导扇区、备份引导扇区与 FSInfo、两份 FAT 是否一致、
 //! 目录树（长文件名的校验和与序号、`.` 与 `..`）、每个文件的 FAT 链、丢失簇。依据微软公开的 FAT 规范。
 
-use yisi_fs::bpb::{self, Problem};
-use yisi_fs::{FsKind, fat_short_checksum as short_checksum, fat_short_display};
-use yisi_part::bytes::{le16, le32};
+use yisi_fs::FsKind;
+use yisi_fs::bpb::{self, FatBpb, Problem};
+use yisi_fs::format::{
+    FatWidth, LfnPart, fat_first_cluster, fat_media_ok, lfn_name, lfn_ordered, lfn_part,
+};
+use yisi_fs::{fat_short_checksum as short_checksum, fat_short_display};
+use yisi_part::bytes::le32;
 
 use crate::check::chains::{Layout, MAX_DEPTH, Volume};
 use crate::check::disk::Span;
 use crate::check::issue::{Area, Issue, IssueKind};
-use crate::check::table::{FatTable, Link, Owners, ROOT, Width};
-use crate::check::{CheckItem, Ctx, FsType, Stage, Summary};
+use crate::check::table::{FatTable, Link, Owners, ROOT};
+use crate::check::{CheckItem, Ctx, FsType, Stage, Summary, check_backup};
 
 const ENTRY: usize = 32;
 const ATTR_LFN: u8 = 0x0F;
 const ATTR_VOLUME_ID: u8 = 0x08;
 const ATTR_DIRECTORY: u8 = 0x10;
 const DELETED: u8 = 0xE5;
-/// 长文件名最多 20 段（255 个字符）。
-const MAX_LFN_PARTS: usize = 20;
 /// 比对两份 FAT 时每次读这么多。
 const COMPARE_BLOCK: u64 = 1 << 20;
 
-/// 引导扇区里的几何参数。
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Geometry {
-    width: Width,
-    bytes_per_sector: u64,
-    sectors_per_cluster: u64,
-    reserved: u64,
-    fats: u64,
-    root_entries: u64,
-    total_sectors: u64,
-    fat_sectors: u64,
-    media: u8,
-    root_cluster: u32,
-    fs_info: u64,
-    backup_boot: u64,
-    /// FAT32 关掉了镜像、只用 `active_fat` 那一份。
-    mirroring: bool,
-    active_fat: u64,
-    /// 按数据区算出的簇数（未按 FAT 长度与分区长度截短）。
-    cluster_count: u64,
-}
-
-impl Geometry {
-    fn root_dir_sectors(&self) -> u64 {
-        (self.root_entries * ENTRY as u64).div_ceil(self.bytes_per_sector)
-    }
-
-    fn first_data_sector(&self) -> u64 {
-        self.reserved + self.fats * self.fat_sectors + self.root_dir_sectors()
-    }
-
-    fn bits(&self) -> u64 {
-        match self.width {
-            Width::Fat12 => 12,
-            Width::Fat16 => 16,
-            Width::Fat32 | Width::Exfat => 32,
-        }
-    }
-}
-
 /// 解析引导扇区：规则在 [`yisi_fs::bpb`]（与打开卷、引导扇区诊断共用）。有致命问题时参数为 `None`。
-fn parse(sector: &[u8]) -> (Option<Geometry>, Vec<Problem>) {
+fn parse(sector: &[u8]) -> (Option<FatBpb>, Vec<Problem>) {
     let checked = bpb::check_fat(sector, None);
-    let geometry = checked.geometry.map(|bpb| Geometry {
-        width: match bpb.kind {
-            FsKind::Fat12 => Width::Fat12,
-            FsKind::Fat16 => Width::Fat16,
-            _ => Width::Fat32,
-        },
-        bytes_per_sector: bpb.bytes_per_sector,
-        sectors_per_cluster: bpb.sectors_per_cluster,
-        reserved: bpb.reserved,
-        fats: bpb.fats,
-        root_entries: bpb.root_entries,
-        total_sectors: bpb.total_sectors,
-        fat_sectors: bpb.fat_sectors,
-        media: bpb.media,
-        root_cluster: bpb.root_cluster,
-        fs_info: bpb.fs_info,
-        backup_boot: bpb.backup_boot,
-        mirroring: bpb.active_fat.is_none(),
-        active_fat: bpb.active_fat.unwrap_or(0),
-        cluster_count: bpb.cluster_count,
-    });
-    (geometry, checked.problems)
-}
-
-/// 识别用：认得出时给出是不是 FAT32、扇区大小。
-pub(crate) fn looks_valid(sector: &[u8]) -> Option<(bool, u64)> {
-    let geometry = parse(sector).0?;
-    Some((geometry.width == Width::Fat32, geometry.bytes_per_sector))
+    (checked.geometry, checked.problems)
 }
 
 /// 检查一个 FAT 卷。`sector` 是认出来的引导扇区（`from_backup` 时来自备份）。被取消时返回 `None`。
 pub(crate) fn check(ctx: &mut Ctx, sector: &[u8], from_backup: bool) -> Option<Summary> {
     let (geometry, problems) = parse(sector);
-    ctx.boot_problems(&problems, Area::Boot);
+    let area = if from_backup {
+        Area::BackupBoot
+    } else {
+        Area::Boot
+    };
+    ctx.boot_problems(&problems, area);
     let Some(geometry) = geometry else {
         return Some(unknown());
     };
     ctx.checked(CheckItem::Boot);
-    let bps = geometry.bytes_per_sector;
-    let cluster_size = geometry.sectors_per_cluster * bps;
+    let cluster_size = geometry.cluster_size();
     let length = ctx.disk.length();
 
-    let volume_bytes = geometry.total_sectors.saturating_mul(bps);
+    let volume_bytes = geometry.volume_bytes();
     if volume_bytes > length {
         ctx.issues.push(
             Issue::new(IssueKind::VolumeTruncated)
@@ -115,56 +54,54 @@ pub(crate) fn check(ctx: &mut Ctx, sector: &[u8], from_backup: bool) -> Option<S
                 .actual(length),
         );
     }
-    // 簇数受 FAT 能装下的表项数限制，分区被截短时只算到分区末尾
-    let heap_offset = geometry.first_data_sector().saturating_mul(bps);
-    let fat_entries = geometry.fat_sectors.saturating_mul(bps).saturating_mul(8) / geometry.bits();
-    let fits = length.saturating_sub(heap_offset) / cluster_size;
-    let count = geometry
-        .cluster_count
-        .min(fat_entries.saturating_sub(2))
-        .min(fits);
-    let count = u32::try_from(count).unwrap_or(u32::MAX);
-    let fs = match geometry.width {
-        Width::Fat12 => FsType::Fat12,
-        Width::Fat16 => FsType::Fat16,
-        Width::Fat32 | Width::Exfat => FsType::Fat32,
+    // 簇数与打开卷时算的相同：受 FAT 能装下的表项数限制，分区被截短时只算到分区末尾
+    let count = u32::try_from(geometry.usable_clusters(length)).unwrap_or(u32::MAX);
+    let is_fat32 = geometry.kind == FsKind::Fat32;
+    let fs = match geometry.kind {
+        FsKind::Fat12 => FsType::Fat12,
+        FsKind::Fat16 => FsType::Fat16,
+        _ => FsType::Fat32,
     };
 
-    if geometry.width == Width::Fat32 && !from_backup {
-        check_backup_boot(ctx, &geometry, sector);
+    if !from_backup {
+        check_backup(ctx, geometry.kind, sector);
     }
     // FSInfo 里的空闲簇数只是提示，Windows 正常卸下的卷也常对不上，不核对，只查签名
-    if geometry.width == Width::Fat32 {
+    if is_fat32 {
         check_fs_info(ctx, &geometry);
     }
 
-    let fat_start = (geometry.reserved + geometry.active_fat * geometry.fat_sectors) * bps;
-    let fat = FatTable::new(fat_start, geometry.fat_sectors * bps, geometry.width, count);
+    let fat = FatTable::new(
+        geometry.active_fat_offset(),
+        geometry.fat_bytes(),
+        geometry.width(),
+        count,
+    );
     let mut volume = Volume {
         fat,
         owners: Owners::new(u64::from(count) + 2),
         cluster_size,
-        heap_offset,
+        heap_offset: geometry.heap_offset(),
         claimed: 0,
         used: 0,
         files: 0,
         directories: 0,
     };
-    if geometry.mirroring && geometry.fats > 1 {
+    if geometry.active_fat.is_none() && geometry.fats > 1 {
         compare_copies(ctx, &geometry, count)?;
     }
     scan_table(ctx, &mut volume, &geometry)?;
 
     let mut checker = FatChecker {
         volume,
-        is_fat32: geometry.width == Width::Fat32,
+        is_fat32,
         root_cluster: geometry.root_cluster,
     };
-    let root = if checker.is_fat32 {
+    let root = if is_fat32 {
         DirAt::Clusters(geometry.root_cluster)
     } else {
         DirAt::Fixed {
-            offset: (geometry.reserved + geometry.fats * geometry.fat_sectors) * bps,
+            offset: geometry.root_dir_offset(),
             length: geometry.root_entries * ENTRY as u64,
         }
     };
@@ -203,37 +140,8 @@ fn unknown() -> Summary {
     }
 }
 
-/// FAT32 的备份引导扇区（位置写在 BPB 里，通常是第 6 扇区；为 0 表示没有）：几何参数应与主引导扇区一致。
-fn check_backup_boot(ctx: &mut Ctx, geometry: &Geometry, main: &[u8]) {
-    let at = geometry.backup_boot;
-    if at == 0 || at == 0xFFFF {
-        return;
-    }
-    ctx.checked(CheckItem::BackupBoot);
-    let mut backup = vec![0u8; 512];
-    let readable = at < geometry.reserved
-        && ctx
-            .read(
-                at * geometry.bytes_per_sector,
-                &mut backup,
-                Area::BackupBoot,
-                None,
-            )
-            .is_some_and(|bad| bad.is_empty());
-    if !readable || parse(&backup).0.is_none() {
-        ctx.issues
-            .push(Issue::new(IssueKind::BackupBootInvalid).area(Area::BackupBoot));
-        return;
-    }
-    // 只比几何参数（到卷序列号之前）：卷标、序列号、引导代码不同不影响使用
-    if backup.get(11..67) != main.get(11..67) {
-        ctx.issues
-            .push(Issue::new(IssueKind::BackupBootMismatch).area(Area::BackupBoot));
-    }
-}
-
 /// FAT32 的 FSInfo 扇区（位置写在 BPB 里，为 0 表示没有）：三处签名要对。
-fn check_fs_info(ctx: &mut Ctx, geometry: &Geometry) -> Option<()> {
+fn check_fs_info(ctx: &mut Ctx, geometry: &FatBpb) -> Option<()> {
     let at = geometry.fs_info;
     if at == 0 || at == 0xFFFF || at >= geometry.reserved {
         return None;
@@ -259,16 +167,15 @@ fn check_fs_info(ctx: &mut Ctx, geometry: &Geometry) -> Option<()> {
 }
 
 /// 比对各份 FAT（只比到最后一个簇的表项），不同之处按表项计数。读不出的部分不比。被取消时返回 `None`。
-fn compare_copies(ctx: &mut Ctx, geometry: &Geometry, count: u32) -> Option<()> {
-    let bps = geometry.bytes_per_sector;
-    let bits = geometry.bits();
+fn compare_copies(ctx: &mut Ctx, geometry: &FatBpb, count: u32) -> Option<()> {
+    let bits = geometry.width().bits();
     let length = (u64::from(count) + 2)
         .saturating_mul(bits)
         .div_ceil(8)
-        .min(geometry.fat_sectors * bps);
-    let first_copy = geometry.reserved * bps;
+        .min(geometry.fat_bytes());
+    let first_copy = geometry.fat_offset(0);
     for copy in 1..geometry.fats {
-        let other_copy = (geometry.reserved + copy * geometry.fat_sectors) * bps;
+        let other_copy = geometry.fat_offset(copy);
         let mut differing = 0u64;
         let mut first_entry = None;
         let mut last_entry = None;
@@ -317,24 +224,24 @@ fn compare_copies(ctx: &mut Ctx, geometry: &Geometry, count: u32) -> Option<()> 
 
 /// 读一遍 FAT：第 0、1 项（介质描述符、卷的脏标记与硬错误标记），统计已占用、坏簇与空闲的簇。
 /// 被取消时返回 `None`。
-fn scan_table(ctx: &mut Ctx, volume: &mut Volume, geometry: &Geometry) -> Option<()> {
+fn scan_table(ctx: &mut Ctx, volume: &mut Volume, geometry: &FatBpb) -> Option<()> {
     let fat = &mut volume.fat;
     if let Some(entry0) = fat.raw(ctx, 0)
-        && (entry0 & 0xFF) as u8 != geometry.media
+        && !fat_media_ok(fat.width, geometry.media, entry0)
     {
         ctx.issues.push(
             Issue::new(IssueKind::FatMediaMismatch)
                 .area(Area::Fat)
                 .expected(u64::from(geometry.media))
-                .actual(u64::from(entry0 & 0xFF)),
+                .actual(u64::from(entry0)),
         );
     }
     if let Some(entry1) = fat.raw(ctx, 1) {
         // FAT16 第 15 位、FAT32 第 27 位为 1 表示正常卸下；FAT16 第 14 位、FAT32 第 26 位为 0 表示出过读写错误
-        let (clean, no_error) = match geometry.width {
-            Width::Fat16 => (0x8000, 0x4000),
-            Width::Fat32 => (0x0800_0000, 0x0400_0000),
-            Width::Fat12 | Width::Exfat => (0, 0),
+        let (clean, no_error) = match fat.width {
+            FatWidth::Fat16 => (0x8000, 0x4000),
+            FatWidth::Fat32 => (0x0800_0000, 0x0400_0000),
+            FatWidth::Fat12 | FatWidth::Exfat => (0, 0),
         };
         if clean != 0 && entry1 & clean == 0 {
             ctx.issues
@@ -505,13 +412,7 @@ impl FatChecker {
             };
             let name = long.unwrap_or(short_name);
             let path = join(&job.path, &name);
-            let cluster_low = u32::from(le16(raw, 26).unwrap_or(0));
-            let cluster_high = if self.is_fat32 {
-                u32::from(le16(raw, 20).unwrap_or(0))
-            } else {
-                0
-            };
-            let first = cluster_high << 16 | cluster_low;
+            let first = fat_first_cluster(raw, self.is_fat32);
             let id = self.volume.owners.add(Some(job.id), &name);
             if attr & ATTR_DIRECTORY != 0 {
                 self.volume.directories += 1;
@@ -570,14 +471,7 @@ impl FatChecker {
         if unreadable(0) || unreadable(1) {
             return;
         }
-        let cluster_of = |raw: &[u8; ENTRY]| {
-            let high = if self.is_fat32 {
-                u32::from(le16(raw, 20).unwrap_or(0))
-            } else {
-                0
-            };
-            high << 16 | u32::from(le16(raw, 26).unwrap_or(0))
-        };
+        let cluster_of = |raw: &[u8; ENTRY]| fat_first_cluster(raw, self.is_fat32);
         let dot_ok = entries.first().is_some_and(|raw| {
             raw.starts_with(b".          ")
                 && raw[11] & ATTR_DIRECTORY != 0
@@ -597,6 +491,7 @@ impl FatChecker {
     }
 
     /// 核对长文件名各段：序号从 `0x40 | n` 递减到 1、段数合理，校验和与短文件名一致。都对时返回长文件名。
+    /// 规则在 [`yisi_fs::format`]，与浏览共用。
     fn long_name(
         &self,
         ctx: &mut Ctx,
@@ -606,41 +501,21 @@ impl FatChecker {
         parts: &[&[u8; ENTRY]],
     ) -> Option<String> {
         let path = join(dir, short_name);
-        let count = parts.len();
-        let ordered = count <= MAX_LFN_PARTS
-            && parts
-                .first()
-                .is_some_and(|first| first[0] & 0x40 != 0 && usize::from(first[0] & 0x1F) == count)
-            && parts
-                .iter()
-                .enumerate()
-                .all(|(index, part)| usize::from(part[0] & 0x1F) == count - index);
-        if !ordered {
+        let parts: Vec<LfnPart> = parts
+            .iter()
+            .filter_map(|part| lfn_part(part.as_slice()))
+            .collect();
+        if !lfn_ordered(&parts) {
             ctx.issues.push(Issue::new(IssueKind::LfnOrder).path(path));
             return None;
         }
         let checksum = short_checksum(short);
-        if parts.iter().any(|part| part[13] != checksum) {
+        if parts.iter().any(|part| part.checksum != checksum) {
             ctx.issues
                 .push(Issue::new(IssueKind::LfnChecksum).path(path));
             return None;
         }
-        let mut units = Vec::with_capacity(count * 13);
-        for part in parts.iter().rev() {
-            let positions = (1..11)
-                .step_by(2)
-                .chain((14..26).step_by(2))
-                .chain((28..32).step_by(2));
-            units.extend(positions.filter_map(|at| le16(part.as_slice(), at)));
-        }
-        if let Some(end) = units.iter().position(|&unit| unit == 0) {
-            units.truncate(end);
-        }
-        while units.last() == Some(&0xFFFF) {
-            units.pop();
-        }
-        let name = String::from_utf16_lossy(&units);
-        (!name.is_empty()).then_some(name)
+        lfn_name(&parts)
     }
 }
 

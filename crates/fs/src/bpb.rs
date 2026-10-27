@@ -9,6 +9,7 @@
 use yisi_part::bytes::{le16, le32, le64};
 
 use crate::FsKind;
+use crate::format::FatWidth;
 
 /// 一项规则；诊断按它给出问题类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +39,8 @@ pub enum Rule {
     ClusterCount,
     /// FAT32 不镜像时指定的那一份 FAT 不存在。
     ActiveFat,
+    /// FAT32 的备份引导扇区不在保留区里：按没有备份处理。
+    BackupBoot,
     RootCluster,
     RecordSize,
     IndexSize,
@@ -152,6 +155,56 @@ impl FatBpb {
 
     pub fn volume_bytes(&self) -> u64 {
         self.total_sectors.saturating_mul(self.bytes_per_sector)
+    }
+
+    pub fn width(&self) -> FatWidth {
+        match self.kind {
+            FsKind::Fat12 => FatWidth::Fat12,
+            FsKind::Fat16 => FatWidth::Fat16,
+            _ => FatWidth::Fat32,
+        }
+    }
+
+    /// 第 `copy` 份 FAT 在分区里的字节偏移。
+    pub fn fat_offset(&self, copy: u64) -> u64 {
+        copy.saturating_mul(self.fat_sectors)
+            .saturating_add(self.reserved)
+            .saturating_mul(self.bytes_per_sector)
+    }
+
+    /// 要用的那份 FAT：镜像时是第一份，不镜像时是指定的那份。
+    pub fn active_fat_offset(&self) -> u64 {
+        self.fat_offset(self.active_fat.unwrap_or(0))
+    }
+
+    pub fn fat_bytes(&self) -> u64 {
+        self.fat_sectors.saturating_mul(self.bytes_per_sector)
+    }
+
+    /// FAT12/16 的根目录区在分区里的字节偏移（FAT32 的根目录在簇里）。
+    pub fn root_dir_offset(&self) -> u64 {
+        self.fat_offset(self.fats)
+    }
+
+    /// FAT32 备份引导扇区的扇区号：记了、且落在保留区里才算有（0 与 0xFFFF 表示没有）。
+    pub fn backup_sector(&self) -> Option<u64> {
+        (self.kind == FsKind::Fat32 && self.backup_boot != 0 && self.backup_boot < self.reserved)
+            .then_some(self.backup_boot)
+    }
+
+    /// 2 号簇在分区里的字节偏移。
+    pub fn heap_offset(&self) -> u64 {
+        self.first_data_sector()
+            .saturating_mul(self.bytes_per_sector)
+    }
+
+    /// 实际能用的簇数：按数据区算出的、FAT 装得下的、FAT32 的上限、分区（`length` 字节）里放得下的，取最小。
+    pub fn usable_clusters(&self, length: u64) -> u64 {
+        let fits = length.saturating_sub(self.heap_offset()) / self.cluster_size().max(1);
+        self.cluster_count
+            .min(self.fat_capacity)
+            .min(0x0FFF_FFF5)
+            .min(fits)
     }
 }
 
@@ -285,6 +338,9 @@ pub fn check_fat(sector: &[u8], hint: Option<FsKind>) -> Checked<FatBpb> {
         bpb.root_cluster = u32::try_from(root).unwrap_or(0);
         bpb.fs_info = u16_at(48);
         bpb.backup_boot = u16_at(50);
+        if !matches!(bpb.backup_boot, 0 | 0xFFFF) && bpb.backup_boot >= reserved {
+            checked.minor(Rule::BackupBoot, "backupBootSector", bpb.backup_boot);
+        }
         66
     } else {
         38
@@ -329,6 +385,34 @@ impl ExfatBpb {
     /// 两份 FAT、并且卷标志指定用第二份。
     pub fn use_second_fat(&self) -> bool {
         self.fats == 2 && self.flags & 0x01 != 0
+    }
+
+    /// 要用的那份 FAT 在分区里的字节偏移。
+    pub fn active_fat_offset(&self) -> u64 {
+        let copy = u64::from(self.use_second_fat());
+        copy.saturating_mul(self.fat_length)
+            .saturating_add(self.fat_offset)
+            .saturating_mul(self.bytes_per_sector())
+    }
+
+    pub fn fat_bytes(&self) -> u64 {
+        self.fat_length.saturating_mul(self.bytes_per_sector())
+    }
+
+    /// 2 号簇在分区里的字节偏移。
+    pub fn heap_offset_bytes(&self) -> u64 {
+        self.heap_offset.saturating_mul(self.bytes_per_sector())
+    }
+
+    pub fn volume_bytes(&self) -> u64 {
+        self.volume_length.saturating_mul(self.bytes_per_sector())
+    }
+
+    /// 实际能用的簇数：引导扇区记的、FAT 装得下的（每项 4 字节，前两项不是簇）、分区（`length` 字节）里放得下的，取最小。
+    pub fn usable_clusters(&self, length: u64) -> u64 {
+        let capacity = (self.fat_bytes() / 4).saturating_sub(2);
+        let fits = length.saturating_sub(self.heap_offset_bytes()) / self.cluster_size();
+        self.cluster_count.min(capacity).min(fits)
     }
 }
 
@@ -584,6 +668,105 @@ fn check_signature<G>(sector: &[u8], checked: &mut Checked<G>) {
     }
 }
 
+/// 主备引导扇区之间不一样的一个字段。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldDifference {
+    pub field: &'static str,
+    pub primary: u64,
+    pub backup: u64,
+}
+
+/// 主备引导扇区应当一致的字段：规范里的名字、记的值（扇区与簇的大小换算成字节）。值都不超过 2^53，界面上不丢精度：
+/// NTFS 的 64 位卷序列号拆成低、高 32 位两项（Windows 显示的是低 32 位）。
+/// 只在主引导扇区里更新的不算：exFAT 的卷标志与使用百分比（FAT 的脏标记在 FAT 里，不在引导扇区）。
+/// 引导扇区诊断与文件系统检查都按这一份比对主备。
+pub fn significant_fields(kind: FsKind, sector: &[u8]) -> Vec<(&'static str, u64)> {
+    let u8_at = |at| u64::from(sector.get(at).copied().unwrap_or(0));
+    let u16_at = |at| u64::from(le16(sector, at).unwrap_or(0));
+    let u32_at = |at| u64::from(le32(sector, at).unwrap_or(0));
+    let u64_at = |at| le64(sector, at).unwrap_or(0);
+    let shifted = |shift: u64| 1u64.checked_shl(shift as u32).unwrap_or(0);
+    match kind {
+        FsKind::Exfat => vec![
+            ("partitionOffset", u64_at(64)),
+            ("volumeLength", u64_at(72)),
+            ("fatOffset", u32_at(80)),
+            ("fatLength", u32_at(84)),
+            ("clusterHeapOffset", u32_at(88)),
+            ("clusterCount", u32_at(92)),
+            ("firstClusterOfRootDirectory", u32_at(96)),
+            ("volumeSerial", u32_at(100)),
+            ("bytesPerSectorShift", shifted(u8_at(108))),
+            (
+                "sectorsPerClusterShift",
+                shifted(u8_at(108).saturating_add(u8_at(109))),
+            ),
+            ("numberOfFats", u8_at(110)),
+        ],
+        FsKind::Ntfs => {
+            let cluster_size = check_ntfs(sector).cluster_size.unwrap_or(0);
+            let size = |at| {
+                let raw = sector.get(at).copied().unwrap_or(0);
+                ntfs_size(raw, cluster_size).unwrap_or(u64::from(raw))
+            };
+            vec![
+                ("bytesPerSector", u16_at(0x0B)),
+                ("sectorsPerCluster", u8_at(0x0D)),
+                ("hiddenSectors", u32_at(0x1C)),
+                ("totalSectors", u64_at(0x28)),
+                ("mftCluster", u64_at(0x30)),
+                ("mftMirrorCluster", u64_at(0x38)),
+                ("clustersPerMftRecord", size(0x40)),
+                ("clustersPerIndexBlock", size(0x44)),
+                ("volumeSerial", u32_at(0x48)),
+                ("volumeSerialHigh", u32_at(0x4C)),
+            ]
+        }
+        _ => {
+            let is_fat32 = kind == FsKind::Fat32;
+            let total = match u16_at(19) {
+                0 => u32_at(32),
+                total => total,
+            };
+            let mut fields = vec![
+                ("bytesPerSector", u16_at(11)),
+                ("sectorsPerCluster", u8_at(13)),
+                ("reservedSectors", u16_at(14)),
+                ("fatCount", u8_at(16)),
+                ("rootEntries", u16_at(17)),
+                ("totalSectors", total),
+                ("mediaDescriptor", u8_at(21)),
+                ("fatSize", if is_fat32 { u32_at(36) } else { u16_at(22) }),
+                ("hiddenSectors", u32_at(28)),
+            ];
+            if is_fat32 {
+                fields.extend([
+                    ("extFlags", u16_at(40)),
+                    ("rootCluster", u32_at(44)),
+                    ("fsInfo", u16_at(48)),
+                    ("backupBootSector", u16_at(50)),
+                ]);
+            }
+            fields.push(("volumeSerial", u32_at(if is_fat32 { 67 } else { 39 })));
+            fields
+        }
+    }
+}
+
+/// 按 [`significant_fields`] 比对主备，列出不一样的字段。
+pub fn differing_fields(kind: FsKind, primary: &[u8], backup: &[u8]) -> Vec<FieldDifference> {
+    significant_fields(kind, primary)
+        .into_iter()
+        .zip(significant_fields(kind, backup))
+        .filter(|((_, a), (_, b))| a != b)
+        .map(|((field, primary), (_, backup))| FieldDifference {
+            field,
+            primary,
+            backup,
+        })
+        .collect()
+}
+
 /// 引导扇区与根目录里 11 字节的卷标：非 ASCII 字节显示为 `_`，去掉结尾空格，`NO NAME` 视为没有。
 pub(crate) fn short_label(bytes: &[u8]) -> Option<String> {
     let text: String = bytes
@@ -726,5 +909,72 @@ mod tests {
         );
         assert_eq!(checked.geometry, None);
         assert!(checked.volume_bytes.is_some());
+    }
+
+    #[test]
+    fn fat32_backup_outside_the_reserved_area_is_a_note() {
+        let mut sector = FatImage::new(FatType::Fat32).finish()[..512].to_vec();
+        let bpb = check_fat(&sector, None).geometry.unwrap();
+        assert_eq!(bpb.backup_sector(), Some(6));
+        sector[50..52].copy_from_slice(&40u16.to_le_bytes());
+        let checked = check_fat(&sector, None);
+        assert_eq!(
+            rules(&checked),
+            [(Rule::BackupBoot, "backupBootSector", false)]
+        );
+        assert_eq!(checked.geometry.unwrap().backup_sector(), None);
+        // 0 与 0xFFFF 表示没有备份，不算问题
+        for none in [0u16, 0xFFFF] {
+            sector[50..52].copy_from_slice(&none.to_le_bytes());
+            let checked = check_fat(&sector, None);
+            assert!(checked.problems.is_empty(), "{none}");
+            assert_eq!(checked.geometry.unwrap().backup_sector(), None);
+        }
+    }
+
+    #[test]
+    fn backup_comparison_covers_every_significant_field() {
+        let primary = FatImage::new(FatType::Fat32).finish()[..512].to_vec();
+        let mut backup = primary.clone();
+        assert!(differing_fields(FsKind::Fat32, &primary, &backup).is_empty());
+        // 隐藏扇区数、FAT 镜像标志、FSInfo 位置、卷序列号
+        backup[28] ^= 1;
+        backup[40] ^= 0x80;
+        backup[48] ^= 1;
+        backup[67] ^= 1;
+        let fields: Vec<&str> = differing_fields(FsKind::Fat32, &primary, &backup)
+            .iter()
+            .map(|difference| difference.field)
+            .collect();
+        assert_eq!(
+            fields,
+            ["hiddenSectors", "extFlags", "fsInfo", "volumeSerial"]
+        );
+        // 引导代码不同不算
+        let mut backup = primary.clone();
+        backup[100] ^= 1;
+        assert!(differing_fields(FsKind::Fat32, &primary, &backup).is_empty());
+
+        // exFAT 的卷标志与使用百分比只在主引导扇区里更新，不算
+        let primary = ExfatImage::new().finish()[..512].to_vec();
+        let mut backup = primary.clone();
+        backup[106] ^= 2;
+        backup[112] = 50;
+        assert!(differing_fields(FsKind::Exfat, &primary, &backup).is_empty());
+        backup[108] += 1;
+        let difference = &differing_fields(FsKind::Exfat, &primary, &backup)[0];
+        assert_eq!(
+            (difference.field, difference.primary * 2),
+            ("bytesPerSectorShift", difference.backup)
+        );
+
+        // NTFS 的 64 位卷序列号拆成两项，每项都在 2^53 以内
+        let primary = NtfsImage::new().finish()[..512].to_vec();
+        let mut backup = primary.clone();
+        backup[0x4F] ^= 0x80;
+        let fields = differing_fields(FsKind::Ntfs, &primary, &backup);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].field, "volumeSerialHigh");
+        assert!(fields[0].primary.max(fields[0].backup) <= u64::from(u32::MAX));
     }
 }

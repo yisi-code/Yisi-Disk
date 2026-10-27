@@ -13,8 +13,9 @@ mod table;
 #[cfg(test)]
 mod tests;
 
-use yisi_fs::boot::backup_candidates;
-use yisi_fs::bpb::{Problem, Rule};
+use yisi_fs::FsKind;
+use yisi_fs::boot::{BackupFamily, backup_candidates, backup_kind, remnant_kind, usable_kind};
+use yisi_fs::bpb::{self, Problem, Rule};
 use yisi_io::BlockDevice;
 
 pub use issue::{Area, Issue, IssueKind, Severity, Totals};
@@ -286,10 +287,11 @@ impl Ctx<'_> {
     }
 
     /// 引导扇区按 [`yisi_fs::bpb`] 核对出的问题（规则与打开卷、引导扇区诊断共用），一项记一条，字段名用规范里的叫法。
-    /// 跳转指令不标准、NTFS 的旧字段不为 0 只是形式上不合规范，记成可以忽略的 [`IssueKind::BootNote`]。
+    /// 跳转指令不标准、NTFS 的旧字段不为 0、FAT32 记的备份位置不在保留区（备份另按常见位置找）只是形式上不合规范，
+    /// 记成可以忽略的 [`IssueKind::BootNote`]。
     pub fn boot_problems(&mut self, problems: &[Problem], area: Area) {
         for problem in problems {
-            let cosmetic = problem.rule == Rule::Jump
+            let cosmetic = matches!(problem.rule, Rule::Jump | Rule::BackupBoot)
                 || (problem.rule == Rule::LegacyFields && !problem.fatal);
             let kind = if cosmetic {
                 IssueKind::BootNote
@@ -323,26 +325,41 @@ enum Detected {
     Unknown,
 }
 
-/// 按主引导扇区识别；认不出时依次试备份引导扇区（FAT32 在第 6 扇区、exFAT 在第 12 扇区、NTFS 在分区最后一个扇区），
-/// 位置与打开卷、引导扇区诊断找的相同（[`backup_candidates`]）。主引导扇区认不出而备份认得出时，记一个问题，按备份接着检查。
+/// 按主引导扇区识别（[`usable_kind`]，与打开卷相同）；不能用时依次试备份引导扇区，位置与认法同打开卷、引导扇区诊断
+/// （[`backup_candidates`]、[`backup_kind`]）。主引导扇区不能用而备份能用时记一个问题，按备份接着检查；
+/// 主引导扇区还认得出是哪种文件系统时，再列出它哪几项不对。
 fn detect(ctx: &mut Ctx) -> Detected {
     let mut sector = vec![0u8; 512];
-    if ctx.read(0, &mut sector, Area::Boot, None).is_some()
-        && let Some(found) = recognize(ctx, &sector, 0, false)
+    let readable = ctx.read(0, &mut sector, Area::Boot, None).is_some();
+    if readable
+        && let Some(kind) = usable_kind(&sector)
+        && let Some(found) = load(ctx, kind, &sector, 0, false)
     {
         return found;
     }
+    if let Some(kind) = readable.then(|| remnant_kind(&sector)).flatten() {
+        let problems = match kind {
+            FsKind::Fat12 | FsKind::Fat16 | FsKind::Fat32 => {
+                bpb::check_fat(&sector, Some(kind)).problems
+            }
+            FsKind::Exfat => bpb::check_exfat(&sector).problems,
+            FsKind::Ntfs => bpb::check_ntfs(&sector).problems,
+            _ => Vec::new(),
+        };
+        ctx.boot_problems(&problems, Area::Boot);
+    }
     let device_sector = u32::try_from(ctx.disk.sector_size()).unwrap_or(512);
-    let candidates = backup_candidates(&sector, device_sector, ctx.disk.length());
-    for at in candidates.into_iter().map(|candidate| candidate.offset) {
+    for candidate in backup_candidates(&sector, device_sector, ctx.disk.length()) {
         let mut backup = vec![0u8; 512];
         if ctx
-            .read(at, &mut backup, Area::BackupBoot, None)
+            .read(candidate.offset, &mut backup, Area::BackupBoot, None)
             .is_none_or(|bad| !bad.is_empty())
         {
             continue;
         }
-        if let Some(found) = recognize(ctx, &backup, at, true) {
+        if let Some(kind) = backup_kind(&candidate, &backup)
+            && let Some(found) = load(ctx, kind, &backup, candidate.offset, true)
+        {
             ctx.issues
                 .push(Issue::new(IssueKind::BootUnrecognized).area(Area::Boot));
             return found;
@@ -351,40 +368,72 @@ fn detect(ctx: &mut Ctx) -> Detected {
     Detected::Unknown
 }
 
-/// `sector` 是 `at` 处的 512 字节；认得出时读齐检查要用的内容。
-fn recognize(ctx: &mut Ctx, sector: &[u8], at: u64, from_backup: bool) -> Option<Detected> {
-    match sector.get(3..11)? {
-        b"EXFAT   " => {
-            let shift = u32::from(*sector.get(108)?);
-            if !(9..=12).contains(&shift) {
-                return None;
-            }
-            // 备份引导区在第 12 扇区：按这个扇区大小算出的位置要与找到它的位置一致
-            let bytes_per_sector = 1u64 << shift;
-            if from_backup && at != 12 * bytes_per_sector {
-                return None;
-            }
-            let mut region = vec![0u8; 12 * bytes_per_sector as usize];
-            ctx.read(at, &mut region, Area::Boot, None)?;
+/// 读齐检查要用的内容：exFAT 是 `at` 起的整个引导区（12 个扇区），其余是这一个扇区。
+fn load(
+    ctx: &mut Ctx,
+    kind: FsKind,
+    sector: &[u8],
+    at: u64,
+    from_backup: bool,
+) -> Option<Detected> {
+    match kind {
+        FsKind::Exfat => {
+            let bytes_per_sector = bpb::check_exfat(sector).bytes_per_sector?;
+            let mut region = vec![0u8; usize::try_from(12 * bytes_per_sector).ok()?];
+            let area = if from_backup {
+                Area::BackupBoot
+            } else {
+                Area::Boot
+            };
+            ctx.read(at, &mut region, area, None)?;
             Some(Detected::Exfat {
                 region,
                 from_backup,
             })
         }
-        b"NTFS    " => ntfs::looks_valid(sector).then(|| Detected::Ntfs {
+        FsKind::Ntfs => Some(Detected::Ntfs {
             sector: sector.to_vec(),
             from_backup,
         }),
-        _ => {
-            let geometry = fat::looks_valid(sector)?;
-            // 只有 FAT32 有备份引导扇区，位置写在 BPB 里（通常是第 6 扇区）
-            if from_backup && (!geometry.0 || at != geometry.1.saturating_mul(6)) {
-                return None;
-            }
-            Some(Detected::Fat {
-                sector: sector.to_vec(),
-                from_backup,
-            })
-        }
+        FsKind::Fat12 | FsKind::Fat16 | FsKind::Fat32 => Some(Detected::Fat {
+            sector: sector.to_vec(),
+            from_backup,
+        }),
+        _ => None,
     }
+}
+
+/// 找备份引导扇区并与主引导扇区比对：位置与认法同打开卷、引导扇区诊断（[`backup_candidates`]、[`backup_kind`]），
+/// 比哪些字段同引导扇区诊断（[`bpb::differing_fields`]），一个字段记一条。找到时返回它在分区里的位置。
+pub(crate) fn check_backup(ctx: &mut Ctx, kind: FsKind, main: &[u8]) -> Option<u64> {
+    let family = BackupFamily::of(kind)?;
+    ctx.checked(CheckItem::BackupBoot);
+    let device_sector = u32::try_from(ctx.disk.sector_size()).unwrap_or(512);
+    let candidates = backup_candidates(main, device_sector, ctx.disk.length());
+    for candidate in candidates
+        .into_iter()
+        .filter(|candidate| candidate.family == family)
+    {
+        let mut backup = vec![0u8; 512];
+        if ctx
+            .read(candidate.offset, &mut backup, Area::BackupBoot, None)
+            .is_none_or(|bad| !bad.is_empty())
+            || backup_kind(&candidate, &backup) != Some(kind)
+        {
+            continue;
+        }
+        for difference in bpb::differing_fields(kind, main, &backup) {
+            ctx.issues.push(
+                Issue::new(IssueKind::BackupBootMismatch)
+                    .area(Area::BackupBoot)
+                    .field(difference.field)
+                    .expected(difference.primary)
+                    .actual(difference.backup),
+            );
+        }
+        return Some(candidate.offset);
+    }
+    ctx.issues
+        .push(Issue::new(IssueKind::BackupBootInvalid).area(Area::BackupBoot));
+    None
 }
