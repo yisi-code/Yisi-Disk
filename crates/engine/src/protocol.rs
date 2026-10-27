@@ -155,6 +155,10 @@ pub enum Source {
     /// 物理磁盘。Windows 上 `handle` 是磁盘代理复制进引擎进程的只读句柄。
     #[serde(rename_all = "camelCase")]
     Disk { handle: u64 },
+    /// 物理磁盘上的一个卷（盘符），整个卷当作一个没有分区表的源。`handle` 同上，`letter` 是盘符（如 `C`）：
+    /// 输出只要不在这个卷上就行（同一块盘上的别的卷可以），镜像的来源标识按卷的 GUID 名。
+    #[serde(rename_all = "camelCase")]
+    Volume { handle: u64, letter: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,6 +197,8 @@ pub struct DiskSummary {
 pub struct DiskVolume {
     /// 盘符，如 `C`。
     pub letter: String,
+    /// 认卷用的标识（卷的 GUID 名），与以这个卷为源做镜像时坏区图里记的来源相同：换了盘符、重新插拔也不变。
+    pub identity: String,
     pub label: String,
     pub file_system: String,
     pub total_bytes: u64,
@@ -1114,6 +1120,19 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&params).unwrap(),
             json!({"jobId": "j1", "source": {"type": "image", "path": "a.img", "sectorSize": 512}})
+        );
+    }
+
+    #[test]
+    fn volume_sources_carry_the_handle_and_letter() {
+        let source: Source =
+            serde_json::from_value(json!({"type": "volume", "handle": 12, "letter": "D"})).unwrap();
+        assert_eq!(
+            source,
+            Source::Volume {
+                handle: 12,
+                letter: "D".to_owned()
+            }
         );
     }
 

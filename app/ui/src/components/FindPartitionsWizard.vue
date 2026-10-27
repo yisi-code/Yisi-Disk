@@ -11,11 +11,12 @@ import { useBrowse } from '../composables/useBrowse'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { usePartitionText } from '../composables/usePartitionText'
 import { usePartitionSearch } from '../composables/usePartitionSearch'
+import { useSourceSelection } from '../composables/useSourceSelection'
 import {
+  isDeviceKind,
   toHostError,
   type FoundPartition,
   type HostError,
-  type JobTarget,
   type PartitionInfo,
   type PartitionRef,
 } from '../services/host'
@@ -35,9 +36,7 @@ const domPrefix = useId()
 
 const titleElement = ref<HTMLHeadingElement | null>(null)
 const step = ref<WizardStep>('source')
-const sourceKind = ref<JobTarget['kind']>('image')
-const imagePath = ref('')
-const selectedDisk = ref<number | null>(null)
+const { sourceKind, imagePath, device, target } = useSourceSelection()
 /** 选中的候选分区在结果里的下标 */
 const selectedIndex = ref<number | null>(null)
 /** 选中的候选分区在浏览会话里按位置打开后的信息；NTFS 扫完 MFT 才给出 */
@@ -51,13 +50,6 @@ let openSerial = 0
 
 const stepIndex = computed(() => STEPS.indexOf(step.value))
 
-const target = computed<JobTarget | null>(() => {
-  if (sourceKind.value === 'image') {
-    const path = imagePath.value.trim()
-    return path === '' ? null : { kind: 'image', path }
-  }
-  return selectedDisk.value === null ? null : { kind: 'disk', diskNumber: selectedDisk.value }
-})
 
 const candidates = computed(() => search.summary.value?.candidates ?? [])
 const selectedCandidate = computed(() =>
@@ -88,7 +80,7 @@ const sourceText = computed(() => sourceName(search.target.value))
 const statusText = computed(() => {
   switch (search.status.value) {
     case 'starting':
-      return search.target.value?.kind === 'disk'
+      return isDeviceKind(search.target.value?.kind)
         ? t('common.startingDisk')
         : t('findPartitions.status.starting')
     case 'running':
@@ -325,7 +317,7 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
         <SourcePicker
           v-model:kind="sourceKind"
           v-model:image-path="imagePath"
-          v-model:disk="selectedDisk"
+          v-model:device="device"
           :disk-hint="t('findPartitions.diskHint')"
         />
         <p class="wizard__hint">{{ t('findPartitions.results.readOnly') }}</p>
@@ -345,7 +337,7 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
           <p class="wizard__status">{{ statusText }}</p>
           <ReadHealthHint
             :health="search.readHealth.value"
-            :source-is-disk="search.target.value?.kind === 'disk'"
+            :source-is-disk="isDeviceKind(search.target.value?.kind)"
             context="scan"
           />
           <p v-if="search.isUnresponsive.value" class="wizard__error" role="alert">
@@ -366,7 +358,7 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
         <p class="wizard__hint wizard__hint--warning">{{ t('findPartitions.results.readOnly') }}</p>
         <p v-if="browse.status.value === 'starting'" class="wizard__note" aria-live="polite">
           {{
-            search.target.value?.kind === 'disk'
+            isDeviceKind(search.target.value?.kind)
               ? t('common.startingDisk')
               : t('findPartitions.results.opening')
           }}

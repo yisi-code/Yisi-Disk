@@ -16,7 +16,9 @@ import { useFileTypeName } from '../composables/useFileTypeName'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { useHostDialog } from '../composables/useHostDialog'
 import { usePartitionText } from '../composables/usePartitionText'
+import { useSourceSelection } from '../composables/useSourceSelection'
 import {
+  isDeviceKind,
   copyRecoveredFile,
   listFileTypes,
   openOrReveal,
@@ -30,7 +32,6 @@ import {
   type FileType,
   type FoundFile,
   type HostError,
-  type JobTarget,
 } from '../services/host'
 import { formatBytes, formatSeconds } from '../utils/format'
 
@@ -81,9 +82,7 @@ const {
 const titleElement = ref<HTMLHeadingElement | null>(null)
 const browser = ref<InstanceType<typeof RecoveredBrowser> | null>(null)
 const step = ref<WizardStep>('source')
-const sourceKind = ref<JobTarget['kind']>('image')
-const imagePath = ref('')
-const selectedDisk = ref<number | null>(null)
+const { sourceKind, imagePath, device, target } = useSourceSelection()
 const fileTypes = ref<FileType[]>([])
 const isLoadingFileTypes = ref(false)
 const fileTypesError = ref<HostError | null>(null)
@@ -118,13 +117,6 @@ const menu = ref<{ file: FoundFile; x: number; y: number } | null>(null)
 
 const stepIndex = computed(() => STEPS.indexOf(step.value))
 
-const target = computed<JobTarget | null>(() => {
-  if (sourceKind.value === 'image') {
-    const path = imagePath.value.trim()
-    return path === '' ? null : { kind: 'image', path }
-  }
-  return selectedDisk.value === null ? null : { kind: 'disk', diskNumber: selectedDisk.value }
-})
 
 const trimmedOutputDir = computed(() => outputDir.value.trim())
 
@@ -220,7 +212,7 @@ const statusText = computed(() => {
     case 'idle':
       return ''
     case 'starting':
-      return targetKind.value === 'disk'
+      return isDeviceKind(targetKind.value)
         ? t('common.startingDisk')
         : t('common.startingEngine')
     case 'running':
@@ -643,7 +635,7 @@ function handleAdvancedToggle(event: Event) {
         <SourcePicker
           v-model:kind="sourceKind"
           v-model:image-path="imagePath"
-          v-model:disk="selectedDisk"
+          v-model:device="device"
           :disk-hint="t('carve.source.diskHint')"
         />
       </div>
@@ -723,7 +715,7 @@ function handleAdvancedToggle(event: Event) {
         <div v-if="status !== 'idle'" class="wizard__job wizard__fill" aria-live="polite">
           <progress class="wizard__progress" :value="done" :max="total || 1"></progress>
           <p class="wizard__status">{{ statusText }}</p>
-          <ReadHealthHint :health="readHealth" :source-is-disk="targetKind === 'disk'" context="scan" />
+          <ReadHealthHint :health="readHealth" :source-is-disk="isDeviceKind(targetKind)" context="scan" />
           <p v-if="isUnresponsive" class="wizard__error" role="alert">
             {{ t('common.unresponsive') }}
           </p>

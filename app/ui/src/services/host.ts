@@ -53,6 +53,8 @@ export interface DiskSummary {
 /** 挂载在盘符上的卷（向系统查询，不读盘） */
 export interface DiskVolume {
   letter: string
+  /** 认卷用的标识（卷的 GUID 名），换了盘符、重新插拔也不变；与以这个卷为源做镜像时记下的来源相同 */
+  identity: string
   label: string
   fileSystem: string
   totalBytes: number
@@ -60,7 +62,30 @@ export interface DiskVolume {
 }
 
 /** 任务的源：镜像文件，或按编号指定的物理磁盘 */
-export type JobTarget = { kind: 'image'; path: string } | { kind: 'disk'; diskNumber: number }
+export type JobTarget =
+  | { kind: 'image'; path: string }
+  | { kind: 'disk'; diskNumber: number }
+  | { kind: 'volume'; letter: string }
+
+/** 物理磁盘或卷：读它要管理员权限，系统也可能正在往里写 */
+export function isDeviceKind(kind: JobTarget['kind'] | null | undefined): boolean {
+  return kind === 'disk' || kind === 'volume'
+}
+
+/** 两个源是不是同一个 */
+export function sameTarget(a: JobTarget | null, b: JobTarget | null): boolean {
+  if (a === null || b === null || a.kind !== b.kind) {
+    return a === b
+  }
+  switch (a.kind) {
+    case 'image':
+      return b.kind === 'image' && a.path === b.path
+    case 'disk':
+      return b.kind === 'disk' && a.diskNumber === b.diskNumber
+    case 'volume':
+      return b.kind === 'volume' && a.letter === b.letter
+  }
+}
 
 /** 深度恢复支持的一种格式；扩展名同时是格式的标识 */
 export interface FileType {
@@ -499,13 +524,8 @@ export async function listFileTypes(): Promise<FileType[]> {
 }
 
 /** 任务 ID 由调用方生成：事件可能先于这个调用返回到达，调用前就要记下它 */
-export function startImageScan(jobId: string, path: string): Promise<void> {
-  return invoke<void>('job_start_image_scan', { jobId, path })
-}
-
-/** 第一次扫描物理磁盘时会弹出 UAC，这个调用一直等到用户作答、磁盘打开为止 */
-export function startDiskScan(jobId: string, diskNumber: number): Promise<void> {
-  return invoke<void>('job_start_disk_scan', { jobId, diskNumber })
+export function startReadScan(jobId: string, target: JobTarget): Promise<void> {
+  return invoke<void>('job_start_read_scan', { jobId, target })
 }
 
 /**

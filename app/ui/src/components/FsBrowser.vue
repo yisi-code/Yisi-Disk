@@ -57,11 +57,17 @@ const props = defineProps<{
   partition: number
   /** 只显示已删除的文件（目录都显示：删除的文件可能在未删除的目录里） */
   deletedOnly: boolean
+  /** 打开后直接定位到这个文件夹（各级名字，不分大小写）：逐级展开、选中它；不给时停在根目录 */
+  revealPath?: string[]
 }>()
 const selected = defineModel<TreeItem | null>('selected', { required: true })
 /** 勾选要复制的项，键是行的标识 */
 const checked = defineModel<Map<string, TreeItem>>('checked', { required: true })
-const emit = defineEmits<{ open: [item: TreeItem] }>()
+const emit = defineEmits<{
+  open: [item: TreeItem]
+  /** 定位到 revealPath 时，第一级没找到的名字（找到了为 null） */
+  revealed: [missing: string | null]
+}>()
 
 const { t } = useI18n()
 const { formatHostError } = useHostErrorText()
@@ -117,7 +123,11 @@ watch(
     expandedIds.value = new Set()
     activeId.value = null
     resetScroll()
-    void loadMore(ROOT_ID)
+    if (props.revealPath === undefined) {
+      void loadMore(ROOT_ID)
+    } else {
+      void reveal(props.revealPath)
+    }
   },
   { immediate: true },
 )
@@ -214,6 +224,74 @@ async function loadMore(dirId: string) {
     if (requestGeneration === generation) {
       updateDir(dirId, { ...before, isLoading: false, error: toHostError(error) })
     }
+  }
+}
+
+/** 在目录里找名字为 `name` 的文件夹（不分大小写，不看已删除的），没加载到就接着往下加载；找不到时为 -1 */
+async function findDir(dirId: string, name: string): Promise<number> {
+  const wanted = name.toLowerCase()
+  for (;;) {
+    const state = dirs.value.get(dirId)
+    const index =
+      state?.entries.findIndex(
+        (entry) => entry.isDir && !entry.deleted && entry.name.toLowerCase() === wanted,
+      ) ?? -1
+    const isComplete = state !== undefined && state.entries.length >= state.total
+    if (index >= 0 || isComplete || state?.error) {
+      return index
+    }
+    // 这一页正由别处（滚动时的自动加载）在读：等它读完再看
+    if (state?.isLoading) {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      continue
+    }
+    const before = state?.entries.length ?? -1
+    await loadMore(dirId)
+    if (dirs.value.get(dirId)?.entries.length === before) {
+      return -1
+    }
+  }
+}
+
+/** 逐级展开到 `path` 并选中最后一级；中间哪一级找不到就停在它的上一级，报告没找到的名字 */
+async function reveal(path: string[]) {
+  const requestGeneration = generation
+  let dirId = ROOT_ID
+  let lastId: string | null = null
+  await loadMore(ROOT_ID)
+  for (const name of path) {
+    const index = await findDir(dirId, name)
+    if (requestGeneration !== generation) {
+      return
+    }
+    if (index < 0) {
+      emit('revealed', name)
+      selectRow(lastId)
+      return
+    }
+    const id = `${dirId}/${index}`
+    const entry = dirs.value.get(dirId)?.entries[index]
+    if (entry === undefined) {
+      return
+    }
+    dirTokens.set(id, entry.file)
+    dirPaths.set(id, [...(dirPaths.get(dirId) ?? []), entry.name])
+    expandedIds.value = new Set([...expandedIds.value, id])
+    await loadMore(id)
+    if (requestGeneration !== generation) {
+      return
+    }
+    dirId = id
+    lastId = id
+  }
+  emit('revealed', null)
+  selectRow(lastId)
+}
+
+/** 选中并滚到这一行（为空时不动） */
+function selectRow(id: string | null) {
+  if (id !== null) {
+    moveTo(rows.value.findIndex((row) => row.id === id))
   }
 }
 

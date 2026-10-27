@@ -8,10 +8,11 @@ use std::path::Path;
 use std::ptr;
 
 use windows_sys::Win32::Storage::FileSystem::{
-    GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW, GetVolumePathNameW,
+    GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
+    GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
 };
 
-use crate::volume_disk_numbers;
+use crate::{volume_disk_numbers, volume_root as root_of};
 
 /// `GetVolumeInformationW` 报告的文件系统标志：支持稀疏文件（`FILE_SUPPORTS_SPARSE_FILES`）。
 const SUPPORTS_SPARSE_FILES: u32 = 0x0000_0040;
@@ -41,21 +42,25 @@ pub struct VolumeInfo {
 pub struct MountedVolume {
     /// 盘符，如 `C`。
     pub letter: char,
+    /// 卷的 GUID 名（[`volume_guid`]）。
+    pub guid: String,
     pub info: VolumeInfo,
     /// 卷所在的物理磁盘编号；跨盘的卷有多个。
     pub disks: Vec<u32>,
 }
 
-/// 查询 `path` 所在的卷。`path` 可以还不存在、也可以是已有的文件：取最近一级已存在的目录
+/// `path` 最近一级已存在的目录（以 0 结尾的 UTF-16）：`path` 可以还不存在、也可以是已有的文件
 /// （剩余空间只能按目录查，给文件会报「目录名称无效」）。
-pub fn volume_info(path: impl AsRef<Path>) -> io::Result<VolumeInfo> {
-    let path = path.as_ref();
+fn existing_dir(path: &Path) -> io::Result<Vec<u16>> {
     let existing = path
         .ancestors()
         .find(|ancestor| !ancestor.as_os_str().is_empty() && ancestor.is_dir())
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "路径及其上级目录都不存在"))?;
-    let existing = wide(existing.as_os_str());
+    Ok(wide(existing.as_os_str()))
+}
 
+/// 目录所在卷的根路径，如 `C:\`（以 0 结尾）。
+fn volume_root(existing: &[u16]) -> io::Result<Vec<u16>> {
     let mut root = vec![0u16; NAME_BUFFER];
     // SAFETY: `existing` 以 0 结尾；`root` 的指针与长度来自独占借用的缓冲区，函数最多写入这么多个单元。
     let found =
@@ -63,6 +68,27 @@ pub fn volume_info(path: impl AsRef<Path>) -> io::Result<VolumeInfo> {
     if found == 0 {
         return Err(io::Error::last_os_error());
     }
+    Ok(root)
+}
+
+/// `path` 所在的卷的 GUID 名，如 `\\?\Volume{0a1b…}\`：同一个卷换了盘符、重新插拔也不变，用来认卷、比较两个路径在不在同一个卷上。
+pub fn volume_guid(path: impl AsRef<Path>) -> io::Result<String> {
+    let root = volume_root(&existing_dir(path.as_ref())?)?;
+    let mut name = vec![0u16; NAME_BUFFER];
+    // SAFETY: `root` 是以 0 结尾、以反斜杠结尾的卷根路径；`name` 的指针与长度来自独占借用的缓冲区。
+    let found = unsafe {
+        GetVolumeNameForVolumeMountPointW(root.as_ptr(), name.as_mut_ptr(), NAME_BUFFER as u32)
+    };
+    if found == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(until_nul(&name))
+}
+
+/// 查询 `path` 所在的卷。`path` 可以还不存在、也可以是已有的文件：取最近一级已存在的目录。
+pub fn volume_info(path: impl AsRef<Path>) -> io::Result<VolumeInfo> {
+    let existing = existing_dir(path.as_ref())?;
+    let root = volume_root(&existing)?;
 
     let mut flags = 0u32;
     let mut label = vec![0u16; NAME_BUFFER];
@@ -110,7 +136,7 @@ pub fn mounted_volumes() -> Vec<MountedVolume> {
         .filter(|index| letters & (1 << index) != 0)
         .filter_map(|index| {
             let letter = char::from(b'A' + index);
-            let root = format!("{letter}:\\");
+            let root = root_of(letter);
             // SAFETY: 参数是以 0 结尾的根路径。
             let kind = unsafe { GetDriveTypeW(wide(OsStr::new(&root)).as_ptr()) };
             if kind != DRIVE_FIXED && kind != DRIVE_REMOVABLE {
@@ -118,8 +144,10 @@ pub fn mounted_volumes() -> Vec<MountedVolume> {
             }
             let info = volume_info(&root).ok()?;
             let disks = volume_disk_numbers(&root).ok()?;
+            let guid = volume_guid(&root).ok()?;
             Some(MountedVolume {
                 letter,
+                guid,
                 info,
                 disks,
             })

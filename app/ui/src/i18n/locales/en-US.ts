@@ -306,6 +306,7 @@ const enUS: typeof zhCN = {
       remove: 'Remove from list',
       removeHint: 'Only removes the entry; the image file is kept',
       diskLabel: '{name} · {size}',
+      volumeLabel: 'Drive {letter}: {label} · {size}',
       diskMissing: 'The original disk ({source}) is not connected now. Connect it and click "Use" again, or choose the source below by hand.',
     },
     inspect: {
@@ -477,9 +478,12 @@ const enUS: typeof zhCN = {
     },
     solidState: 'SSD',
     spinning: 'HDD',
-    volume: '{letters} {fileSystem}',
-    letterSeparator: ', ',
-    noLetters: 'No drive letters (partitions may be lost or unformatted)',
+    chooseHint: 'Choose the top entry of a card to read the whole disk; to read just one drive, choose its entry below.',
+    wholeDisk: 'Whole disk · {size}',
+    volumeName: '{label} ({letter}:)',
+    volumeNoLabel: 'Local disk',
+    volumeUsage: '{used} of {total} used · {fileSystem}',
+    noLetters: 'No drive letters (partitions may be lost or unformatted); only the whole disk can be read',
     details: 'Details',
     facts: {
       bus: 'Interface',
@@ -487,9 +491,6 @@ const enUS: typeof zhCN = {
       sectorValue: '{size} bytes',
       serial: 'Serial number',
       unknown: 'Unknown',
-      volume: 'Drive {letter}:',
-      volumeValue: '{label} · {fileSystem} · {used} of {total} used',
-      noLabel: 'No label',
     },
     bus: {
       ata: 'ATA',
@@ -621,6 +622,10 @@ const enUS: typeof zhCN = {
     imagePath: 'Image file path',
     imagePathPlaceholder: 'Full path of the image file, e.g. D:/images/disk.img',
     pickTitle: 'Choose an image file',
+    folder: 'Folder',
+    folderPath: 'Folder path',
+    folderPathPlaceholder: 'The folder to recover deleted files from, e.g. D:/Photos/2024',
+    pickFolderTitle: 'Choose the folder to recover deleted files from',
     browse: 'Choose file…',
   },
   preview: {
@@ -707,6 +712,7 @@ const enUS: typeof zhCN = {
     openingDisk: 'Requesting administrator rights and reading the partition table…',
     sourceImage: 'Image file {path}',
     sourceDisk: 'Disk {number}',
+    sourceVolume: 'Drive {letter}:',
   },
   undelete: {
     steps: {
@@ -715,7 +721,10 @@ const enUS: typeof zhCN = {
       browse: 'Browse and copy',
     },
     diskHint:
-      'Reading a physical disk needs administrator rights; it is read only and does not change the disk. Recovered files must be copied to a different disk. If the disk has already reported read errors, create an image first and recover from the image.',
+      'Reading a physical disk needs administrator rights; it is read only and does not change the disk. Recovered files cannot be copied back to what is being read: for a whole disk copy them to another disk, for a single drive another drive is enough. If the disk has already reported read errors, create an image first and recover from the image.',
+    folderHint:
+      'Shows only the deleted files in this folder: the drive it is on is read (administrator rights, read only) and the folder is opened right after the scan. Copy recovered files to another drive.',
+    folderInvalid: 'Enter a full path with a drive letter, e.g. D:/Photos/2024 (network paths are not supported).',
   },
   partitionFiles: {
     browse: {
@@ -726,6 +735,7 @@ const enUS: typeof zhCN = {
       stateHint:
         '"Likely intact" only means the space it used has not been taken by another file; it does not guarantee the contents. Open the copies to check them. On an SSD with TRIM, deleted files are often already zeroed. For files you cannot find here, try deep recovery by file type.',
       timesUtc: 'This partition records times in UTC, which may differ by some hours from the local times shown by File Explorer.',
+      revealMissing: 'Folder "{name}" was not found (it may have been deleted or renamed); showing its parent instead.',
     },
     browser: {
       title: 'Files in the partition',
@@ -1379,7 +1389,7 @@ const enUS: typeof zhCN = {
     sourceUnavailable: 'Cannot open the disk or image to read',
     outputUnavailable: 'Cannot create or write to the output folder',
     outputOnSource:
-      'The output folder must be on a different disk: writing back to the scanned disk would overwrite data that has not been recovered yet',
+      'The save location cannot be what is being read: for a whole disk use another disk, for a single drive use another drive. Writing back would overwrite data that has not been recovered yet',
     previewUnavailable: 'Cannot read this file',
     recoveredNotFound: 'This recovered file cannot be found',
     invalidRecoveredName: 'The file name was not given by the recovery',

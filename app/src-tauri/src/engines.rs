@@ -16,7 +16,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter};
-use yisi_broker::protocol::physical_drive_path;
+use yisi_broker::protocol::{physical_drive_path, volume_path};
 use yisi_engine::protocol::{
     BROWSE_OPEN, BrowseOpened, BrowseParams, CANCEL, CANCEL_SCAN, CANCELLED, CAPABILITIES,
     CARVE_EXTRACT, CARVE_START, COMPLETED, COPIED, COPY_FILES, Capabilities, CarveParams,
@@ -73,7 +73,7 @@ impl HostError {
     }
 }
 
-/// 界面选定的源：镜像文件，或按编号指定的物理磁盘。
+/// 界面选定的源：镜像文件、按编号指定的物理磁盘，或按盘符指定的卷。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Target {
@@ -84,15 +84,19 @@ pub enum Target {
     Disk {
         disk_number: u32,
     },
+    Volume {
+        letter: String,
+    },
 }
 
 impl Target {
-    /// 物理磁盘的编号要在代理接受的范围内，免得启动引擎后才被代理拒绝。
+    /// 物理磁盘的编号、卷的盘符要是代理接受的样子，免得启动引擎后才被代理拒绝。
     fn validate(&self) -> Result<(), HostError> {
-        if let Self::Disk { disk_number } = self {
-            disk_path(*disk_number)?;
+        match self {
+            Self::Disk { disk_number } => disk_path(*disk_number).map(|_| ()),
+            Self::Volume { letter } => volume_device(letter).map(|_| ()),
+            Self::Image { .. } => Ok(()),
         }
-        Ok(())
     }
 }
 
@@ -132,47 +136,20 @@ impl Engines {
         query(LIST_FILE_TYPES)
     }
 
-    pub fn start_image_scan(
-        &self,
-        app: AppHandle,
-        job_id: String,
-        path: String,
-    ) -> Result<(), HostError> {
-        self.start_read_scan(app, job_id, |_| {
-            Ok(Source::Image {
-                path,
-                sector_size: IMAGE_SECTOR_SIZE,
-            })
-        })
-    }
-
-    /// 扫描物理磁盘：先启动引擎，再请磁盘代理（必要时弹出 UAC）把只读句柄复制进这个引擎。
-    pub fn start_disk_scan(
+    /// 读取扫描（坏道检测）。物理磁盘与卷先启动引擎，再请磁盘代理（必要时弹出 UAC）把只读句柄复制进这个引擎。
+    pub fn start_read_scan(
         &self,
         app: AppHandle,
         broker: &BrokerSession,
         job_id: String,
-        disk_number: u32,
+        target: Target,
     ) -> Result<(), HostError> {
-        let path = disk_path(disk_number)?;
-        self.start_read_scan(app, job_id, |engine_pid| {
-            let handle = broker.open_disk(&path, engine_pid)?;
-            Ok(Source::Disk { handle })
-        })
-    }
-
-    /// `source` 拿到引擎的进程 ID，返回要扫描的对象。
-    fn start_read_scan(
-        &self,
-        app: AppHandle,
-        job_id: String,
-        source: impl FnOnce(u32) -> Result<Source, HostError>,
-    ) -> Result<(), HostError> {
+        target.validate()?;
         let params_job_id = job_id.clone();
         self.start_job(app, job_id, READ_SCAN, |engine_pid| {
             to_params(&ReadScanParams {
                 job_id: params_job_id,
-                source: source(engine_pid)?,
+                source: resolve_source(target, broker, engine_pid)?,
             })
         })
         .map(|_| ())
@@ -825,7 +802,24 @@ fn resolve_source(
         Target::Disk { disk_number } => Ok(Source::Disk {
             handle: broker.open_disk(&disk_path(disk_number)?, engine_pid)?,
         }),
+        Target::Volume { letter } => {
+            let path = volume_device(&letter)?;
+            Ok(Source::Volume {
+                handle: broker.open_disk(&path, engine_pid)?,
+                letter,
+            })
+        }
     }
+}
+
+/// 卷的设备路径 `\\.\C:`；盘符要是一个英文字母（规则在 `yisi_io`，代理用同一份核对）。
+fn volume_device(letter: &str) -> Result<String, HostError> {
+    let mut chars = letter.chars();
+    match (chars.next(), chars.next()) {
+        (Some(first), None) => volume_path(first),
+        _ => None,
+    }
+    .ok_or_else(|| HostError::new("invalidDisk", letter.to_owned()))
 }
 
 /// 磁盘代理只接受 `\\.\PhysicalDriveN` 形式的路径（规则在 `yisi_io`，代理用同一份核对）。
@@ -1034,6 +1028,17 @@ mod tests {
         let disk: Target =
             serde_json::from_value(json!({"kind": "disk", "diskNumber": 3})).unwrap();
         assert!(matches!(disk, Target::Disk { disk_number: 3 }));
+        let volume: Target =
+            serde_json::from_value(json!({"kind": "volume", "letter": "D"})).unwrap();
+        assert!(matches!(&volume, Target::Volume { letter } if letter == "D"));
+        assert!(volume.validate().is_ok());
+        // 盘符要是一个字母：别的东西不交给代理
+        for bad in ["", "DE", "1", ":", "\\"] {
+            let target = Target::Volume {
+                letter: bad.to_owned(),
+            };
+            assert_eq!(target.validate().unwrap_err().code, "invalidDisk", "{bad}");
+        }
     }
 
     #[test]

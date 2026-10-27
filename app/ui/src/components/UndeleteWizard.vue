@@ -9,7 +9,8 @@ import WizardSteps from './WizardSteps.vue'
 import { useBrowse } from '../composables/useBrowse'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { usePartitionText } from '../composables/usePartitionText'
-import type { JobTarget, PartitionRef } from '../services/host'
+import { useSourceSelection } from '../composables/useSourceSelection'
+import { isDeviceKind, type PartitionRef } from '../services/host'
 import { formatBytes } from '../utils/format'
 
 const STEPS = ['source', 'partition', 'browse'] as const
@@ -24,28 +25,21 @@ const browse = useBrowse()
 
 const titleElement = ref<HTMLHeadingElement | null>(null)
 const step = ref<WizardStep>('source')
-const sourceKind = ref<JobTarget['kind']>('image')
-const imagePath = ref('')
-const selectedDisk = ref<number | null>(null)
+const { sourceKind, imagePath, device, folder, folderLocation, target } = useSourceSelection()
 const selectedPartition = ref<number | null>(null)
+/** 选文件夹找回时，打开的那一刻文件夹在卷里的位置：浏览时直接定位到它 */
+const openedFolder = ref<string[] | null>(null)
 /** 复制进行中（由 PartitionFiles 给出）：不能返回或离开 */
 const isCopying = ref(false)
 
 const stepIndex = computed(() => STEPS.indexOf(step.value))
 
-const target = computed<JobTarget | null>(() => {
-  if (sourceKind.value === 'image') {
-    const path = imagePath.value.trim()
-    return path === '' ? null : { kind: 'image', path }
-  }
-  return selectedDisk.value === null ? null : { kind: 'disk', diskNumber: selectedDisk.value }
-})
 
 const partitions = computed(() => browse.opened.value?.partitions ?? [])
 const currentPartition = computed(
   () => partitions.value.find((partition) => partition.number === selectedPartition.value) ?? null,
 )
-const isSourceDisk = computed(() => browse.target.value?.kind === 'disk')
+const isSourceDisk = computed(() => isDeviceKind(browse.target.value?.kind))
 
 const canGoNext = computed(() => {
   switch (step.value) {
@@ -80,7 +74,7 @@ const partitionRef = computed<PartitionRef | null>(() =>
 const sourceText = computed(() => sourceName(browse.target.value))
 
 const openingText = computed(() =>
-  target.value?.kind === 'disk' ? t('partition.openingDisk') : t('partition.opening'),
+  isDeviceKind(target.value?.kind) ? t('partition.openingDisk') : t('partition.opening'),
 )
 
 onMounted(() => {
@@ -137,11 +131,18 @@ async function openSource() {
   if (current === null || !canGoNext.value) {
     return
   }
+  const folderPath = sourceKind.value === 'folder' ? (folderLocation.value?.path ?? null) : null
   await browse.open(current)
-  if (browse.isOpen.value) {
-    selectedPartition.value =
-      partitions.value.find((partition) => partition.browsable)?.number ?? null
-    step.value = 'partition'
+  if (!browse.isOpen.value) {
+    return
+  }
+  openedFolder.value = folderPath
+  selectedPartition.value =
+    partitions.value.find((partition) => partition.browsable)?.number ?? null
+  step.value = 'partition'
+  // 选的是文件夹：它所在的卷就是唯一的分区，直接扫描、进去定位到文件夹
+  if (folderPath !== null && canGoNext.value) {
+    await enterPartition()
   }
 }
 </script>
@@ -189,9 +190,18 @@ async function openSource() {
         <SourcePicker
           v-model:kind="sourceKind"
           v-model:image-path="imagePath"
-          v-model:disk="selectedDisk"
+          v-model:device="device"
+          v-model:folder="folder"
           :disk-hint="t('undelete.diskHint')"
+          :folder-hint="t('undelete.folderHint')"
         />
+        <p
+          v-if="sourceKind === 'folder' && folder.trim() !== '' && folderLocation === null"
+          class="wizard__error"
+          role="alert"
+        >
+          {{ t('undelete.folderInvalid') }}
+        </p>
         <p v-if="browse.status.value === 'starting'" class="wizard__note" aria-live="polite">
           {{ openingText }}
         </p>
@@ -269,6 +279,7 @@ async function openSource() {
             :partition-ref="partitionRef"
             :sector-size="browse.opened.value?.sectorSize ?? 512"
             :can-browse="browse.isOpen.value"
+            :reveal-path="openedFolder ?? undefined"
           />
         </div>
       </div>

@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import ReadHealthHint from './ReadHealthHint.vue'
 import type { useBrowse } from '../composables/useBrowse'
 import { formatBytes } from '../utils/format'
+import { isDeviceKind } from '../services/host'
 
 /**
  * 打开 NTFS 分区时扫描 MFT 的进度：进度条、已扫描多少、读得慢的原因、取消扫描。找回删除的文件与找回丢失的分区共用
@@ -35,7 +36,7 @@ const statusText = computed(() =>
     <p class="wizard__status">{{ statusText }}</p>
     <ReadHealthHint
       :health="browse.readHealth.value"
-      :source-is-disk="browse.target.value?.kind === 'disk'"
+      :source-is-disk="isDeviceKind(browse.target.value?.kind)"
       context="scan"
     />
     <div>

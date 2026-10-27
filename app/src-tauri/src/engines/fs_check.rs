@@ -54,12 +54,23 @@ pub fn save_report(target: &Target, path: &str, text: &str) -> Result<(), HostEr
 
 #[cfg(windows)]
 fn ensure_not_on_disk(target: &Target, file: &Path) -> Result<(), HostError> {
-    let Target::Disk { disk_number } = target else {
-        return Ok(());
+    // 规则与引擎核对输出目录相同：查不到所在的磁盘或卷也拒绝
+    let checked = match target {
+        Target::Image { .. } => return Ok(()),
+        Target::Disk { disk_number } => {
+            yisi_io::ensure_off_source(Ok(*disk_number), yisi_io::volume_disk_numbers(file))
+        }
+        Target::Volume { letter } => {
+            let letter = letter.chars().next().unwrap_or('?');
+            let query = |what: &'static str| move |source| yisi_io::IoError::Query { what, source };
+            yisi_io::ensure_off_volume(
+                letter,
+                yisi_io::volume_guid(yisi_io::volume_root(letter)).map_err(query("源卷")),
+                yisi_io::volume_guid(file).map_err(query("输出位置所在的卷")),
+            )
+        }
     };
-    // 规则与引擎核对输出目录相同：查不到所在的磁盘也拒绝
-    yisi_io::ensure_off_source(Ok(*disk_number), yisi_io::volume_disk_numbers(file))
-        .map_err(|error| HostError::new("outputOnSource", error.to_string()))
+    checked.map_err(|error| HostError::new("outputOnSource", error.to_string()))
 }
 
 /// 其他平台还打不开物理盘，检查的只会是镜像文件。

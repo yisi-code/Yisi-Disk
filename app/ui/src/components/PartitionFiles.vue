@@ -10,6 +10,7 @@ import { useCopy } from '../composables/useCopy'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { useHostDialog } from '../composables/useHostDialog'
 import {
+  isDeviceKind,
   openCopiedFile,
   openOrReveal,
   revealCopiedFile,
@@ -50,6 +51,8 @@ const props = defineProps<{
   canBrowse: boolean
   /** 浏览会话按哪一份引导扇区打开，复制时用同一份；不给时为主引导扇区 */
   boot?: BootCopy
+  /** 打开后直接定位到这个文件夹（选文件夹找回时），并默认只看已删除的文件 */
+  revealPath?: string[]
 }>()
 /** 复制进行中：父组件据此禁用返回、离开 */
 const isBusy = defineModel<boolean>('busy', { default: false })
@@ -58,7 +61,9 @@ const { t } = useI18n()
 const { formatHostError } = useHostErrorText()
 const copy = useCopy()
 
-const deletedOnly = ref(false)
+const deletedOnly = ref(props.revealPath !== undefined)
+/** 定位文件夹时没找到的那一级（可能已被删除或改名） */
+const revealMissing = ref<string | null>(null)
 const selectedItem = ref<TreeItem | null>(null)
 const checkedItems = ref(new Map<string, TreeItem>())
 const { dialogError, pickFolder } = useHostDialog()
@@ -257,7 +262,9 @@ async function revealOutput() {
       :job-id="jobId"
       :partition="partition.number"
       :deleted-only="deletedOnly"
+      :reveal-path="revealPath"
       @open="openItem"
+      @revealed="revealMissing = $event"
     >
       <template #tools>
         <label class="partition-files__filter">
@@ -288,6 +295,9 @@ async function revealOutput() {
     >
       <template #footer>
         <div class="partition-files__pane-notes">
+          <p v-if="revealMissing" class="wizard__hint wizard__hint--warning">
+            {{ t('partitionFiles.browse.revealMissing', { name: revealMissing }) }}
+          </p>
           <p class="wizard__hint">{{ t('partitionFiles.browse.stateHint') }}</p>
           <p v-if="partition.timesUtc" class="wizard__hint">
             {{ t('partitionFiles.browse.timesUtc') }}
@@ -306,7 +316,7 @@ async function revealOutput() {
       <p class="wizard__status">{{ copyStatusText }}</p>
       <ReadHealthHint
         :health="copy.readHealth.value"
-        :source-is-disk="source.kind === 'disk'"
+        :source-is-disk="isDeviceKind(source.kind)"
         context="scan"
       />
       <p v-if="copy.failure.value" class="wizard__error" role="alert">
