@@ -11,6 +11,7 @@ use serde::Serialize;
 use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Manager, State};
 use yisi_engine::protocol::PartitionInfo;
+use yisi_engine::protocol::{BootCopy, BootDiagnosis};
 use yisi_engine::protocol::{
     BrowseOpened, Capabilities, CopyItem, DiskList, ExtractItem, FileListPage, FilePreview,
     FileTypeList, PartitionRef, ScanResult,
@@ -190,6 +191,7 @@ fn recovered_reveal(
 }
 
 /// 浏览分区（找回删除的文件）：答复分区表，之后引擎一直运行，直到界面用 `job_cancel` 关闭浏览。
+/// `boot` 为 `backup` 时各分区按备份引导扇区打开（修复打不开的分区）；不给时用主引导扇区。
 #[tauri::command(async)]
 fn browse_open(
     app: AppHandle,
@@ -197,8 +199,19 @@ fn browse_open(
     broker: State<'_, BrokerSession>,
     job_id: String,
     target: Target,
+    boot: Option<BootCopy>,
 ) -> Result<BrowseOpened, HostError> {
-    engines.open_browse(app, &broker, job_id, target)
+    engines.open_browse(app, &broker, job_id, target, boot.unwrap_or_default())
+}
+
+/// 诊断各分区的引导扇区（修复打不开的分区）：只读，答复后引擎退出。物理盘第一次需要时弹出 UAC。
+#[tauri::command(async)]
+fn boot_diagnose(
+    engines: State<'_, Engines>,
+    broker: State<'_, BrokerSession>,
+    target: Target,
+) -> Result<BootDiagnosis, HostError> {
+    engines.diagnose_boot(&broker, target)
 }
 
 #[tauri::command(async)]
@@ -267,7 +280,7 @@ fn browse_open_range(
 }
 
 /// 把浏览中选中的项复制到另一块盘（另存为）。不给输出目录时是为打开而复制：存到程序目录下的 `open-cache`，
-/// 同时在后台清掉以前的副本。
+/// 同时在后台清掉以前的副本。`boot` 与浏览时一致。
 #[tauri::command(async)]
 #[expect(clippy::too_many_arguments, reason = "与界面传来的参数一一对应")]
 fn job_start_copy(
@@ -279,8 +292,18 @@ fn job_start_copy(
     partition: PartitionRef,
     items: Vec<CopyItem>,
     output_dir: Option<String>,
+    boot: Option<BootCopy>,
 ) -> Result<(), HostError> {
-    engines.start_copy(app, &broker, job_id, target, partition, items, output_dir)
+    engines.start_copy(
+        app,
+        &broker,
+        job_id,
+        target,
+        partition,
+        items,
+        output_dir,
+        boot.unwrap_or_default(),
+    )
 }
 
 /// 用系统默认程序打开复制出的文件。可执行与脚本类文件不打开（`executableBlocked`），只能在文件夹中显示。
@@ -360,7 +383,8 @@ fn main() -> anyhow::Result<()> {
             job_start_copy,
             copied_open,
             copied_reveal,
-            job_start_image
+            job_start_image,
+            boot_diagnose
         ])
         .run(tauri::generate_context!())?;
     Ok(())

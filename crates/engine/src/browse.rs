@@ -10,7 +10,7 @@ use yisi_engine::protocol::{
     self, BrowseOpened, FileListPage, FilePreview, FsEntry, ListFilesParams, MAX_PAGE,
     OpenRangeParams, PartitionInfo, RANGE_PARTITION_BASE, ScanResult,
 };
-use yisi_fs::{FileRef, FsKind, State, Unsupported, Volume};
+use yisi_fs::{BootCopy, FileRef, FsKind, State, Unsupported, Volume};
 use yisi_io::BlockDevice;
 use yisi_part::{Note, Partition, PartitionKind, PartitionTable, Role, Scheme};
 use yisi_repair::search::BackupBootDevice;
@@ -32,6 +32,8 @@ const MAX_RANGES: usize = 1000;
 pub struct Session {
     device: Arc<dyn BlockDevice>,
     table: PartitionTable,
+    /// 各分区按哪一份引导扇区打开（「修复打不开的分区」里用备份浏览）。
+    boot: BootCopy,
     volumes: Mutex<HashMap<u32, Arc<Volume>>>,
     listings: Mutex<HashMap<(u32, String), Arc<SortedDir>>>,
     progress: ProgressSender,
@@ -59,9 +61,11 @@ struct SortedDir {
 
 impl Session {
     /// 读分区表，识别每个分区的文件系统；能浏览的分区顺便打开，取出卷标。扫描的进度经 `progress` 发出。
+    /// 各分区按 `boot` 指定的那一份引导扇区识别和打开。
     pub fn open(
         device: Arc<dyn BlockDevice>,
         progress: ProgressSender,
+        boot: BootCopy,
     ) -> Result<(Self, BrowseOpened), ErrorObject> {
         let table = yisi_part::read_table(device.as_ref()).map_err(|error| {
             ErrorObject::new(
@@ -72,6 +76,7 @@ impl Session {
         let session = Self {
             device,
             table,
+            boot,
             volumes: Mutex::new(HashMap::new()),
             listings: Mutex::new(HashMap::new()),
             progress,
@@ -101,22 +106,7 @@ impl Session {
     }
 
     fn describe(&self, partition: &Partition) -> PartitionInfo {
-        let (type_id, name, bootable, logical) = match &partition.kind {
-            PartitionKind::Mbr {
-                type_id,
-                bootable,
-                logical,
-            } => (
-                format!("0x{type_id:02X}"),
-                String::new(),
-                *bootable,
-                *logical,
-            ),
-            PartitionKind::Gpt {
-                type_guid, name, ..
-            } => (type_guid.to_string(), name.clone(), false, false),
-            PartitionKind::Whole => (String::new(), String::new(), false, false),
-        };
+        let (type_id, name, bootable, logical) = table_kind(partition);
         PartitionInfo {
             type_id,
             role: partition.role().map(|role| role_key(role).to_owned()),
@@ -128,19 +118,21 @@ impl Session {
                 self.device.as_ref(),
                 partition.offset,
                 partition.length,
+                self.boot,
             )
         }
     }
 
-    /// 分区上的文件系统与卷；分区表里的信息（类型、用途、名字等）留空。
+    /// 分区上的文件系统与卷（按 `boot` 那一份引导扇区识别）；分区表里的信息（类型、用途、名字等）留空。
     fn describe_volume(
         &self,
         number: u32,
         device: &dyn BlockDevice,
         offset: u64,
         length: u64,
+        boot: BootCopy,
     ) -> PartitionInfo {
-        let detected = yisi_fs::detect(device, offset, length);
+        let detected = yisi_fs::detect_with(device, offset, length, boot);
         let volume = match detected {
             Ok(kind) if kind.is_browsable() => self.volume(number).ok(),
             _ => None,
@@ -285,21 +277,41 @@ impl Session {
                 .ok_or_else(|| fs_error("分区编号溢出".to_owned()))?;
             (number, device)
         };
-        Ok(self.describe_volume(number, device.as_ref(), params.offset, params.length))
+        // 备份引导扇区已由 range_device 换到分区开头，按主引导扇区识别
+        Ok(self.describe_volume(
+            number,
+            device.as_ref(),
+            params.offset,
+            params.length,
+            BootCopy::Primary,
+        ))
     }
 
-    /// 分区 `number` 所在的设备（按位置打开、靠备份找到的分区换掉了主引导扇区）、偏移与长度。
-    fn locate(&self, number: u32) -> Option<(Arc<dyn BlockDevice>, u64, u64)> {
+    /// 分区 `number` 所在的设备、偏移、长度，以及按哪一份引导扇区打开：表里的分区按会话指定的那一份；
+    /// 按位置打开、靠备份找到的分区，设备已换掉了主引导扇区，按主引导扇区打开。
+    fn locate(&self, number: u32) -> Option<(Arc<dyn BlockDevice>, u64, u64, BootCopy)> {
         if let Some(index) = number.checked_sub(RANGE_PARTITION_BASE) {
             let ranges = lock(&self.ranges);
             let range = ranges.get(usize::try_from(index).ok()?)?;
-            return Some((Arc::clone(&range.device), range.offset, range.length));
+            return Some((
+                Arc::clone(&range.device),
+                range.offset,
+                range.length,
+                BootCopy::Primary,
+            ));
         }
         self.table
             .partitions
             .iter()
             .find(|partition| partition.number == number)
-            .map(|partition| (Arc::clone(&self.device), partition.offset, partition.length))
+            .map(|partition| {
+                (
+                    Arc::clone(&self.device),
+                    partition.offset,
+                    partition.length,
+                    self.boot,
+                )
+            })
     }
 
     /// 打开（或取出已打开的）分区 `number` 上的卷。
@@ -307,18 +319,18 @@ impl Session {
         if let Some(volume) = lock(&self.volumes).get(&number) {
             return Ok(Arc::clone(volume));
         }
-        let (device, offset, length) = self
+        let (device, offset, length, boot) = self
             .locate(number)
             .ok_or_else(|| fs_error(format!("没有分区 {number}")))?;
-        let volume =
-            Volume::open(device, offset, length).map_err(|error| fs_error(error_chain(&error)))?;
+        let volume = Volume::open_with(device, offset, length, boot)
+            .map_err(|error| fs_error(error_chain(&error)))?;
         let volume = Arc::new(volume);
         lock(&self.volumes).insert(number, Arc::clone(&volume));
         Ok(volume)
     }
 
     fn partition_offset(&self, number: u32) -> u64 {
-        self.locate(number).map_or(0, |(_, offset, _)| offset)
+        self.locate(number).map_or(0, |(_, offset, _, _)| offset)
     }
 
     pub fn list(&self, params: &ListFilesParams) -> Result<FileListPage, ErrorObject> {
@@ -470,6 +482,26 @@ fn unsupported_key(reason: Unsupported) -> &'static str {
     }
 }
 
+/// 分区表里的类型（MBR 类型字节或 GPT 类型 GUID）、GPT 分区名、是否活动分区、是否逻辑分区。
+pub(crate) fn table_kind(partition: &Partition) -> (String, String, bool, bool) {
+    match &partition.kind {
+        PartitionKind::Mbr {
+            type_id,
+            bootable,
+            logical,
+        } => (
+            format!("0x{type_id:02X}"),
+            String::new(),
+            *bootable,
+            *logical,
+        ),
+        PartitionKind::Gpt {
+            type_guid, name, ..
+        } => (type_guid.to_string(), name.clone(), false, false),
+        PartitionKind::Whole => (String::new(), String::new(), false, false),
+    }
+}
+
 pub(crate) fn fs_key(kind: FsKind) -> &'static str {
     match kind {
         FsKind::Fat12 => "fat12",
@@ -483,7 +515,7 @@ pub(crate) fn fs_key(kind: FsKind) -> &'static str {
     }
 }
 
-fn note_key(note: &Note) -> String {
+pub(crate) fn note_key(note: &Note) -> String {
     match note {
         Note::PrimaryGptInvalid => "primaryGptInvalid",
         Note::GptUnreadable => "gptUnreadable",
@@ -495,7 +527,7 @@ fn note_key(note: &Note) -> String {
     .to_owned()
 }
 
-fn role_key(role: Role) -> &'static str {
+pub(crate) fn role_key(role: Role) -> &'static str {
     match role {
         Role::EfiSystem => "efiSystem",
         Role::MicrosoftReserved => "microsoftReserved",

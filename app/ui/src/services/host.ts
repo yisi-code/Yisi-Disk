@@ -99,6 +99,72 @@ export interface FilePreview {
   imageError: string | null
 }
 
+/** 打开卷时用哪一份引导扇区 */
+export type BootCopy = 'primary' | 'backup'
+
+/** 引导扇区诊断的结论 */
+export type BootVerdict =
+  | 'healthy'
+  | 'backupDamaged'
+  | 'primaryDamaged'
+  | 'bothDamaged'
+  | 'unsupported'
+  | 'unrecognized'
+
+/** 一个问题：界面按 repair.issue.<code> 显示；value 是引导扇区里记的值，expected 是应有的值 */
+export interface BootIssue {
+  code: string
+  value: number | null
+  expected: number | null
+}
+
+/** 主备之间不一样的一个字段，界面按 repair.field.<field> 显示字段名 */
+export interface BootDifference {
+  field: string
+  primary: number
+  backup: number
+}
+
+/** 一份引导扇区的核对结果；issues 为空表示这一份正常 */
+export interface BootCopyReport {
+  /** 在源上的字节偏移 */
+  offset: number
+  issues: BootIssue[]
+  volumeBytes: number | null
+  clusterSize: number | null
+  /** 引导扇区正常时按它打开了卷；打不开时 openError 是原因。有问题时不试，两项都为空 */
+  opened: boolean
+  openError: string | null
+}
+
+export interface PartitionBoot {
+  number: number
+  offset: number
+  length: number
+  typeId: string
+  role: string | null
+  name: string
+  logical: boolean
+  /** fat12、fat16、fat32、exfat、ntfs、bitlocker、ext、unknown */
+  filesystem: string
+  verdict: BootVerdict
+  label: string | null
+  primary: BootCopyReport
+  /** FAT12/16 没有备份；认不出文件系统时也不找 */
+  backup: BootCopyReport | null
+  differences: BootDifference[]
+  /** 分区表与引导扇区不符：typeMismatch、volumeLarger、volumeSmaller */
+  tableIssues: BootIssue[]
+}
+
+export interface BootDiagnosis {
+  size: number
+  sectorSize: number
+  scheme: 'mbr' | 'gpt' | 'none'
+  notes: string[]
+  partitions: PartitionBoot[]
+}
+
 /** 浏览分区时读出的分区表 */
 export interface BrowseOpened {
   size: number
@@ -437,10 +503,14 @@ export function revealRecoveredFile(jobId: string, name: string): Promise<void> 
 
 /**
  * 浏览分区（找回删除的文件）：读出分区表后引擎一直运行，用 cancelJob 关闭。
- * 物理磁盘与扫描一样可能先等提权
+ * 物理磁盘与扫描一样可能先等提权。boot 为 backup 时各分区按备份引导扇区打开（修复打不开的分区）
  */
-export function openBrowse(jobId: string, target: JobTarget): Promise<BrowseOpened> {
-  return invoke<BrowseOpened>('browse_open', { jobId, target })
+export function openBrowse(
+  jobId: string,
+  target: JobTarget,
+  boot: BootCopy = 'primary',
+): Promise<BrowseOpened> {
+  return invoke<BrowseOpened>('browse_open', { jobId, target, boot })
 }
 
 /** 列出浏览中的一个目录的一页；dir 为 null 时是根目录。名字很长时引擎给的项数可能少于 limit */
@@ -501,8 +571,17 @@ export function startCopy(
   partition: PartitionRef,
   items: CopyItem[],
   outputDir: string | null,
+  boot: BootCopy = 'primary',
 ): Promise<void> {
-  return invoke<void>('job_start_copy', { jobId, target, partition, items, outputDir })
+  return invoke<void>('job_start_copy', { jobId, target, partition, items, outputDir, boot })
+}
+
+/**
+ * 诊断各分区的引导扇区：读出主引导扇区与备份逐项核对，只读，读完即返回。
+ * 物理磁盘第一次读时可能先等提权
+ */
+export function diagnoseBoot(target: JobTarget): Promise<BootDiagnosis> {
+  return invoke<BootDiagnosis>('boot_diagnose', { target })
 }
 
 /** 用系统默认程序打开复制出的文件；可执行与脚本类文件宿主不打开（executableBlocked） */

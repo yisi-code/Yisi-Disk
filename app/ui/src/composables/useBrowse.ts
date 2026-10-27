@@ -7,6 +7,7 @@ import {
   openBrowseRange,
   scanDeleted,
   toHostError,
+  type BootCopy,
   type BrowseOpened,
   type HostError,
   type JobTarget,
@@ -45,7 +46,8 @@ export function useBrowse() {
     }
   })
 
-  async function open(source: JobTarget) {
+  /** bootCopy 为 backup 时各分区按备份引导扇区打开 */
+  async function open(source: JobTarget, bootCopy: BootCopy = 'primary') {
     if (job.isBusy.value) {
       return
     }
@@ -53,7 +55,7 @@ export function useBrowse() {
     target.value = source
     resetScans()
     await job.start(async (jobId) => {
-      opened.value = await openBrowse(jobId, source)
+      opened.value = await openBrowse(jobId, source, bootCopy)
     })
   }
 

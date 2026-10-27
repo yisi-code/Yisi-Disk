@@ -11,6 +11,7 @@ import {
   revealCopiedFile,
   startCopy as startCopyJob,
   toHostError,
+  type BootCopy,
   type CopyItem,
   type HostError,
   type JobTarget,
@@ -21,7 +22,7 @@ import { formatBytes } from '../utils/format'
 
 /**
  * 一个分区里的文件：左边目录树（勾选、只看已删除的文件、另存为），右边详情与预览，下面是复制的进度与结果。
- * 「找回删除的文件」与「找回丢失的分区」共用。根节点 display: contents，两栏与复制状态直接排进父级的网格：
+ * 「找回删除的文件」「找回丢失的分区」「修复打不开的分区」共用。根节点 display: contents，两栏与复制状态直接排进父级的网格：
  * 父级给出 grid-template-rows: auto 1fr auto（两栏各占三行、用 subgrid 对齐），最后两列是这两栏
  */
 
@@ -43,6 +44,8 @@ const props = defineProps<{
   sectorSize: number
   /** 浏览会话还开着：关了就不能打开、复制 */
   canBrowse: boolean
+  /** 浏览会话按哪一份引导扇区打开，复制时用同一份；不给时为主引导扇区 */
+  boot?: BootCopy
 }>()
 /** 复制进行中：父组件据此禁用返回、离开 */
 const isBusy = defineModel<boolean>('busy', { default: false })
@@ -237,7 +240,8 @@ async function startCopy(items: CopyItem[], dir: string | null, purpose: 'saveAs
   isOpenCacheCopy.value = dir === null
   const source = props.source
   const partitionRef = props.partitionRef
-  await copy.start((jobId) => startCopyJob(jobId, source, partitionRef, items, dir))
+  const boot = props.boot ?? 'primary'
+  await copy.start((jobId) => startCopyJob(jobId, source, partitionRef, items, dir, boot))
 }
 
 async function revealOutput() {

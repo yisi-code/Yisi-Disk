@@ -51,11 +51,8 @@ pub fn search_disk() -> SearchDisk {
     let mut fat32 = FatImage::new(FatType::Fat32);
     fat32.set_label(b"DATA32     ");
     fat32.add_file(fat32.root(), "notes.txt", &notes, Layout::Contiguous);
-    let mut fat32 = fat32.finish();
-    // 备份引导扇区：BPB 第 50 字节记第 6 扇区，主备内容相同
-    fat32[50..52].copy_from_slice(&6u16.to_le_bytes());
-    let boot = fat32[..SECTOR].to_vec();
-    fat32[6 * SECTOR..7 * SECTOR].copy_from_slice(&boot);
+    // FAT32 样本自带第 6 扇区的备份引导扇区
+    let fat32 = fat32.finish();
 
     let mut fat12 = FatImage::new(FatType::Fat12);
     fat12.add_file(fat12.root(), "nested.txt", &nested, Layout::Contiguous);

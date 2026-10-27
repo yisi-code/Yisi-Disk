@@ -90,10 +90,9 @@ pub(crate) struct Exfat {
 }
 
 impl Exfat {
-    pub fn open(region: Region) -> Result<Self, FsError> {
-        let mut sector = [0u8; 512];
-        region.read_exact(0, &mut sector)?;
-        let geometry = parse_boot(&sector).ok_or(FsError::Invalid("exFAT 引导扇区的参数不自洽"))?;
+    /// 按引导扇区 `boot`（主的或备份的）打开。
+    pub fn open(region: Region, boot: &[u8]) -> Result<Self, FsError> {
+        let geometry = parse_boot(boot).ok_or(FsError::Invalid("exFAT 引导扇区的参数不自洽"))?;
         let sector_size = 1u64 << geometry.sector_shift;
         let cluster_size = sector_size << geometry.cluster_shift;
         let fat_start = if geometry.use_second_fat {
