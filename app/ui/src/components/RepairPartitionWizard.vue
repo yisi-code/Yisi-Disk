@@ -26,7 +26,8 @@ const emit = defineEmits<{ exit: [] }>()
 
 const { t, te, locale } = useI18n()
 const { formatHostError } = useHostErrorText()
-const { tableNote, sourceName, bootFieldName, bootFieldValue } = usePartitionText()
+const { filesystemName, tableNote, sourceName, partitionLabel, partitionLine, bootFieldName, bootFieldValue } =
+  usePartitionText()
 const browse = useBrowse()
 
 const titleElement = ref<HTMLHeadingElement | null>(null)
@@ -168,19 +169,13 @@ async function closeBrowse() {
   }
 }
 
-function filesystemName(partition: PartitionBoot): string {
-  const key = `partition.fs.${partition.filesystem}`
-  return te(key) ? t(key) : partition.filesystem
-}
-
 /** 「分区 N · 卷标 · 文件系统 · 大小」，没有卷标时不留空位 */
 function partitionTitle(partition: PartitionBoot): string {
   const number = t('repair.result.partitionTitle', {
     number: partition.number,
     logical: partition.logical ? ` ${t('undelete.partition.logical')}` : '',
   })
-  const label = partition.label ?? partition.name
-  return [number, label, filesystemName(partition), formatBytes(partition.length)]
+  return [number, partitionLabel(partition), filesystemName(partition.filesystem), formatBytes(partition.length)]
     .filter((part) => part !== '')
     .join(' · ')
 }
@@ -244,7 +239,7 @@ function tableIssueText(partition: PartitionBoot, issue: BootIssue): string {
   if (issue.code === 'typeMismatch') {
     return t('repair.issue.typeMismatch', {
       type: partitionRole(partition),
-      filesystem: filesystemName(partition),
+      filesystem: filesystemName(partition.filesystem),
     })
   }
   return issueText(issue)
@@ -357,18 +352,7 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
           <dt>{{ t('undelete.browse.source') }}</dt>
           <dd class="wizard__path-text">{{ sourceText }}</dd>
           <dt>{{ t('undelete.browse.partition') }}</dt>
-          <dd>
-            {{
-              t('undelete.browse.partitionValue', {
-                number: browsingPartition.number,
-                label: browsingPartition.label ?? '',
-                filesystem: te(`partition.fs.${browsingPartition.filesystem}`)
-                  ? t(`partition.fs.${browsingPartition.filesystem}`)
-                  : browsingPartition.filesystem,
-                size: formatBytes(browsingPartition.length),
-              })
-            }}
-          </dd>
+          <dd>{{ partitionLine(browsingPartition) }}</dd>
         </dl>
         <p class="wizard__hint wizard__hint--warning">{{ t('repair.browse.intro') }}</p>
         <p v-if="browse.target.value.kind === 'disk'" class="wizard__hint">{{ t('undelete.browse.liveHint') }}</p>

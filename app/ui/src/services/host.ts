@@ -253,12 +253,11 @@ export interface FileListPage {
   overwritten: boolean
 }
 
+/** 按位置打开的分区（丢失分区搜索找到的）编号从 100000 起，引擎据此不核对分区表、只核对范围在源之内 */
 export interface PartitionRef {
   number: number
   offset: number
   length: number
-  /** 按位置打开的分区（丢失分区搜索找到的）：引擎不核对分区表，只核对范围在源之内 */
-  outsideTable?: boolean
 }
 
 /** 丢失分区搜索找到的一个分区 */
@@ -637,6 +636,26 @@ export function openCopiedFile(jobId: string, path: string): Promise<void> {
 
 export function revealCopiedFile(jobId: string, path: string): Promise<void> {
   return invoke<void>('copied_reveal', { jobId, path })
+}
+
+/**
+ * 打开另存出来的文件；宿主不打开可执行与脚本类文件（executableBlocked）时，改为在文件夹中显示。
+ * 返回 revealed 时界面要说明为什么没打开。深度恢复与分区浏览共用这一个做法
+ */
+export async function openOrReveal(
+  open: () => Promise<void>,
+  reveal: () => Promise<void>,
+): Promise<'opened' | 'revealed'> {
+  try {
+    await open()
+    return 'opened'
+  } catch (error) {
+    if (toHostError(error).code !== 'executableBlocked') {
+      throw error
+    }
+  }
+  await reveal()
+  return 'revealed'
 }
 
 /**

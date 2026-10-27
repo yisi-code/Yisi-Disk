@@ -17,7 +17,7 @@ const emit = defineEmits<{ exit: [] }>()
 
 const { t, locale } = useI18n()
 const { formatHostError } = useHostErrorText()
-const { filesystemName, tableNote, sourceName, unbrowsableReason } = usePartitionText()
+const { tableNote, sourceName, unbrowsableReason, partitionLine } = usePartitionText()
 const browse = useBrowse()
 
 const titleElement = ref<HTMLHeadingElement | null>(null)
@@ -275,16 +275,7 @@ async function openSource() {
           <dt>{{ t('undelete.browse.source') }}</dt>
           <dd class="wizard__path-text">{{ sourceText }}</dd>
           <dt>{{ t('undelete.browse.partition') }}</dt>
-          <dd>
-            {{
-              t('undelete.browse.partitionValue', {
-                number: currentPartition.number,
-                label: currentPartition.label ?? '',
-                filesystem: filesystemName(currentPartition.filesystem),
-                size: formatBytes(currentPartition.length),
-              })
-            }}
-          </dd>
+          <dd>{{ partitionLine(currentPartition) }}</dd>
         </dl>
         <p v-if="currentScan" class="wizard__note">
           {{

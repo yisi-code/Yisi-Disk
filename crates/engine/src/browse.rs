@@ -397,12 +397,12 @@ impl Session {
 }
 
 /// 核对复制、检查之前浏览时看到的分区还在原处：表里的分区重新读分区表核对编号、偏移与长度；
-/// 按位置打开的分区（搜索找到的）不在表里，只核对范围在设备之内。
+/// 按位置打开的分区（搜索找到的，[`PartitionRef::is_outside_table`]）不在表里，只核对范围在设备之内。
 pub fn verify_partition(
     device: &dyn BlockDevice,
     partition: PartitionRef,
 ) -> Result<(), ErrorObject> {
-    if partition.outside_table {
+    if partition.is_outside_table() {
         return check_range(device, partition.offset, partition.length);
     }
     let table = yisi_part::read_table(device).map_err(|error| fs_error(error_chain(&error)))?;

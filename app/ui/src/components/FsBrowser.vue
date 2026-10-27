@@ -311,7 +311,7 @@ function handleKeydown(event: KeyboardEvent) {
       moveTo(activeIndex.value + rowsInView.value)
       break
     case 'PageUp':
-      moveTo(activeIndex.value - rowsInView.value)
+      moveTo(Math.max(0, activeIndex.value - rowsInView.value))
       break
     case 'Home':
       moveTo(0)

@@ -59,13 +59,9 @@ fn ensure_not_on_disk(target: &Target, file: &Path) -> Result<(), HostError> {
     let Target::Disk { disk_number } = target else {
         return Ok(());
     };
-    // 查不到所在的磁盘时也拒绝：宁可换个位置，也不冒险写到被检查的盘上
-    let disks = yisi_io::volume_disk_numbers(file)
-        .map_err(|error| HostError::new("outputOnSource", error.to_string()))?;
-    if disks.contains(disk_number) {
-        return Err(HostError::new("outputOnSource", disk_number.to_string()));
-    }
-    Ok(())
+    // 规则与引擎核对输出目录相同：查不到所在的磁盘也拒绝
+    yisi_io::ensure_off_source(Ok(*disk_number), yisi_io::volume_disk_numbers(file))
+        .map_err(|error| HostError::new("outputOnSource", error.to_string()))
 }
 
 /// 其他平台还打不开物理盘，检查的只会是镜像文件。

@@ -475,6 +475,7 @@ export default {
     hexTitle: '文件开头 {bytes}',
   },
   partition: {
+    line: '{number} 号分区{label}（{filesystem}，{size}）',
     fs: {
       fat12: 'FAT12',
       fat16: 'FAT16',
@@ -569,7 +570,6 @@ export default {
     browse: {
       source: '来源',
       partition: '分区',
-      partitionValue: '{number} {label}（{filesystem}，{size}）',
       deletedOnly: '只看已删除的文件',
       liveHint:
         '读的是磁盘上此刻的内容。分区正在使用时，刚写入的文件可能还没落盘；要找回删除的文件，请先停止往这块盘写东西。',
@@ -916,7 +916,7 @@ export default {
       starting: '正在启动检查…',
       startingDisk: '正在打开磁盘（可能需要管理员权限）…',
       running: '正在{stage}（{percent}%）',
-      paused: '已暂停：停在「{stage}」',
+      paused: '已暂停：停在「{stage}」（{percent}%）',
       pausedHint: '暂停期间不读盘。',
       cancelled: '检查已取消。',
       failed: '检查没能完成。',
@@ -925,7 +925,6 @@ export default {
     result: {
       source: '来源',
       partition: '分区',
-      partitionValue: '{number} 号分区{label}（{filesystem}，{size}）',
       finishedAt: '检查时间',
       volume: '文件系统',
       volumeValue: '{filesystem}，簇大小 {clusterSize}，共 {clusters} 个簇；文件 {files} 个、文件夹 {directories} 个',

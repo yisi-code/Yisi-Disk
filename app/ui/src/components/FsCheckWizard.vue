@@ -26,13 +26,14 @@ const SEVERITIES: FsIssueSeverity[] = ['dataLoss', 'structure', 'minor']
 const CHECKABLE = ['fat12', 'fat16', 'fat32', 'exfat', 'ntfs', 'unknown', 'unreadable']
 /** 期望值、实际值是字节数或校验和的问题，换成好读的写法 */
 const BYTE_VALUES = ['volumeTruncated', 'bitmapInvalid']
-const HEX_VALUES = ['entrySetChecksum', 'upcaseChecksum', 'fatMediaMismatch']
+/** 按十六进制显示的值与补到几位：目录项集合校验和 16 位、大写表校验和 32 位，介质描述符 8 位 */
+const HEX_DIGITS: Record<string, number> = { entrySetChecksum: 4, upcaseChecksum: 8, fatMediaMismatch: 2 }
 
 const emit = defineEmits<{ exit: [] }>()
 
 const { t, te, locale } = useI18n()
 const { formatHostError } = useHostErrorText()
-const { filesystemName, sourceName, bootFieldName, bootFieldValue } = usePartitionText()
+const { filesystemName, sourceName, partitionLine, bootFieldName, bootFieldValue } = usePartitionText()
 const browse = useBrowse()
 const fsCheck = useFsCheck()
 
@@ -95,14 +96,13 @@ const checkStatusText = computed(() => {
     case 'starting':
       return fsCheck.target.value?.kind === 'disk' ? t('fsCheck.run.startingDisk') : t('fsCheck.run.starting')
     case 'running':
+    case 'cancelling':
       if (fsCheck.isPaused.value) {
-        return t('fsCheck.run.paused', { stage: stageName })
+        return t('fsCheck.run.paused', { stage: stageName, percent: fsCheck.percent.value })
       }
       return stageName === ''
         ? t('fsCheck.run.starting')
         : t('fsCheck.run.running', { stage: stageName, percent: fsCheck.percent.value })
-    case 'cancelling':
-      return t('carve.run.cancelling')
     case 'cancelled':
       return t('fsCheck.run.cancelled')
     case 'failed':
@@ -254,17 +254,6 @@ function partitionNote(partition: PartitionInfo): string {
   return isCheckable(partition) ? '' : t('fsCheck.partition.note.other')
 }
 
-function partitionText(partition: PartitionInfo): string {
-  const label = [partition.label, partition.name].find((text) => text !== null && text !== '')
-  return t('fsCheck.result.partitionValue', {
-    number: partition.number,
-    // 没有卷标时不留多余的空格
-    label: label === undefined ? '' : ` ${label}`,
-    filesystem: filesystemName(partition.filesystem),
-    size: formatBytes(partition.length),
-  })
-}
-
 function number(value: number | null): string {
   return value === null ? '' : value.toLocaleString(locale.value)
 }
@@ -290,7 +279,8 @@ function issueParams(issue: FsIssue): Record<string, string> {
     if (BYTE_VALUES.includes(issue.kind)) {
       return formatBytes(value)
     }
-    return HEX_VALUES.includes(issue.kind) ? formatHex(value) : number(value)
+    const digits = HEX_DIGITS[issue.kind]
+    return digits === undefined ? number(value) : formatHex(value, digits)
   }
   const areaKey = `fsCheck.areas.${issue.area ?? ''}`
   return {
@@ -405,7 +395,7 @@ function buildReportText(): string {
     t('fsCheck.export.heading'),
     '',
     field(t('fsCheck.result.source'), sourceName(fsCheck.target.value)),
-    field(t('fsCheck.result.partition'), partitionText(partition)),
+    field(t('fsCheck.result.partition'), partitionLine(partition)),
     field(t('fsCheck.result.finishedAt'), formatTime(finishedAt.value ?? new Date())),
     field(t('fsCheck.result.volume'), summaryText()),
     field(t('fsCheck.result.totals'), `${totalsText()} ${elapsed}`),
@@ -583,7 +573,7 @@ function buildReportText(): string {
           <dt>{{ t('fsCheck.result.source') }}</dt>
           <dd class="wizard__path-text">{{ sourceName(fsCheck.target.value) }}</dd>
           <dt>{{ t('fsCheck.result.partition') }}</dt>
-          <dd>{{ partitionText(checkedPartition) }}</dd>
+          <dd>{{ partitionLine(checkedPartition) }}</dd>
         </dl>
         <div class="wizard__job" aria-live="polite">
           <progress
@@ -608,7 +598,7 @@ function buildReportText(): string {
           <dt>{{ t('fsCheck.result.source') }}</dt>
           <dd class="wizard__path-text">{{ sourceName(fsCheck.target.value) }}</dd>
           <dt>{{ t('fsCheck.result.partition') }}</dt>
-          <dd>{{ partitionText(checkedPartition) }}</dd>
+          <dd>{{ partitionLine(checkedPartition) }}</dd>
           <dt>{{ t('fsCheck.result.volume') }}</dt>
           <dd>{{ summaryText() }}</dd>
           <dt>{{ t('fsCheck.result.totals') }}</dt>

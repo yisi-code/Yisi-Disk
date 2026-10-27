@@ -481,6 +481,7 @@ const enUS: typeof zhCN = {
     hexTitle: 'First {bytes} of the file',
   },
   partition: {
+    line: 'Partition {number}{label} ({filesystem}, {size})',
     fs: {
       fat12: 'FAT12',
       fat16: 'FAT16',
@@ -575,7 +576,6 @@ const enUS: typeof zhCN = {
     browse: {
       source: 'Source',
       partition: 'Partition',
-      partitionValue: '{number} {label} ({filesystem}, {size})',
       deletedOnly: 'Show deleted files only',
       liveHint:
         'This reads what is on the disk right now. While a partition is in use, recently written files may not have reached the disk yet; to recover deleted files, stop writing to this disk first.',
@@ -922,7 +922,7 @@ const enUS: typeof zhCN = {
       starting: 'Starting the check…',
       startingDisk: 'Opening the disk (administrator rights may be needed)…',
       running: 'Now {stage} ({percent}%)',
-      paused: 'Paused while {stage}',
+      paused: 'Paused while {stage} ({percent}%)',
       pausedHint: 'Nothing is read from the disk while paused.',
       cancelled: 'The check was cancelled.',
       failed: 'The check could not finish.',
@@ -931,7 +931,6 @@ const enUS: typeof zhCN = {
     result: {
       source: 'Source',
       partition: 'Partition',
-      partitionValue: 'Partition {number}{label} ({filesystem}, {size})',
       finishedAt: 'Checked at',
       volume: 'File system',
       volumeValue: '{filesystem}, cluster size {clusterSize}, clusters: {clusters}; files: {files}, folders: {directories}',

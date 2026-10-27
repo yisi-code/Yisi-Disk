@@ -10,14 +10,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use yisi_carve::{CarveControl, CarveError, CarveOptions, DirectorySink, RecoveredFile, carve};
+use yisi_carve::{
+    CarveControl, CarveError, CarveOptions, DirectorySink, RecoveredFile, carve, rename_new,
+};
 use yisi_engine::protocol::{CopiedFile, CopySummary, ExtractItem};
 use yisi_formats::Registry;
 use yisi_io::{BlockDevice, Window};
 
 use crate::copy_job::{Names, Reporter};
 use crate::job::{JobContext, JobOutcome};
-use crate::runtime::error_chain;
+use crate::runtime::{error_chain, short_id};
 
 pub fn run(
     device: &dyn BlockDevice,
@@ -44,11 +46,20 @@ pub fn run(
             .name
             .clone()
             .unwrap_or_else(|| yisi_carve::recovered_name(item.offset, &item.extension));
-        match extract_one(device, registry, &item, &staging.path, context, done, total) {
+        match extract_one(
+            device,
+            registry,
+            &item,
+            &staging.path,
+            context,
+            &reporter,
+            done,
+            total,
+        ) {
             Ok(Some(Ok(recovered))) => {
                 let relative = names.file(std::slice::from_ref(&name), output_dir);
                 let target = output_dir.join(&relative);
-                if let Err(error) = fs::rename(staging.path.join(&recovered), &target) {
+                if let Err(error) = rename_new(&staging.path.join(&recovered), &target) {
                     reporter.flush();
                     return Err(format!("无法保存到 {}：{error}", target.display()));
                 }
@@ -106,12 +117,7 @@ struct Staging {
 
 impl Staging {
     fn create(output_dir: &Path, job_id: &str) -> Result<Self, String> {
-        let short: String = job_id
-            .chars()
-            .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
-            .take(8)
-            .collect();
-        let path = output_dir.join(format!(".yisi-saving-{short}"));
+        let path = output_dir.join(format!(".yisi-saving-{}", short_id(job_id)));
         // 不用 create_dir_all：已经存在说明不是本任务建的，不能在结束时删掉它
         fs::create_dir(&path).map_err(|error| format!("无法创建 {}：{error}", path.display()))?;
         Ok(Self { path })
@@ -128,12 +134,17 @@ impl Drop for Staging {
 
 /// 在暂存目录里恢复一个文件。外层 `Err` 是整个任务失败（写输出出错）；`None` 是被取消；
 /// `Some(Ok)` 是恢复出的文件在暂存目录里的名字，`Some(Err)` 是这个文件没能保存的原因。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "任务的上下文与进度，拆成结构体反而难读"
+)]
 fn extract_one(
     device: &dyn BlockDevice,
     registry: &Registry,
     item: &ExtractItem,
     output_dir: &Path,
     context: &JobContext,
+    reporter: &Reporter<'_>,
     done: u64,
     total: u64,
 ) -> Result<Option<Result<String, String>>, String> {
@@ -153,6 +164,7 @@ fn extract_one(
         .map_err(|error| format!("无法创建 {}：{error}", output_dir.display()))?;
     let control = ItemControl {
         context,
+        reporter,
         done,
         total,
         found: RefCell::new(Vec::new()),
@@ -189,6 +201,7 @@ fn extract_one(
 
 struct ItemControl<'a> {
     context: &'a JobContext,
+    reporter: &'a Reporter<'a>,
     /// 之前各文件累计的字节数与全部文件的总字节数，进度按全部文件算。
     done: u64,
     total: u64,
@@ -203,6 +216,7 @@ impl CarveControl for ItemControl<'_> {
     fn progress(&self, done: u64, _total: u64) {
         self.context
             .progress(self.done.saturating_add(done).min(self.total), self.total);
+        self.reporter.tick();
     }
 
     fn found(&self, file: &RecoveredFile) {

@@ -13,6 +13,7 @@ import { useHostErrorText } from '../composables/useHostErrorText'
 import {
   copyRecoveredFile,
   listFileTypes,
+  openOrReveal,
   openRecoveredFile,
   openRecoveredFileWith,
   pickDirectory,
@@ -405,11 +406,17 @@ async function runAction(action: FileAction, copy: SavedCopy) {
   try {
     switch (action) {
       case 'open':
-        await openRecoveredFile(copy.jobId, copy.name)
+      case 'openWith': {
+        const open = action === 'open' ? openRecoveredFile : openRecoveredFileWith
+        const outcome = await openOrReveal(
+          () => open(copy.jobId, copy.name),
+          () => revealRecoveredFile(copy.jobId, copy.name),
+        )
+        if (outcome === 'revealed') {
+          fileActionNotice.value = t('undelete.details.executableRevealed')
+        }
         break
-      case 'openWith':
-        await openRecoveredFileWith(copy.jobId, copy.name)
-        break
+      }
       case 'copy':
         await copyRecoveredFile(copy.jobId, copy.name)
         fileActionNotice.value = t('carve.menu.copied', { name: copy.name })

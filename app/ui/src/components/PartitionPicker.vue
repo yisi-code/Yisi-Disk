@@ -22,7 +22,7 @@ const props = defineProps<{
 const selected = defineModel<number | null>({ required: true })
 
 const { t } = useI18n()
-const { filesystemName, roleName } = usePartitionText()
+const { filesystemName, roleName, partitionLabel } = usePartitionText()
 const domPrefix = useId()
 </script>
 
@@ -61,7 +61,7 @@ const domPrefix = useId()
             {{ partition.number }}{{ partition.logical ? ` ${t('undelete.partition.logical')}` : '' }}
           </label>
         </th>
-        <td>{{ partition.label ?? partition.name ?? '' }}</td>
+        <td>{{ partitionLabel(partition) }}</td>
         <td>
           {{ filesystemName(partition.filesystem) }}
           <span v-if="props.note(partition)" class="wizard__note">· {{ props.note(partition) }}</span>

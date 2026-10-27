@@ -20,10 +20,10 @@ use yisi_engine::protocol::{
     CARVE_EXTRACT, CARVE_START, COMPLETED, COPIED, COPY_FILES, Capabilities, CarveParams,
     CarveStarted, CopyItem, CopyParams, CopyStarted, DiskList, ExtractItem, ExtractParams, FAILED,
     FOUND, FileListPage, FilePreview, FileTypeList, HEARTBEAT, IMAGE_CREATE, IMAGE_RESUME, IMAGING,
-    ImageParams, JobRef, LIST_DISKS, LIST_FILE_TYPES, LIST_FILES, LOG, ListFilesParams, PAUSE,
-    PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS, PartitionRef, PreviewFsParams,
-    PreviewParams, PreviewRangeParams, READ_SCAN, RESUME, ReadScanParams, SCAN_DELETED, ScanParams,
-    ScanResult, Source, error_code,
+    ImageParams, JobRef, LIST_DISKS, LIST_FILE_TYPES, LIST_FILES, LOG, ListFilesParams,
+    PARTIAL_SUFFIX, PAUSE, PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS, PartitionRef,
+    PreviewFsParams, PreviewParams, PreviewRangeParams, READ_SCAN, RESUME, ReadScanParams,
+    SCAN_DELETED, ScanParams, ScanResult, Source, error_code,
 };
 
 use yisi_engine::protocol::{BootCopy, BootDiagnosis, DIAGNOSE_BOOT, DiagnoseBootParams};
@@ -292,26 +292,16 @@ impl Engines {
             .ok_or_else(|| HostError::new("jobNotFound", scan_job_id))
     }
 
-    /// 深度恢复任务输出目录里的一个文件。只接受一级普通文件名（恢复时起的、另存为时起的或加了序号的），
-    /// 不接受路径；解析（含联接与符号链接）后必须仍在该任务的输出目录之内。
+    /// 深度恢复任务输出目录里的一个文件。只接受一级文件名（恢复时起的、另存为时起的或加了序号的），
+    /// 规则见 [`file_in_output`]。
     pub fn recovered_file(&self, job_id: &str, name: &str) -> Result<PathBuf, HostError> {
-        if !is_plain_file_name(name) {
-            return Err(HostError::new("invalidRecoveredName", name));
-        }
-        let dir = lock(&self.recovered_dirs)
-            .get(job_id)
-            .cloned()
-            .ok_or_else(|| HostError::new("recoveredNotFound", job_id))?;
-        let path = dir.join(name);
-        let not_found = || HostError::new("recoveredNotFound", path.display().to_string());
-        let (Ok(real_dir), Ok(real_file)) = (dir.canonicalize(), path.canonicalize()) else {
-            return Err(not_found());
-        };
-        if real_file.parent() == Some(real_dir.as_path()) && real_file.is_file() {
-            Ok(path)
-        } else {
-            Err(not_found())
-        }
+        file_in_output(&self.recovered_dirs, job_id, name, true).map_err(|error| match error {
+            OutputLookup::Invalid => HostError::new("invalidRecoveredName", name),
+            OutputLookup::UnknownJob => HostError::new("recoveredNotFound", job_id),
+            OutputLookup::NotFound(path) => {
+                HostError::new("recoveredNotFound", path.display().to_string())
+            }
+        })
     }
 
     /// 由引擎读取并生成预览：图片在引擎里解码，界面只拿到重新编码的缩略图。
@@ -504,35 +494,15 @@ impl Engines {
         .map(|_| ())
     }
 
-    /// 复制任务输出目录里的一个文件。`path` 是引擎报告的相对路径（以 `/` 分隔），
-    /// 只接受普通的路径分量，解析后必须仍在输出目录之内。
+    /// 复制任务输出目录里的一个文件。`path` 是引擎报告的相对路径（以 `/` 分隔），规则见 [`file_in_output`]。
     pub fn copied_file(&self, job_id: &str, path: &str) -> Result<PathBuf, HostError> {
-        let invalid = || HostError::new("invalidCopiedPath", path);
-        let relative = Path::new(path);
-        if path.is_empty()
-            || !relative
-                .components()
-                .all(|component| matches!(component, Component::Normal(_)))
-        {
-            return Err(invalid());
-        }
-        let dir = lock(&self.copied_dirs)
-            .get(job_id)
-            .cloned()
-            .ok_or_else(|| HostError::new("copiedNotFound", job_id))?;
-        // 按分量重新拼，统一成本系统的分隔符
-        let full = dir.join(relative.components().collect::<PathBuf>());
-        let (Ok(real_dir), Ok(real_file)) = (dir.canonicalize(), full.canonicalize()) else {
-            return Err(HostError::new("copiedNotFound", full.display().to_string()));
-        };
-        if !real_file.starts_with(&real_dir) {
-            return Err(invalid());
-        }
-        if real_file.is_file() {
-            Ok(full)
-        } else {
-            Err(HostError::new("copiedNotFound", full.display().to_string()))
-        }
+        file_in_output(&self.copied_dirs, job_id, path, false).map_err(|error| match error {
+            OutputLookup::Invalid => HostError::new("invalidCopiedPath", path),
+            OutputLookup::UnknownJob => HostError::new("copiedNotFound", job_id),
+            OutputLookup::NotFound(full) => {
+                HostError::new("copiedNotFound", full.display().to_string())
+            }
+        })
     }
 
     fn running(&self, job_id: &str) -> Result<Arc<EngineProcess>, HostError> {
@@ -993,17 +963,62 @@ fn validate_job_id(job_id: &str) -> Result<(), HostError> {
     }
 }
 
-/// 一级普通文件名：不含路径分隔符与 `:`（Windows 上 `a.jpg:x` 指向文件的备用数据流），不是 `.`、`..`，
-/// 不是写入中途的 `.part`。
-fn is_plain_file_name(name: &str) -> bool {
+/// 一级普通名字：不含路径分隔符与 `:`（Windows 上 `a.jpg:x` 指向文件的备用数据流），不是 `.`、`..`。
+fn is_plain_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 1024
         && !name.contains(['/', '\\', ':', '\0'])
-        && !name.ends_with(".part")
         && matches!(
             Path::new(name).components().collect::<Vec<_>>().as_slice(),
             [Component::Normal(_)]
         )
+}
+
+/// [`file_in_output`] 找不到时的原因。
+#[derive(Debug, PartialEq, Eq)]
+enum OutputLookup {
+    /// 路径不合规矩（先查这一项，不合规矩的不去碰磁盘）。
+    Invalid,
+    /// 没有这个任务的输出目录。
+    UnknownJob,
+    /// 合规矩，但没有这个文件（或解析后跑出了输出目录）。
+    NotFound(PathBuf),
+}
+
+/// 任务 `job_id` 的输出目录（`dirs` 里记的）里的一个文件，深度恢复与复制共用。`relative` 以 `/` 分隔，每一级都是普通名字
+/// （[`is_plain_name`]），`flat` 时只能有一级；文件名不能以写入中途的后缀（[`PARTIAL_SUFFIX`]）结尾。
+/// 解析（含联接与符号链接）后必须仍在 `dir` 之内（`flat` 时直接在 `dir` 里），且是文件。
+fn file_in_output(
+    dirs: &Mutex<HashMap<String, PathBuf>>,
+    job_id: &str,
+    relative: &str,
+    flat: bool,
+) -> Result<PathBuf, OutputLookup> {
+    let parts: Vec<&str> = relative.split('/').collect();
+    let valid = parts.iter().all(|part| is_plain_name(part))
+        && (!flat || parts.len() == 1)
+        && !relative.ends_with(PARTIAL_SUFFIX);
+    if !valid {
+        return Err(OutputLookup::Invalid);
+    }
+    let dir = lock(dirs)
+        .get(job_id)
+        .cloned()
+        .ok_or(OutputLookup::UnknownJob)?;
+    let full = parts.iter().fold(dir.clone(), |path, part| path.join(part));
+    let (Ok(real_dir), Ok(real_file)) = (dir.canonicalize(), full.canonicalize()) else {
+        return Err(OutputLookup::NotFound(full));
+    };
+    let inside = if flat {
+        real_file.parent() == Some(real_dir.as_path())
+    } else {
+        real_file.starts_with(&real_dir) && real_file != real_dir
+    };
+    if inside && real_file.is_file() {
+        Ok(full)
+    } else {
+        Err(OutputLookup::NotFound(full))
+    }
 }
 
 /// 为打开、复制而保存的副本放在程序目录下的 `open-cache` 里，每次一个以任务 ID 命名的子目录。
@@ -1062,7 +1077,7 @@ mod tests {
     }
 
     #[test]
-    fn only_plain_file_names_are_accepted() {
+    fn only_plain_names_are_accepted() {
         for good in [
             "f0000012345.jpg",
             "f0000012345 (1).jpg",
@@ -1070,7 +1085,7 @@ mod tests {
             "noext",
             "..hidden",
         ] {
-            assert!(is_plain_file_name(good), "{good}");
+            assert!(is_plain_name(good), "{good}");
         }
         for bad in [
             "",
@@ -1081,10 +1096,9 @@ mod tests {
             "a\\b.jpg",
             "C:x.jpg",
             "f0000012345.jpg:stream",
-            "f0000012345.jpg.part",
             "nul\0.jpg",
         ] {
-            assert!(!is_plain_file_name(bad), "{bad}");
+            assert!(!is_plain_name(bad), "{bad}");
         }
     }
 
@@ -1111,12 +1125,17 @@ mod tests {
             engines.copied_file("job", "Photos/a.jpg").unwrap(),
             dir.join("Photos").join("a.jpg")
         );
+        // 写入中途的文件与备用数据流同样不接受，与深度恢复的规则相同
+        std::fs::write(dir.join("Photos").join("b.jpg.part"), b"x").unwrap();
         for bad in [
             "",
             "../x",
             "Photos/../../x",
             "/etc/passwd",
             "C:/Windows/notepad.exe",
+            "Photos/b.jpg.part",
+            "Photos/a.jpg:stream",
+            "Photos//a.jpg",
         ] {
             assert_eq!(
                 engines.copied_file("job", bad).unwrap_err().code,
