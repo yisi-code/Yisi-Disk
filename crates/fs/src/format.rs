@@ -111,6 +111,21 @@ pub fn fat_media_ok(width: FatWidth, media: u8, entry0: u32) -> bool {
     entry0 & full == (full & !0xFF) | u32::from(media)
 }
 
+/// 簇 `cluster` 在分区里的字节偏移：簇区从 2 号簇起，`heap_offset` 是 2 号簇的偏移。不是合法簇号或溢出时为 `None`。
+pub fn cluster_offset(
+    cluster: u32,
+    count: u32,
+    cluster_size: u64,
+    heap_offset: u64,
+) -> Option<u64> {
+    if !is_cluster(cluster, count) {
+        return None;
+    }
+    u64::from(cluster - 2)
+        .checked_mul(cluster_size)?
+        .checked_add(heap_offset)
+}
+
 /// 连续的若干簇。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Run {

@@ -13,6 +13,7 @@ mod imaging;
 mod ioctl;
 mod raw;
 mod read;
+mod scan;
 #[cfg(windows)]
 mod volume;
 mod window;
@@ -29,6 +30,7 @@ pub use imaging::{
     Segment, SegmentState, run_imaging,
 };
 pub use raw::RawImage;
+pub use scan::{SCAN_BLOCK, ScanControl, scan_device};
 #[cfg(windows)]
 pub use volume::{OnSource, ensure_off_source, volume_disk_numbers};
 pub use window::Window;

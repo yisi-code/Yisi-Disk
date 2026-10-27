@@ -9,24 +9,15 @@ use std::time::Instant;
 use yisi_fs::boot::{exfat_boot_checksum, exfat_stored_checksum};
 use yisi_fs::format::{FatWidth, fat_entry_raw, fat_media_ok};
 use yisi_fs::{BootCopy, BootLayout, BootSector, FsKind, Volume, inspect_boot, mft_self_record_ok};
-use yisi_io::BlockDevice;
+use yisi_io::{BlockDevice, ScanControl, scan_device};
 use yisi_part::{PartitionKind, PartitionTable, Role};
 
-/// 每次顺序读 1 MiB。
-const CHUNK: usize = 1 << 20;
 /// exFAT 的 FAT 第 0 项固定记介质描述符 `F8`（exFAT 的引导扇区里没有这一项）。
 const EXFAT_MEDIA: u8 = 0xF8;
 /// 引导扇区按 512 字节对齐找：4 KiB 扇区的盘上分区同样落在 512 字节的边界上。
 const SECTOR: usize = 512;
 /// 最多记这么多个候选分区，挡住装满了磁盘镜像文件的盘。
 pub const MAX_CANDIDATES: usize = 1000;
-
-/// 搜索过程中查询取消、报告进度。
-pub trait SearchControl {
-    /// 每读一段查一次。实现可以在这里阻塞（暂停），这时不读盘。
-    fn is_cancelled(&self) -> bool;
-    fn progress(&self, done: u64, total: u64);
-}
 
 /// 候选分区是靠哪个引导扇区找到的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,34 +72,25 @@ pub struct SearchReport {
 }
 
 /// 搜索整个设备；被取消时返回 `None`。
-pub fn search(device: &Arc<dyn BlockDevice>, control: &dyn SearchControl) -> Option<SearchReport> {
+pub fn search(device: &Arc<dyn BlockDevice>, control: &dyn ScanControl) -> Option<SearchReport> {
     let started = Instant::now();
     let size = device.size();
     let mut finder = Finder::default();
-    let mut buffer = vec![0u8; CHUNK];
     let mut unreadable_bytes = 0u64;
-    let mut offset = 0u64;
-    control.progress(0, size);
-    while offset < size {
-        if control.is_cancelled() {
-            return None;
-        }
-        let length = (size - offset).min(CHUNK as u64);
-        let block = buffer.get_mut(..length as usize)?;
-        match device.read_exact_at(offset, block) {
-            Ok(()) => {
-                for (index, sector) in block.as_chunks::<SECTOR>().0.iter().enumerate() {
-                    let at = offset + (index * SECTOR) as u64;
-                    finder.examine(device.as_ref(), at, sector);
-                }
-            }
-            Err(error) => {
-                tracing::warn!(offset, length, %error, "读不出，跳过");
-                unreadable_bytes += length;
+    let finished = scan_device(device.as_ref(), control, |offset, block| match block {
+        Ok(bytes) => {
+            for (index, sector) in bytes.as_chunks::<SECTOR>().0.iter().enumerate() {
+                let at = offset + (index * SECTOR) as u64;
+                finder.examine(device.as_ref(), at, sector);
             }
         }
-        offset += length;
-        control.progress(offset, size);
+        Err((length, error)) => {
+            tracing::warn!(offset, length, %error, "读不出，跳过");
+            unreadable_bytes += length;
+        }
+    });
+    if !finished {
+        return None;
     }
 
     let table = yisi_part::read_table(device.as_ref())
@@ -378,7 +360,7 @@ mod tests {
         }
     }
 
-    impl SearchControl for Control {
+    impl ScanControl for Control {
         fn is_cancelled(&self) -> bool {
             self.checks.set(self.checks.get() + 1);
             self.cancel_after

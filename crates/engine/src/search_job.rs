@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use yisi_engine::protocol::{BootCopy, FoundPartition, SearchSummary};
 use yisi_io::BlockDevice;
-use yisi_repair::search::{self, FoundBy, Relation, SearchControl};
+use yisi_io::ScanControl;
+use yisi_repair::search::{self, FoundBy, Relation};
 
 use crate::browse::{fs_key, scheme_name};
 use crate::job::{JobContext, JobOutcome};
@@ -66,7 +67,7 @@ pub fn run(device: Arc<dyn BlockDevice>, context: &JobContext) -> Result<JobOutc
 
 struct Reporter<'a>(&'a JobContext);
 
-impl SearchControl for Reporter<'_> {
+impl ScanControl for Reporter<'_> {
     /// 暂停时在这里等着，不再读盘。
     fn is_cancelled(&self) -> bool {
         self.0.wait_while_paused();

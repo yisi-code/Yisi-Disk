@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use yisi_fs::format::cluster_offset;
 pub(crate) use yisi_fs::format::{Run, push_run};
 
 use crate::check::disk::Span;
@@ -52,12 +53,7 @@ pub(crate) struct Volume {
 
 impl Volume {
     pub fn cluster_offset(&self, cluster: u32) -> Option<u64> {
-        if !self.fat.is_valid(cluster) {
-            return None;
-        }
-        u64::from(cluster - 2)
-            .checked_mul(self.cluster_size)?
-            .checked_add(self.heap_offset)
+        cluster_offset(cluster, self.fat.count, self.cluster_size, self.heap_offset)
     }
 
     pub fn clusters_for(&self, bytes: u64) -> u64 {

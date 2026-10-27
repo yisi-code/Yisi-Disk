@@ -2,7 +2,7 @@
 
 use crate::FsError;
 use crate::format::{
-    FatEntry, decode_fat_entry, fat_entry_raw, fat_entry_span, is_cluster, push_run,
+    FatEntry, cluster_offset, decode_fat_entry, fat_entry_raw, fat_entry_span, is_cluster, push_run,
 };
 pub(crate) use crate::format::{FatWidth, Run};
 use crate::region::{ChunkCache, Region};
@@ -55,12 +55,7 @@ impl Clusters {
 
     /// 簇在分区里的字节偏移。
     pub fn offset(&self, cluster: u32) -> Option<u64> {
-        if !self.is_valid(cluster) {
-            return None;
-        }
-        u64::from(cluster - 2)
-            .checked_mul(self.cluster_size)?
-            .checked_add(self.heap_offset)
+        cluster_offset(cluster, self.count, self.cluster_size, self.heap_offset)
     }
 
     /// 读 FAT 里 `cluster` 的表项。
