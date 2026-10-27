@@ -770,8 +770,11 @@ pub struct PartitionBoot {
 pub struct BootCopyReport {
     /// 在源上的字节偏移。
     pub offset: u64,
-    /// 发现的问题；为空表示这一份正常。
+    /// 让这一份不能用的问题；为空表示这一份正常。
     pub issues: Vec<BootIssue>,
+    /// 不影响使用的问题，只作提醒（核对规则与打开卷、文件系统检查相同，见 `yisi_fs::bpb`）。
+    #[serde(default)]
+    pub notes: Vec<BootIssue>,
     pub volume_bytes: Option<u64>,
     pub cluster_size: Option<u64>,
     /// 引导扇区正常时按它打开了卷：能打开为 `true`；打不开时 `open_error` 是原因。引导扇区有问题时不试，两项都为空。
@@ -781,7 +784,7 @@ pub struct BootCopyReport {
 
 /// 一个问题。`code` 为 unreadable、blank、missingSignature、badJump、badOemId、badLegacyFields、badBytesPerSector、
 /// sectorSizeMismatch、badSectorsPerCluster、badReservedSectors、badFatCount、badFatSize、badMedia、badRootEntries、
-/// badTotalSectors、badLayout、badRootCluster、badRecordSize、badIndexSize、mftOutside、mirrorOutside、checksumMismatch
+/// badTotalSectors、badLayout、badRootCluster、badActiveFat、badRecordSize、badIndexSize、mftOutside、mirrorOutside、checksumMismatch
 /// 之一（分区表的问题见 [`PartitionBoot::table_issues`]）。`value` 是引导扇区里记的值，`expected` 是应有的值（有的话）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

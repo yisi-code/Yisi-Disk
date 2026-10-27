@@ -765,6 +765,7 @@ const enUS: typeof zhCN = {
       position: 'Sector {sector} (offset {offset} bytes)',
       volume: 'volume {size}, cluster {cluster}',
       copyOk: 'All checks passed.',
+      note: 'Note (does not affect use): {text}',
       noBackup: 'FAT12 and FAT16 have no backup boot sector.',
       differences: 'Fields that differ between the boot sector and its backup',
       field: 'Field',
@@ -830,6 +831,7 @@ const enUS: typeof zhCN = {
       badTotalSectors: 'Total sectors is {value}.',
       badLayout: 'The data area lies outside the volume, or the cluster count does not match the volume length.',
       badRootCluster: 'Root directory cluster {value} is out of range.',
+      badActiveFat: 'The FAT it says to use exclusively does not exist (extended flags {value}).',
       badRecordSize: 'The MFT record size is not valid.',
       badIndexSize: 'The index block size is not valid.',
       mftOutside: 'The $MFT starts at cluster {value}, outside the volume.',
@@ -997,6 +999,8 @@ const enUS: typeof zhCN = {
       clustersPerMftRecord: 'MFT record size',
       mftCluster: '$MFT location',
       mftMirrorCluster: '$MFTMirr location',
+      jumpBoot: 'Jump instruction at the start',
+      clustersPerIndexBlock: 'Index block size',
     },
     system: {
       Bitmap: 'allocation bitmap ($Bitmap)',
@@ -1035,6 +1039,11 @@ const enUS: typeof zhCN = {
         title: 'Invalid parameter in the {area}: {field}',
         detail: 'With a wrong parameter the system may fail to open the partition or compute data locations wrongly.',
         fix: 'Later this parameter can be corrected from the backup boot sector or from values inferred from the actual layout.',
+      },
+      bootNote: {
+        title: 'A formal irregularity in the {area}: {field}',
+        detail: 'It does not affect use; the system still opens the partition. It is most likely left by another formatting tool.',
+        fix: 'Nothing needs to be done.',
       },
       bootChecksum: {
         title: 'The {area} checksum is wrong',

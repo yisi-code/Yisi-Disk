@@ -8,7 +8,7 @@ use crate::clusters::{Chain, Clusters, FatWidth, Run};
 use crate::entry::{ClusterRef, Entry, FileRef, Listing, Location, State, dos_time};
 use crate::reader::FileReader;
 use crate::region::{ChunkCache, Region};
-use crate::{FsError, MAX_DIR_BYTES, MAX_ENTRIES};
+use crate::{FsError, MAX_DIR_BYTES, MAX_ENTRIES, bpb};
 
 const ENTRY: usize = 32;
 /// 目录项类型的第 7 位：1 为使用中，删除时清零。
@@ -37,40 +37,19 @@ pub(crate) struct Geometry {
     pub use_second_fat: bool,
 }
 
+/// 解析引导扇区；有致命问题时返回 `None`（规则在 [`bpb`](crate::bpb)）。
 pub(crate) fn parse_boot(sector: &[u8]) -> Option<Geometry> {
-    if sector.get(3..11) != Some(b"EXFAT   ".as_slice()) || le16(sector, 510) != Some(0xAA55) {
-        return None;
-    }
-    // 规范要求 BPB 的旧字段区（11 到 63 字节）全为 0
-    if sector.get(11..64)?.iter().any(|&byte| byte != 0) {
-        return None;
-    }
-    let sector_shift = u32::from(*sector.get(108)?);
-    let cluster_shift = u32::from(*sector.get(109)?);
-    let fats = *sector.get(110)?;
-    if !(9..=12).contains(&sector_shift)
-        || cluster_shift > 25 - sector_shift
-        || !matches!(fats, 1 | 2)
-    {
-        return None;
-    }
-    let geometry = Geometry {
-        fat_offset: u64::from(le32(sector, 80)?),
-        fat_length: u64::from(le32(sector, 84)?),
-        heap_offset: u64::from(le32(sector, 88)?),
-        cluster_count: le32(sector, 92)?,
-        root_cluster: le32(sector, 96)?,
-        sector_shift,
-        cluster_shift,
-        use_second_fat: fats == 2 && le16(sector, 106)? & 0x01 != 0,
-    };
-    let valid = geometry.fat_offset >= 24
-        && geometry.fat_length > 0
-        && geometry.heap_offset >= geometry.fat_offset + geometry.fat_length * u64::from(fats)
-        && geometry.cluster_count > 0
-        && geometry.cluster_count <= 0xFFFF_FFF5
-        && geometry.root_cluster >= 2;
-    valid.then_some(geometry)
+    let bpb = bpb::check_exfat(sector).geometry?;
+    Some(Geometry {
+        fat_offset: bpb.fat_offset,
+        fat_length: bpb.fat_length,
+        heap_offset: bpb.heap_offset,
+        cluster_count: u32::try_from(bpb.cluster_count).ok()?,
+        root_cluster: bpb.root_cluster,
+        sector_shift: bpb.sector_shift,
+        cluster_shift: bpb.cluster_shift,
+        use_second_fat: bpb.use_second_fat(),
+    })
 }
 
 /// 分配位图：第 n 位（从 2 号簇算起）为 1 表示已分配。

@@ -44,6 +44,11 @@ impl<'a> Disk<'a> {
         self.length
     }
 
+    /// 设备的逻辑扇区大小（至少 512）。
+    pub fn sector_size(&self) -> u64 {
+        self.sector
+    }
+
     /// 读分区内 `at` 起的 `buf`。超出分区时返回 `None`、不读；否则返回读不出的区段（相对 `buf` 起点），
     /// 各带一个标记：这段以前没有记过。读不出的部分补 0。
     pub fn read(&mut self, at: u64, buf: &mut [u8]) -> Option<Vec<(Span, bool)>> {

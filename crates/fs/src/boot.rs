@@ -1,7 +1,7 @@
 //! 引导扇区：单独解析一个引导扇区（[`inspect_boot`]，丢失分区搜索在不知道分区从哪开始时用），
 //! 以及引导扇区的两份副本。主引导扇区在分区开头；备份的位置各文件系统不同：FAT32 一般在第 6 扇区
 //! （引导扇区里记着，主引导扇区坏了就按 6 找），exFAT 的备份引导区从第 12 扇区起，NTFS 在卷的最后一个扇区
-//! （卷长度比分区少一个扇区，正好是分区最后一个扇区）。FAT12/16 没有备份。参数是否自洽一律沿用各文件系统打开卷时的规则。
+//! （卷长度比分区少一个扇区，正好是分区最后一个扇区）。FAT12/16 没有备份。参数是否自洽一律按 [`bpb`] 的规则。
 //!
 //! 主引导扇区坏了时，扇区大小也就不可信了：按主引导扇区里还认得出的值、设备的逻辑扇区大小与其他常见值依次试，
 //! 读出的扇区参数自洽、且记的扇区大小与它所在的位置相符才算数。
@@ -10,7 +10,7 @@ use yisi_io::{BlockDevice, IoError};
 use yisi_part::bytes::{le16, le32, le64};
 
 use crate::clusters::FatWidth;
-use crate::{FsKind, exfat, fat, ntfs};
+use crate::{FsKind, bpb, exfat, fat, ntfs};
 
 /// 打开卷时用哪一份引导扇区。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -169,10 +169,29 @@ pub(crate) fn read_backup(
 
 /// 主引导扇区里的文件系统标识，参数坏了也还认得出：exFAT、NTFS 的 OEM 标识，FAT32 的类型字符串。
 fn hinted_family(primary: &[u8]) -> Option<BackupFamily> {
-    match primary.get(3..11) {
-        Some(b"EXFAT   ") => Some(BackupFamily::Exfat),
-        Some(b"NTFS    ") => Some(BackupFamily::Ntfs),
-        _ if primary.get(82..90) == Some(b"FAT32   ".as_slice()) => Some(BackupFamily::Fat32),
+    match remnant_kind(primary)? {
+        FsKind::Exfat => Some(BackupFamily::Exfat),
+        FsKind::Ntfs => Some(BackupFamily::Ntfs),
+        FsKind::Fat32 => Some(BackupFamily::Fat32),
+        _ => None,
+    }
+}
+
+/// 参数坏了也还认得出的文件系统标识：exFAT、NTFS、BitLocker 的 OEM 标识，FAT 的类型字符串
+/// （FAT 的类型字符串只是提示，规范不要求，这里只用来在参数坏了时猜是哪种）。
+pub fn remnant_kind(sector: &[u8]) -> Option<FsKind> {
+    match sector.get(3..11) {
+        Some(b"EXFAT   ") => return Some(FsKind::Exfat),
+        Some(b"NTFS    ") => return Some(FsKind::Ntfs),
+        Some(b"-FVE-FS-") => return Some(FsKind::BitLocker),
+        _ => {}
+    }
+    if sector.get(82..90) == Some(b"FAT32   ".as_slice()) {
+        return Some(FsKind::Fat32);
+    }
+    match sector.get(54..62) {
+        Some(b"FAT12   ") => Some(FsKind::Fat12),
+        Some(b"FAT16   " | b"FAT     ") => Some(FsKind::Fat16),
         _ => None,
     }
 }
@@ -244,56 +263,48 @@ pub fn inspect_boot(sector: &[u8]) -> Option<BootSector> {
 }
 
 fn inspect_fat(sector: &[u8]) -> Option<BootSector> {
-    let geometry = fat::parse_boot(sector)?;
-    let bps = geometry.bytes_per_sector;
-    let kind = match geometry.width {
-        FatWidth::Fat12 => FsKind::Fat12,
-        FatWidth::Fat16 => FsKind::Fat16,
-        _ => FsKind::Fat32,
-    };
-    // FAT32 的备份引导扇区号记在 BPB 第 50 字节，0 或 0xFFFF 表示没有；必须落在保留区里
-    let backup_at = if kind == FsKind::Fat32 {
-        le16(sector, 50)
-            .map(u64::from)
-            .filter(|&backup| backup != 0 && backup < geometry.reserved)
-            .and_then(|backup| backup.checked_mul(bps))
-    } else {
-        None
-    };
-    let fats = (0..geometry.fats)
+    let bpb = bpb::check_fat(sector, None).geometry?;
+    let bps = bpb.bytes_per_sector;
+    // FAT32 的备份引导扇区号记在 BPB 里，0 或 0xFFFF 表示没有；必须落在保留区里
+    let backup_at =
+        (bpb.kind == FsKind::Fat32 && bpb.backup_boot != 0 && bpb.backup_boot < bpb.reserved)
+            .then(|| bpb.backup_boot.checked_mul(bps))
+            .flatten();
+    let fats = (0..bpb.fats)
         .map(|copy| {
-            copy.checked_mul(geometry.fat_sectors)?
-                .checked_add(geometry.reserved)?
+            copy.checked_mul(bpb.fat_sectors)?
+                .checked_add(bpb.reserved)?
                 .checked_mul(bps)
         })
         .collect::<Option<Vec<u64>>>()?;
     Some(BootSector {
-        kind,
+        kind: bpb.kind,
         bytes_per_sector: bps,
-        volume_bytes: geometry.total_sectors.checked_mul(bps)?,
+        volume_bytes: bpb.volume_bytes(),
         backup_at,
         layout: BootLayout::Fat {
-            media: *sector.get(21)?,
+            media: bpb.media,
             fats,
         },
     })
 }
 
 fn inspect_exfat(sector: &[u8]) -> Option<BootSector> {
-    let geometry = exfat::parse_boot(sector)?;
-    let bps = 1u64 << geometry.sector_shift;
-    let volume_sectors = le64(sector, 72)?;
-    // 规范：卷至少要装得下簇区
-    let heap_end = u64::from(geometry.cluster_count)
-        .checked_shl(geometry.cluster_shift)?
-        .checked_add(geometry.heap_offset)?;
-    if volume_sectors < heap_end {
+    let checked = bpb::check_exfat(sector);
+    // 卷装不下簇区时不致命（照样能打开），但长度不可信，推算不出分区的范围
+    if checked
+        .problems
+        .iter()
+        .any(|problem| problem.rule == bpb::Rule::Layout)
+    {
         return None;
     }
+    let geometry = checked.geometry?;
+    let bps = geometry.bytes_per_sector();
     Some(BootSector {
         kind: FsKind::Exfat,
         bytes_per_sector: bps,
-        volume_bytes: volume_sectors.checked_mul(bps)?,
+        volume_bytes: geometry.volume_length.checked_mul(bps)?,
         backup_at: EXFAT_BACKUP_SECTOR.checked_mul(bps),
         layout: BootLayout::Exfat {
             fat_offset: geometry.fat_offset.checked_mul(bps)?,
@@ -302,14 +313,15 @@ fn inspect_exfat(sector: &[u8]) -> Option<BootSector> {
 }
 
 fn inspect_ntfs(sector: &[u8]) -> Option<BootSector> {
-    let geometry = ntfs::parse_boot(sector)?;
-    let bps = u64::from(le16(sector, 0x0B)?);
+    let geometry = bpb::check_ntfs(sector).geometry?;
+    let bps = geometry.bytes_per_sector;
+    let total = geometry.total_bytes();
     // 引导扇区里的扇区数不含末尾的备份引导扇区
     Some(BootSector {
         kind: FsKind::Ntfs,
         bytes_per_sector: bps,
-        volume_bytes: geometry.total_bytes.checked_add(bps)?,
-        backup_at: Some(geometry.total_bytes),
+        volume_bytes: total.checked_add(bps)?,
+        backup_at: Some(total),
         layout: BootLayout::Ntfs {
             mft_offset: geometry.mft_lcn.checked_mul(geometry.cluster_size)?,
             mirror_offset: geometry.mirror_lcn.checked_mul(geometry.cluster_size)?,

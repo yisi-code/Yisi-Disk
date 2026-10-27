@@ -1,7 +1,8 @@
 //! NTFS 只做有把握的几项：引导扇区的参数、备份引导扇区（分区最后一个扇区）、`$MFT` 与 `$MFTMirr` 的位置、
 //! `$MFT` 第一条记录、`$MFTMirr` 与 `$MFT` 前几条记录是否一致。
 
-use yisi_part::bytes::{le16, le64};
+use yisi_fs::bpb::{self, NtfsBpb as Geometry, Problem};
+use yisi_part::bytes::le16;
 
 use crate::check::issue::{Area, Issue, IssueKind};
 use crate::check::{CheckItem, Ctx, FsType, Stage, Summary};
@@ -9,86 +10,22 @@ use crate::check::{CheckItem, Ctx, FsType, Stage, Summary};
 /// `$MFTMirr` 至少镜像前 4 条记录（`$MFT`、`$MFTMirr`、`$LogFile`、`$Volume`）。
 const MIRRORED_RECORDS: u64 = 4;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Geometry {
-    bytes_per_sector: u64,
-    cluster_size: u64,
-    /// BPB 里的扇区数：不含分区最后那个放备份引导扇区的扇区。
-    total_sectors: u64,
-    mft_lcn: u64,
-    mirror_lcn: u64,
-    record_size: u64,
-}
-
-fn parse(sector: &[u8]) -> Result<Geometry, &'static str> {
-    if sector.get(3..11) != Some(b"NTFS    ".as_slice()) {
-        return Err("fileSystemName");
-    }
-    if le16(sector, 510) != Some(0xAA55) {
-        return Err("signature");
-    }
-    let bytes_per_sector = u64::from(le16(sector, 0x0B).ok_or("bytesPerSector")?);
-    if !bytes_per_sector.is_power_of_two() || !(256..=4096).contains(&bytes_per_sector) {
-        return Err("bytesPerSector");
-    }
-    // 每簇扇区数：大于 0x80 时表示 2^(256-n)（64 KiB 以上的簇）
-    let raw = *sector.get(0x0D).ok_or("sectorsPerCluster")?;
-    let sectors_per_cluster = if raw <= 0x80 {
-        u64::from(raw)
-    } else {
-        1u64.checked_shl(256 - u32::from(raw))
-            .ok_or("sectorsPerCluster")?
-    };
-    let cluster_size = bytes_per_sector
-        .checked_mul(sectors_per_cluster)
-        .filter(|&size| size != 0 && size.is_power_of_two() && size <= 2 << 20)
-        .ok_or("sectorsPerCluster")?;
-    let record_size = size_or_shift(
-        *sector.get(0x40).ok_or("clustersPerMftRecord")?,
-        cluster_size,
-    )
-    .filter(|&size| size.is_power_of_two() && (512..=65536).contains(&size))
-    .ok_or("clustersPerMftRecord")?;
-    let total_sectors = le64(sector, 0x28).ok_or("totalSectors")?;
-    if total_sectors == 0 {
-        return Err("totalSectors");
-    }
-    Ok(Geometry {
-        bytes_per_sector,
-        cluster_size,
-        total_sectors,
-        mft_lcn: le64(sector, 0x30).ok_or("mftCluster")?,
-        mirror_lcn: le64(sector, 0x38).ok_or("mftMirrorCluster")?,
-        record_size,
-    })
-}
-
-/// 记录大小：正数是簇数，负数 n 表示 2^(-n) 字节。
-fn size_or_shift(raw: u8, cluster_size: u64) -> Option<u64> {
-    let signed = raw as i8;
-    if signed > 0 {
-        cluster_size.checked_mul(u64::from(raw))
-    } else {
-        1u64.checked_shl(u32::from(signed.unsigned_abs()))
-    }
+/// 解析引导扇区：规则在 [`yisi_fs::bpb`]（与打开卷、引导扇区诊断共用）。有致命问题时参数为 `None`。
+fn parse(sector: &[u8]) -> (Option<Geometry>, Vec<Problem>) {
+    let checked = bpb::check_ntfs(sector);
+    (checked.geometry, checked.problems)
 }
 
 pub(crate) fn looks_valid(sector: &[u8]) -> bool {
-    parse(sector).is_ok()
+    parse(sector).0.is_some()
 }
 
 /// 检查一个 NTFS 卷。被取消时返回 `None`。
 pub(crate) fn check(ctx: &mut Ctx, sector: &[u8], from_backup: bool) -> Option<Summary> {
-    let geometry = match parse(sector) {
-        Ok(geometry) => geometry,
-        Err(field) => {
-            ctx.issues.push(
-                Issue::new(IssueKind::BootInvalid)
-                    .area(Area::Boot)
-                    .field(field),
-            );
-            return Some(summary(FsType::Ntfs, 0, 0));
-        }
+    let (geometry, problems) = parse(sector);
+    ctx.boot_problems(&problems, Area::Boot);
+    let Some(geometry) = geometry else {
+        return Some(summary(FsType::Ntfs, 0, 0));
     };
     ctx.checked(CheckItem::Boot);
     let length = ctx.disk.length();
@@ -204,7 +141,7 @@ fn check_backup(ctx: &mut Ctx, geometry: &Geometry, main: &[u8]) {
     let readable = ctx
         .read(at, &mut backup, Area::BackupBoot, None)
         .is_some_and(|bad| bad.is_empty());
-    if !readable || parse(&backup).is_err() {
+    if !readable || parse(&backup).0.is_none() {
         ctx.issues
             .push(Issue::new(IssueKind::BackupBootInvalid).area(Area::BackupBoot));
         return;

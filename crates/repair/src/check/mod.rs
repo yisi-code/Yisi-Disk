@@ -13,6 +13,8 @@ mod table;
 #[cfg(test)]
 mod tests;
 
+use yisi_fs::boot::backup_candidates;
+use yisi_fs::bpb::{Problem, Rule};
 use yisi_io::BlockDevice;
 
 pub use issue::{Area, Issue, IssueKind, Severity, Totals};
@@ -283,6 +285,22 @@ impl Ctx<'_> {
         self.checked.push(item);
     }
 
+    /// 引导扇区按 [`yisi_fs::bpb`] 核对出的问题（规则与打开卷、引导扇区诊断共用），一项记一条，字段名用规范里的叫法。
+    /// 跳转指令不标准、NTFS 的旧字段不为 0 只是形式上不合规范，记成可以忽略的 [`IssueKind::BootNote`]。
+    pub fn boot_problems(&mut self, problems: &[Problem], area: Area) {
+        for problem in problems {
+            let cosmetic = problem.rule == Rule::Jump
+                || (problem.rule == Rule::LegacyFields && !problem.fatal);
+            let kind = if cosmetic {
+                IssueKind::BootNote
+            } else {
+                IssueKind::BootInvalid
+            };
+            self.issues
+                .push(Issue::new(kind).area(area).field(problem.field));
+        }
+    }
+
     pub fn skipped(&mut self, item: CheckItem) {
         self.skipped.push(item);
     }
@@ -305,8 +323,8 @@ enum Detected {
     Unknown,
 }
 
-/// 按主引导扇区识别；认不出时依次试备份引导扇区（FAT32 在第 6 扇区、exFAT 在第 12 扇区、NTFS 在分区最后一个扇区）。
-/// 主引导扇区认不出而备份认得出时，记一个问题，按备份接着检查。
+/// 按主引导扇区识别；认不出时依次试备份引导扇区（FAT32 在第 6 扇区、exFAT 在第 12 扇区、NTFS 在分区最后一个扇区），
+/// 位置与打开卷、引导扇区诊断找的相同（[`backup_candidates`]）。主引导扇区认不出而备份认得出时，记一个问题，按备份接着检查。
 fn detect(ctx: &mut Ctx) -> Detected {
     let mut sector = vec![0u8; 512];
     if ctx.read(0, &mut sector, Area::Boot, None).is_some()
@@ -314,16 +332,9 @@ fn detect(ctx: &mut Ctx) -> Detected {
     {
         return found;
     }
-    let length = ctx.disk.length();
-    let mut candidates = Vec::new();
-    for bytes_per_sector in [512u64, 4096] {
-        candidates.push(6 * bytes_per_sector);
-        candidates.push(12 * bytes_per_sector);
-        if let Some(last) = length.checked_sub(bytes_per_sector) {
-            candidates.push(last);
-        }
-    }
-    for at in candidates {
+    let device_sector = u32::try_from(ctx.disk.sector_size()).unwrap_or(512);
+    let candidates = backup_candidates(&sector, device_sector, ctx.disk.length());
+    for at in candidates.into_iter().map(|candidate| candidate.offset) {
         let mut backup = vec![0u8; 512];
         if ctx
             .read(at, &mut backup, Area::BackupBoot, None)

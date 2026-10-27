@@ -129,7 +129,10 @@ export interface BootDifference {
 export interface BootCopyReport {
   /** 在源上的字节偏移 */
   offset: number
+  /** 让这一份不能用的问题；为空表示核对通过 */
   issues: BootIssue[]
+  /** 不影响使用的问题，只作提醒 */
+  notes: BootIssue[]
   volumeBytes: number | null
   clusterSize: number | null
   /** 引导扇区正常时按它打开了卷；打不开时 openError 是原因。有问题时不试，两项都为空 */

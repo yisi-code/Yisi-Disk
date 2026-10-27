@@ -759,6 +759,7 @@ export default {
       position: '第 {sector} 扇区（偏移 {offset} 字节）',
       volume: '卷大小 {size}，簇大小 {cluster}',
       copyOk: '各项核对都正常。',
+      note: '提醒（不影响使用）：{text}',
       noBackup: 'FAT12、FAT16 没有备份引导扇区。',
       differences: '主备不一样的字段',
       field: '字段',
@@ -824,6 +825,7 @@ export default {
       badTotalSectors: '总扇区数为 {value}。',
       badLayout: '数据区不在卷内，或簇数与卷的长度对不上。',
       badRootCluster: '根目录的簇号 {value} 不在合法范围内。',
+      badActiveFat: '指定只用的那一份 FAT 不存在（扩展标志 {value}）。',
       badRecordSize: 'MFT 记录大小不合法。',
       badIndexSize: '索引块大小不合法。',
       mftOutside: '$MFT 的起始簇 {value} 不在卷内。',
@@ -991,6 +993,8 @@ export default {
       clustersPerMftRecord: 'MFT 记录大小',
       mftCluster: '$MFT 位置',
       mftMirrorCluster: '$MFTMirr 位置',
+      jumpBoot: '开头的跳转指令',
+      clustersPerIndexBlock: '索引块大小',
     },
     system: {
       Bitmap: '分配位图（$Bitmap）',
@@ -1029,6 +1033,11 @@ export default {
         title: '{area}的参数不合规范：{field}',
         detail: '参数不对时，系统可能打不开这个分区，或者算错数据的位置。',
         fix: '以后可以按备份引导扇区，或按实际结构推算出的值改正这一项。',
+      },
+      bootNote: {
+        title: '{area}有一处形式上不合规范：{field}',
+        detail: '不影响使用，系统照常能打开这个分区；多半是用别的工具格式化时留下的。',
+        fix: '不必处理。',
       },
       bootChecksum: {
         title: '{area}的校验和不对',

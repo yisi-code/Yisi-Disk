@@ -6,7 +6,7 @@ use crate::clusters::{Clusters, FatWidth, Link};
 use crate::entry::{ClusterRef, Entry, FileRef, Listing, Location, State, dos_time};
 use crate::reader::FileReader;
 use crate::region::{ChunkCache, Region};
-use crate::{FsError, FsKind, MAX_DIR_BYTES, MAX_ENTRIES};
+use crate::{FsError, FsKind, MAX_DIR_BYTES, MAX_ENTRIES, bpb};
 
 const ENTRY: usize = 32;
 const ATTR_READ_ONLY_ETC: u8 = 0x0F;
@@ -45,96 +45,33 @@ impl Geometry {
     }
 }
 
-/// 解析引导扇区；参数不自洽时返回 `None`。类型按簇数判定（规范第 3.5 节），
-/// 只是 BPB 里 16 位的 FAT 扇区数为 0 时按 FAT32 处理（小容量的 FAT32 也存在）。
+/// 解析引导扇区；有致命问题时返回 `None`（规则在 [`bpb`](crate::bpb)，与诊断、文件系统检查共用）。
+/// 簇数按 FAT 装得下的截短。
 pub(crate) fn parse_boot(sector: &[u8]) -> Option<Geometry> {
-    let bytes_per_sector = u64::from(le16(sector, 11)?);
-    let sectors_per_cluster = u64::from(*sector.get(13)?);
-    let reserved = u64::from(le16(sector, 14)?);
-    let fats = u64::from(*sector.get(16)?);
-    let root_entries = u64::from(le16(sector, 17)?);
-    let total16 = u64::from(le16(sector, 19)?);
-    let media = *sector.get(21)?;
-    let fat16_sectors = u64::from(le16(sector, 22)?);
-    let total32 = u64::from(le32(sector, 32)?);
-    if !matches!(bytes_per_sector, 512 | 1024 | 2048 | 4096)
-        || !sectors_per_cluster.is_power_of_two()
-        || sectors_per_cluster > 128
-        || reserved == 0
-        || !matches!(fats, 1 | 2)
-        || !(media == 0xF0 || media >= 0xF8)
-        || le16(sector, 510) != Some(0xAA55)
-    {
+    let bpb = bpb::check_fat(sector, None).geometry?;
+    let width = match bpb.kind {
+        FsKind::Fat12 => FatWidth::Fat12,
+        FsKind::Fat16 => FatWidth::Fat16,
+        _ => FatWidth::Fat32,
+    };
+    let cluster_count = bpb.cluster_count.min(bpb.fat_capacity).min(0x0FFF_FFF5);
+    if cluster_count == 0 {
         return None;
     }
-    let total_sectors = if total16 != 0 { total16 } else { total32 };
-    let is_fat32 = fat16_sectors == 0;
-    let fat_sectors = if is_fat32 {
-        u64::from(le32(sector, 36)?)
-    } else {
-        fat16_sectors
-    };
-    if total_sectors == 0 || fat_sectors == 0 || (is_fat32 && root_entries != 0) {
-        return None;
-    }
-    let mut geometry = Geometry {
-        width: FatWidth::Fat32,
-        bytes_per_sector,
-        sectors_per_cluster,
-        reserved,
-        fats,
-        root_entries,
-        total_sectors,
-        fat_sectors,
-        root_cluster: 0,
-        active_fat: 0,
-        cluster_count: 0,
-        label: None,
-    };
-    let data_sectors = total_sectors.checked_sub(geometry.first_data_sector())?;
-    let clusters = data_sectors / sectors_per_cluster;
-    geometry.width = if is_fat32 {
-        FatWidth::Fat32
-    } else if clusters < 4085 {
-        FatWidth::Fat12
-    } else if clusters < 65525 {
-        FatWidth::Fat16
-    } else {
-        return None;
-    };
-    // FAT 本身装得下的表项数也限制了簇数
-    let fat_bits: u64 = match geometry.width {
-        FatWidth::Fat12 => 12,
-        FatWidth::Fat16 => 16,
-        _ => 32,
-    };
-    let fat_entries = fat_sectors * bytes_per_sector * 8 / fat_bits;
-    let clusters = clusters.min(fat_entries.saturating_sub(2)).min(0x0FFF_FFF5);
-    if clusters == 0 {
-        return None;
-    }
-    geometry.cluster_count = u32::try_from(clusters).ok()?;
-
-    let label_at = if is_fat32 {
-        let flags = le16(sector, 40)?;
-        // 第 7 位置 1 表示不镜像，只用低 4 位指定的那一份 FAT
-        if flags & 0x80 != 0 {
-            geometry.active_fat = u64::from(flags & 0x0F);
-            if geometry.active_fat >= fats {
-                return None;
-            }
-        }
-        geometry.root_cluster = le32(sector, 44)?;
-        66
-    } else {
-        38
-    };
-    if sector.get(label_at) == Some(&0x29) {
-        geometry.label = sector
-            .get(label_at + 5..label_at + 16)
-            .and_then(short_label);
-    }
-    Some(geometry)
+    Some(Geometry {
+        width,
+        bytes_per_sector: bpb.bytes_per_sector,
+        sectors_per_cluster: bpb.sectors_per_cluster,
+        reserved: bpb.reserved,
+        fats: bpb.fats,
+        root_entries: bpb.root_entries,
+        total_sectors: bpb.total_sectors,
+        fat_sectors: bpb.fat_sectors,
+        root_cluster: bpb.root_cluster,
+        active_fat: bpb.active_fat.unwrap_or(0),
+        cluster_count: u32::try_from(cluster_count).ok()?,
+        label: bpb.label,
+    })
 }
 
 pub(crate) struct Fat {
@@ -663,26 +600,10 @@ fn root_label(bytes: &[u8]) -> Option<String> {
             return None;
         }
         if first != DELETED && attr & 0x3F == ATTR_VOLUME_ID {
-            return short_label(raw.get(..11)?);
+            return bpb::short_label(raw.get(..11)?);
         }
     }
     None
-}
-
-/// 11 字节、空格补齐的卷标；`NO NAME` 是「没有卷标」。
-fn short_label(bytes: &[u8]) -> Option<String> {
-    let text: String = bytes
-        .iter()
-        .map(|&byte| {
-            if byte.is_ascii_graphic() || byte == b' ' {
-                char::from(byte)
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let text = text.trim_end();
-    (!text.is_empty() && text != "NO NAME").then(|| text.to_owned())
 }
 
 #[cfg(test)]

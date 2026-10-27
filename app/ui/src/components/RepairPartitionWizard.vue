@@ -453,6 +453,11 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
                 <ul v-else class="repair-wizard__list">
                   <li v-for="(issue, index) in partition.primary.issues" :key="index">{{ issueText(issue) }}</li>
                 </ul>
+                <ul v-if="partition.primary.notes.length" class="repair-wizard__list repair-wizard__notes">
+                  <li v-for="(note, index) in partition.primary.notes" :key="index">
+                    {{ t('repair.result.note', { text: issueText(note) }) }}
+                  </li>
+                </ul>
               </dd>
               <dt>{{ t('repair.result.backup') }}</dt>
               <dd>
@@ -464,6 +469,11 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
                   </p>
                   <ul v-else class="repair-wizard__list">
                     <li v-for="(issue, index) in partition.backup.issues" :key="index">{{ issueText(issue) }}</li>
+                  </ul>
+                  <ul v-if="partition.backup.notes.length" class="repair-wizard__list repair-wizard__notes">
+                    <li v-for="(note, index) in partition.backup.notes" :key="index">
+                      {{ t('repair.result.note', { text: issueText(note) }) }}
+                    </li>
                   </ul>
                 </template>
                 <template v-else>{{ t('repair.result.noBackup') }}</template>
@@ -567,6 +577,10 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
 .repair-wizard__ok {
   margin: 0;
   font-size: var(--font-size-small);
+}
+
+.repair-wizard__notes {
+  color: var(--color-text-muted);
 }
 
 .repair-wizard__subtitle {
