@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Yisi-Disk 图标（64 px 及以上）的源文件；48 px 及以下用 icon-small.svg。字母画成线条，不依赖字体 -->
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3d7cf0"/>
+      <stop offset="1" stop-color="#1d4fbf"/>
+    </linearGradient>
+  </defs>
+  <rect x="32" y="32" width="960" height="960" rx="208" fill="url(#background)"/>
+  <!-- 盘片与标识 Ys-D：大写高 168，小写 s 高 132，笔画一样粗 -->
+  <circle cx="512" cy="512" r="296" fill="#ffffff"/>
+  <g transform="translate(512 512) scale(0.88) translate(-538 -512)" fill="none" stroke="#1d4fbf" stroke-width="36" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 318 428 L 362 508 L 406 428 M 362 508 L 362 596"/>
+    <path d="M 522 488 C 512 472 494 464 474 464 C 450 464 434 478 434 498 C 434 518 452 526 478 532 C 506 538 526 548 526 570 C 526 590 508 600 480 600 C 458 600 438 592 428 576"/>
+    <path d="M 566 532 L 590 532"/>
+    <path d="M 640 428 L 640 596 L 676 596 C 726 596 758 560 758 512 C 758 464 726 428 676 428 Z"/>
+  </g>
+  <!-- 找回：绕着盘片的环形箭头 -->
+  <path d="M 512 122 A 390 390 0 1 1 152 362" fill="none" stroke="#ffffff" stroke-width="34" stroke-linecap="round"/>
+  <path d="M 100 340 L 196 312 L 166 404 Z" fill="#ffffff" stroke="#ffffff" stroke-width="14" stroke-linejoin="round"/>
+</svg>

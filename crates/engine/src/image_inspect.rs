@@ -371,7 +371,7 @@ impl Random {
 
 fn output_info(image_path: &Path) -> (Option<OutputInfo>, Option<String>) {
     #[cfg(windows)]
-    match yisi_io::output_volume(image_path) {
+    match yisi_io::volume_info(image_path) {
         Ok(volume) => (
             Some(OutputInfo {
                 file_system: volume.file_system,

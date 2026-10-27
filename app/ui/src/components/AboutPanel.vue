@@ -10,6 +10,15 @@ import {
   type HostError,
 } from '../services/host'
 
+/** 项目主页与作者的联系方式：是事实，不随界面语言变 */
+const REPOSITORY = 'https://github.com/yisi-code/Yisi-Disk'
+const CONTACTS = [
+  { key: 'developer', value: '倚肆' },
+  { key: 'wechat', value: 'm1751250104' },
+  { key: 'qq', value: '1751250104' },
+  { key: 'email', value: 'xiejing0520@petalmail.com' },
+] as const
+
 const { t } = useI18n()
 const { formatHostError } = useHostErrorText()
 
@@ -65,6 +74,20 @@ async function loadEngineStatus() {
       </dd>
     </dl>
 
+    <dl class="about__facts">
+      <dt>{{ t('about.techStack') }}</dt>
+      <dd>{{ t('about.techStackValue') }}</dd>
+      <dt>{{ t('about.repository') }}</dt>
+      <dd class="about__selectable">{{ REPOSITORY }}</dd>
+      <template v-for="contact in CONTACTS" :key="contact.key">
+        <dt>{{ t(`about.contact.${contact.key}`) }}</dt>
+        <dd class="about__selectable">{{ contact.value }}</dd>
+      </template>
+    </dl>
+
+    <p class="about__note">{{ t('about.feedback') }}</p>
+    <p class="about__note">{{ t('about.license') }}</p>
+
     <details v-if="capabilities" class="about__details">
       <summary class="about__summary">{{ t('about.technical') }}</summary>
       <dl class="about__facts">
@@ -103,6 +126,15 @@ async function loadEngineStatus() {
 
 .about__error {
   color: var(--color-danger);
+}
+
+.about__selectable {
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.about__note {
+  margin: 0;
 }
 
 .about__hint {

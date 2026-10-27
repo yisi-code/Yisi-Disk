@@ -22,7 +22,8 @@ pub const CANCEL: &str = "job.cancel";
 pub const PAUSE: &str = "job.pause";
 /// 继续暂停的任务：参数 [`JobRef`]，立即返回空对象。没暂停时什么也不做。
 pub const RESUME: &str = "job.resume";
-/// 列出物理磁盘：没有参数，结果是 [`DiskList`]。只查询设备属性、不读磁盘内容，不需要管理员权限；目前只在 Windows 上提供。
+/// 列出物理磁盘：没有参数，结果是 [`DiskList`]，每块盘带上它的盘符与卷的容量。只向系统查询设备与卷的属性、
+/// 不直接读磁盘，不需要管理员权限；目前只在 Windows 上提供。
 pub const LIST_DISKS: &str = "disk.list";
 /// 列出深度恢复支持的格式：没有参数，结果是 [`FileTypeList`]。
 pub const LIST_FILE_TYPES: &str = "carve.listFileTypes";
@@ -178,6 +179,24 @@ pub struct DiskSummary {
     pub removable: bool,
     /// 认盘用的标识（厂商、型号、序列号），与制作镜像时坏区图里记的来源相同：重新插拔、盘号变了也不变。
     pub identity: String,
+    /// 固态盘；设备不回答这项查询时（常见于 USB 转接）为空。
+    pub solid_state: Option<bool>,
+    /// 系统认出的分区表格式：mbr、gpt、raw（没有分区表或认不出）；查不到时为空。
+    pub partition_style: Option<String>,
+    /// 这块盘上挂载在盘符上的卷，按盘符排序；没有盘符的分区不列。
+    pub volumes: Vec<DiskVolume>,
+}
+
+/// 挂载在盘符上的卷（向系统查询，不读盘）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskVolume {
+    /// 盘符，如 `C`。
+    pub letter: String,
+    pub label: String,
+    pub file_system: String,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
