@@ -12,6 +12,8 @@ mod ntfs;
 pub use ntfs::{NtfsImage, ROOT as NTFS_ROOT, TAG_WOF};
 
 const SECTOR: usize = 512;
+/// FAT32 样本的备份引导扇区。
+const FAT32_BACKUP_SECTOR: usize = 6;
 /// 样本里所有时间戳：2024-03-05 13:45:30。
 pub const SAMPLE_TIME: &str = "2024-03-05 13:45:30";
 const DOS_DATE: u16 = ((2024 - 1980) << 9) | (3 << 5) | 5;
@@ -127,13 +129,22 @@ impl FatImage {
         let label_at = if kind == FatType::Fat32 {
             boot[36..40].copy_from_slice(&(fat_sectors as u32).to_le_bytes());
             boot[44..48].copy_from_slice(&2u32.to_le_bytes());
+            // FSInfo 在第 1 扇区，备份引导扇区在第 6 扇区（`finish` 时复制过去）
+            boot[48..50].copy_from_slice(&1u16.to_le_bytes());
+            boot[50..52].copy_from_slice(&(FAT32_BACKUP_SECTOR as u16).to_le_bytes());
             66
         } else {
             boot[22..24].copy_from_slice(&(fat_sectors as u16).to_le_bytes());
             38
         };
         boot[label_at] = 0x29;
+        boot[label_at + 1..label_at + 5].copy_from_slice(&0x1234_5678u32.to_le_bytes());
         boot[label_at + 5..label_at + 16].copy_from_slice(b"BOOTLABEL  ");
+        boot[label_at + 16..label_at + 24].copy_from_slice(match kind {
+            FatType::Fat12 => b"FAT12   ",
+            FatType::Fat16 => b"FAT16   ",
+            FatType::Fat32 => b"FAT32   ",
+        });
         boot[510] = 0x55;
         boot[511] = 0xAA;
 
@@ -287,6 +298,10 @@ impl FatImage {
         for copy in 0..2 {
             let at = (self.reserved + copy * self.fat_sectors) * SECTOR;
             self.image[at..at + bytes_per_fat].copy_from_slice(&table);
+        }
+        if self.kind == FatType::Fat32 {
+            let backup = FAT32_BACKUP_SECTOR * SECTOR;
+            self.image.copy_within(..SECTOR, backup);
         }
         self.image
     }

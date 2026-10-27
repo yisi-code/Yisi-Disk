@@ -457,11 +457,15 @@ fn mutated_volumes_never_panic() {
             let count = 1 + noise.below(24) as usize;
             noise.mutate(&mut image[hot], count);
             let length = image.len() as u64;
-            let Ok(volume) = Volume::open(Arc::new(MemoryDisk::new(image, 512)), 0, length) else {
-                continue;
-            };
-            let mut budget = 2000;
-            walk(&volume, &volume.root(), 0, &mut budget);
+            let disk: Arc<MemoryDisk> = Arc::new(MemoryDisk::new(image, 512));
+            for copy in [crate::BootCopy::Primary, crate::BootCopy::Backup] {
+                let _ = crate::detect_with(disk.as_ref(), 0, length, copy);
+                let Ok(volume) = Volume::open_with(disk.clone(), 0, length, copy) else {
+                    continue;
+                };
+                let mut budget = 2000;
+                walk(&volume, &volume.root(), 0, &mut budget);
+            }
         }
     }
 }
@@ -710,4 +714,107 @@ fn ntfs_scan_can_be_cancelled_and_restarted() {
         .unwrap();
     assert_eq!(last.0, last.1);
     assert_eq!(summary.deleted, 1);
+}
+
+// ───────────────────────────── 备份引导扇区 ─────────────────────────────
+
+/// 主引导扇区清零后按备份打开：类型按备份识别，目录与文件内容和用主引导扇区时一样。
+fn check_backup_open(image: Vec<u8>, kind: FsKind, name: &str, data: &[u8]) {
+    let length = image.len() as u64;
+    let intact = open(image.clone());
+    let mut broken = image;
+    broken[..512].fill(0);
+    let disk: Arc<MemoryDisk> = Arc::new(MemoryDisk::new(broken, 512));
+    assert_eq!(detect(disk.as_ref(), 0, length).unwrap(), FsKind::Unknown);
+    assert!(Volume::open(disk.clone(), 0, length).is_err());
+    assert_eq!(
+        crate::detect_with(disk.as_ref(), 0, length, crate::BootCopy::Backup).unwrap(),
+        kind
+    );
+    let volume = Volume::open_with(disk, 0, length, crate::BootCopy::Backup).unwrap();
+    assert_eq!(volume.kind(), kind);
+    assert_eq!(volume.label(), intact.label());
+    let entries = volume.list(&volume.root()).unwrap().entries;
+    assert_eq!(read_all(&volume, &find(&entries, name).file), data);
+}
+
+#[test]
+fn volumes_open_from_the_backup_boot_sector() {
+    let mut fat = FatImage::new(FatType::Fat32);
+    let data = pattern(7, fat.cluster_size() * 3 + 5);
+    let root = fat.root();
+    fat.add_file(root, "backup.bin", &data, Layout::Fragmented);
+    check_backup_open(fat.finish(), FsKind::Fat32, "backup.bin", &data);
+
+    let mut exfat = ExfatImage::new();
+    let data = pattern(8, exfat.cluster_size() * 2 + 9);
+    let root = exfat.root();
+    exfat.add_file(root, "backup.bin", &data, Layout::Contiguous);
+    check_backup_open(exfat.finish(), FsKind::Exfat, "backup.bin", &data);
+
+    let mut ntfs = NtfsImage::new();
+    let data = pattern(9, 20_000);
+    ntfs.add_file(NTFS_ROOT, "backup.bin", &data);
+    check_backup_open(ntfs.finish(), FsKind::Ntfs, "backup.bin", &data);
+}
+
+#[test]
+fn backup_boot_sector_is_not_invented() {
+    // FAT12/16 没有备份引导扇区
+    let fat = FatImage::new(FatType::Fat16).finish();
+    let length = fat.len() as u64;
+    let disk: Arc<MemoryDisk> = Arc::new(MemoryDisk::new(fat, 512));
+    assert_eq!(
+        crate::detect_with(disk.as_ref(), 0, length, crate::BootCopy::Backup).unwrap(),
+        FsKind::Unknown
+    );
+    assert!(matches!(
+        Volume::open_with(disk, 0, length, crate::BootCopy::Backup),
+        Err(FsError::Invalid(_))
+    ));
+    // 备份扇区记的扇区大小与它所在的位置不符时不用
+    let mut ntfs = NtfsImage::new().finish();
+    let last = ntfs.len() - 512;
+    ntfs[last + 0x0B..last + 0x0D].copy_from_slice(&4096u16.to_le_bytes());
+    let length = ntfs.len() as u64;
+    let disk: Arc<MemoryDisk> = Arc::new(MemoryDisk::new(ntfs, 512));
+    assert_eq!(
+        crate::detect_with(disk.as_ref(), 0, length, crate::BootCopy::Backup).unwrap(),
+        FsKind::Unknown
+    );
+}
+
+#[test]
+fn backup_candidates_follow_the_primary_hints() {
+    use crate::backup::{BackupFamily, backup_candidates};
+    let ntfs = NtfsImage::new().finish();
+    let length = ntfs.len() as u64;
+    let candidates = backup_candidates(&ntfs[..512], 512, length);
+    assert_eq!(candidates[0].family, BackupFamily::Ntfs);
+    assert_eq!(candidates[0].offset, length - 512);
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate.offset + 512 <= length)
+    );
+    let fat = FatImage::new(FatType::Fat32).finish();
+    let candidates = backup_candidates(&fat[..512], 4096, fat.len() as u64);
+    assert_eq!(
+        (
+            candidates[0].family,
+            candidates[0].offset,
+            candidates[0].sector_size
+        ),
+        (BackupFamily::Fat32, 6 * 512, 512)
+    );
+    // 没有线索时三种都试，设备的扇区大小在前
+    let candidates = backup_candidates(&[0u8; 512], 4096, 64 << 20);
+    assert_eq!(candidates[0].sector_size, 4096);
+    for family in [BackupFamily::Fat32, BackupFamily::Exfat, BackupFamily::Ntfs] {
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.family == family)
+        );
+    }
 }

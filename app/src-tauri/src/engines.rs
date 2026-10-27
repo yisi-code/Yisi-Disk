@@ -24,6 +24,8 @@ use yisi_engine::protocol::{
     ScanResult, Source, error_code,
 };
 
+use yisi_engine::protocol::{BootCopy, BootDiagnosis, DIAGNOSE_BOOT, DiagnoseBootParams};
+
 use crate::broker::BrokerSession;
 use yisi_rpc::{ErrorObject, FrameError, Id, Message, Request, read_message, write_message};
 
@@ -317,13 +319,32 @@ impl Engines {
         )
     }
 
+    /// 诊断引导扇区：另起一个引擎读分区表和各分区的主备引导扇区，答复后退出。物理盘第一次需要时提权启动磁盘代理。
+    pub fn diagnose_boot(
+        &self,
+        broker: &BrokerSession,
+        target: Target,
+    ) -> Result<BootDiagnosis, HostError> {
+        if let Target::Disk { disk_number } = &target {
+            disk_path(*disk_number)?;
+        }
+        let process = EngineProcess::spawn(None, || {})?;
+        let result = resolve_source(target, broker, process.pid)
+            .and_then(|source| to_params(&DiagnoseBootParams { source }))
+            .and_then(|params| process.request(DIAGNOSE_BOOT, params, BROWSE_TIMEOUT));
+        process.abandon();
+        from_value(result?)
+    }
+
     /// 浏览分区：引擎读出分区表后一直运行，直到取消（关闭浏览）。物理盘与扫描一样，第一次需要时提权启动磁盘代理。
+    /// `boot` 为备份时各分区按备份引导扇区打开。
     pub fn open_browse(
         &self,
         app: AppHandle,
         broker: &BrokerSession,
         job_id: String,
         target: Target,
+        boot: BootCopy,
     ) -> Result<BrowseOpened, HostError> {
         if let Target::Disk { disk_number } = &target {
             disk_path(*disk_number)?;
@@ -334,6 +355,7 @@ impl Engines {
                 to_params(&BrowseParams {
                     job_id: params_job_id,
                     source: resolve_source(target, broker, engine_pid)?,
+                    boot,
                 })
             })?;
         from_value(opened)
@@ -414,6 +436,7 @@ impl Engines {
         partition: PartitionRef,
         items: Vec<CopyItem>,
         output_dir: Option<String>,
+        boot: BootCopy,
     ) -> Result<(), HostError> {
         if let Target::Disk { disk_number } = &target {
             disk_path(*disk_number)?;
@@ -440,6 +463,7 @@ impl Engines {
                     partition,
                     items,
                     output_dir,
+                    boot,
                 })
             },
         )?;
