@@ -46,6 +46,13 @@ pub const CANCEL_SCAN: &str = "repair.cancelScan";
 /// 复制好的文件经 [`COPIED`] 通知分批送达，结果是 [`CopySummary`]。源为物理磁盘时，输出目录必须在另一块盘上，
 /// 否则答复 [`error_code::OUTPUT_ON_SOURCE`]。
 pub const COPY_FILES: &str = "repair.copyFiles";
+/// 制作能识别坏区的镜像（任务）：参数 [`ImageParams`]，建好镜像文件与坏区图后答复 [`ImageStarted`]；
+/// 进展经 [`IMAGING`] 送达，结果是 [`ImageSummary`]。镜像文件或坏区图已经存在时答复 [`error_code::IMAGE_EXISTS`]；
+/// 源为物理磁盘时，镜像必须在另一块盘上，否则答复 [`error_code::OUTPUT_ON_SOURCE`]。取消时保存坏区图，之后可以续做。
+pub const IMAGE_CREATE: &str = "image.create";
+/// 按坏区图续做镜像（任务）：参数、答复、通知与结果同 [`IMAGE_CREATE`]。坏区图不存在、读不懂，
+/// 或者记录的容量、扇区大小、来源与当前的源不符时答复 [`error_code::IMAGE_MISMATCH`]。
+pub const IMAGE_RESUME: &str = "image.resume";
 
 /// 引擎每隔 [`HEARTBEAT_INTERVAL`] 发一次，没有参数。
 pub const HEARTBEAT: &str = "engine.heartbeat";
@@ -55,6 +62,8 @@ pub const PROGRESS: &str = "job.progress";
 pub const FOUND: &str = "job.found";
 /// 参数 [`JobCopied`]：一批复制好（或复制失败）的文件，攒满 100 个或距上一批 250 毫秒时发出。
 pub const COPIED: &str = "job.copied";
+/// 参数 [`JobImaging`]：制作镜像的进展，每秒最多 5 次，结束前总会发出最后一次。
+pub const IMAGING: &str = "job.imaging";
 /// 参数 [`JobLog`]。
 pub const LOG: &str = "job.log";
 /// 参数 [`JobCompleted`]。
@@ -82,6 +91,10 @@ pub mod error_code {
     pub const PREVIEW_UNAVAILABLE: i64 = -32006;
     /// 分区不存在、文件系统暂不支持浏览，或文件定位信息不合法。
     pub const FS_UNAVAILABLE: i64 = -32007;
+    /// 要新建的镜像文件或坏区图已经存在：可以续做，或者换一个位置。
+    pub const IMAGE_EXISTS: i64 = -32008;
+    /// 要续做的镜像没有坏区图、坏区图读不懂，或者不是这个源做的。
+    pub const IMAGE_MISMATCH: i64 = -32009;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -528,6 +541,62 @@ pub struct CopySummary {
     pub files: u64,
     pub bytes: u64,
     pub failed: u64,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageParams {
+    pub job_id: String,
+    pub source: Source,
+    /// 镜像文件的完整路径；坏区图是同一路径加 `.map`。
+    pub image_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageStarted {
+    pub image_path: String,
+    pub map_path: String,
+}
+
+/// 制作镜像的进展。各项字节数取自坏区图，续做时包括以前读的。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobImaging {
+    pub job_id: String,
+    /// 当前轮次：copy（复制）、trim（修边）、scrape（细读）。
+    pub round: String,
+    pub size: u64,
+    /// 已读出、写进镜像的字节数。
+    pub read_bytes: u64,
+    /// 确认读不出的字节数。
+    pub bad_bytes: u64,
+    /// 还没读过、待修边、待细读的字节数。
+    pub untried_bytes: u64,
+    pub trim_bytes: u64,
+    pub scrape_bytes: u64,
+    /// 最近几秒的读速；刚开始、还算不出来时为空。
+    pub bytes_per_second: Option<u64>,
+}
+
+/// 制作镜像的结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageSummary {
+    pub image_path: String,
+    pub map_path: String,
+    pub size: u64,
+    pub read_bytes: u64,
+    pub bad_bytes: u64,
+    /// 还没读完的字节数（未读、待修边、待细读）；只在设备读不到时不为 0。
+    pub unfinished_bytes: u64,
+    /// 读不出的区段，相邻的已合并；最多记录 [`MAX_UNREADABLE_RANGES`] 段。
+    pub bad_ranges: Vec<ByteRange>,
+    pub bad_ranges_truncated: bool,
+    /// 读错之后连以前读出的位置也读不出了（多半是设备断开），在这个偏移处停下；检查连接后可以续做。
+    pub source_lost_at: Option<u64>,
+    /// 本次运行的用时。
     pub elapsed_ms: u64,
 }
 

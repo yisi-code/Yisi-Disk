@@ -7,6 +7,7 @@ mod device;
 #[cfg(windows)]
 mod disk_list;
 mod error;
+mod imaging;
 #[cfg(windows)]
 mod ioctl;
 mod raw;
@@ -21,6 +22,10 @@ pub use device::BlockDevice;
 #[cfg(windows)]
 pub use disk_list::{BusType, DiskInfo, list_disks};
 pub use error::IoError;
+pub use imaging::{
+    BadMap, ImageStore, ImagingControl, ImagingOptions, ImagingOutcome, MapError, MapHeader, Round,
+    Segment, SegmentState, run_imaging,
+};
 pub use raw::RawImage;
 #[cfg(windows)]
 pub use volume::volume_disk_numbers;

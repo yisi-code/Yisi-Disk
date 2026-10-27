@@ -22,6 +22,7 @@ fn main() {
         "job_start_copy",
         "copied_open",
         "copied_reveal",
+        "job_start_image",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("tauri-build 执行失败");

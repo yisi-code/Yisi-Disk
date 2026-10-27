@@ -17,10 +17,11 @@ use yisi_engine::protocol::{
     BROWSE_OPEN, BrowseOpened, BrowseParams, CANCEL, CANCEL_SCAN, CANCELLED, CAPABILITIES,
     CARVE_EXTRACT, CARVE_START, COMPLETED, COPIED, COPY_FILES, Capabilities, CarveParams,
     CarveStarted, CopyItem, CopyParams, CopyStarted, DiskList, ExtractItem, ExtractParams, FAILED,
-    FOUND, FileListPage, FilePreview, FileTypeList, HEARTBEAT, JobRef, LIST_DISKS, LIST_FILE_TYPES,
-    LIST_FILES, LOG, ListFilesParams, PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS,
-    PartitionRef, PreviewFsParams, PreviewParams, PreviewRangeParams, READ_SCAN, ReadScanParams,
-    SCAN_DELETED, ScanParams, ScanResult, Source, error_code,
+    FOUND, FileListPage, FilePreview, FileTypeList, HEARTBEAT, IMAGE_CREATE, IMAGE_RESUME, IMAGING,
+    ImageParams, JobRef, LIST_DISKS, LIST_FILE_TYPES, LIST_FILES, LOG, ListFilesParams,
+    PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS, PartitionRef, PreviewFsParams,
+    PreviewParams, PreviewRangeParams, READ_SCAN, ReadScanParams, SCAN_DELETED, ScanParams,
+    ScanResult, Source, error_code,
 };
 
 use crate::broker::BrokerSession;
@@ -75,7 +76,7 @@ pub enum Target {
     },
 }
 
-/// 发给界面的任务事件。`kind` 为 progress、found、copied、log、completed、failed、cancelled、unresponsive、responsive。
+/// 发给界面的任务事件。`kind` 为 progress、found、copied、imaging、log、completed、failed、cancelled、unresponsive、responsive。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobEvent {
@@ -395,6 +396,32 @@ impl Engines {
         Ok(())
     }
 
+    /// 制作镜像（`resume` 时按坏区图续做）。源为物理磁盘时，引擎在开始前核对镜像不在这块盘上（`outputOnSource`）；
+    /// 新建时镜像或坏区图已存在答复 `imageExists`，续做时坏区图对不上答复 `imageMismatch`。
+    pub fn start_image(
+        &self,
+        app: AppHandle,
+        broker: &BrokerSession,
+        job_id: String,
+        target: Target,
+        image_path: String,
+        resume: bool,
+    ) -> Result<(), HostError> {
+        if let Target::Disk { disk_number } = &target {
+            disk_path(*disk_number)?;
+        }
+        let method = if resume { IMAGE_RESUME } else { IMAGE_CREATE };
+        let params_job_id = job_id.clone();
+        self.start_job(app, job_id, method, |engine_pid| {
+            to_params(&ImageParams {
+                job_id: params_job_id,
+                source: resolve_source(target, broker, engine_pid)?,
+                image_path,
+            })
+        })
+        .map(|_| ())
+    }
+
     /// 复制任务输出目录里的一个文件。`path` 是引擎报告的相对路径（以 `/` 分隔），
     /// 只接受普通的路径分量，解析后必须仍在输出目录之内。
     pub fn copied_file(&self, job_id: &str, path: &str) -> Result<PathBuf, HostError> {
@@ -653,6 +680,7 @@ impl EngineProcess {
             PROGRESS => "progress",
             FOUND => "found",
             COPIED => "copied",
+            IMAGING => "imaging",
             LOG => "log",
             COMPLETED => "completed",
             FAILED => "failed",
@@ -767,6 +795,8 @@ fn engine_error_code(code: i64) -> &'static str {
         error_code::OUTPUT_ON_SOURCE => "outputOnSource",
         error_code::PREVIEW_UNAVAILABLE => "previewUnavailable",
         error_code::FS_UNAVAILABLE => "fsUnavailable",
+        error_code::IMAGE_EXISTS => "imageExists",
+        error_code::IMAGE_MISMATCH => "imageMismatch",
         _ => "engineRejected",
     }
 }
@@ -906,6 +936,11 @@ mod tests {
         assert_eq!(
             engine_error_code(error_code::SOURCE_UNAVAILABLE),
             "sourceUnavailable"
+        );
+        assert_eq!(engine_error_code(error_code::IMAGE_EXISTS), "imageExists");
+        assert_eq!(
+            engine_error_code(error_code::IMAGE_MISMATCH),
+            "imageMismatch"
         );
         assert_eq!(engine_error_code(-32602), "engineRejected");
     }

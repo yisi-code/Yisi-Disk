@@ -5,6 +5,7 @@ mod browse;
 mod carve_job;
 mod copy_job;
 mod extract_job;
+mod image_job;
 mod job;
 mod preview;
 mod read_scan;

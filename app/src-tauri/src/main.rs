@@ -237,6 +237,20 @@ fn copied_reveal(
         .map_err(|error| HostError::new("openFailed", error.to_string()))
 }
 
+/// 制作能识别坏区的镜像；`resume` 时按同一路径的坏区图续做。物理磁盘与读取扫描一样，第一次需要时提权启动代理。
+#[tauri::command(async)]
+fn job_start_image(
+    app: AppHandle,
+    engines: State<'_, Engines>,
+    broker: State<'_, BrokerSession>,
+    job_id: String,
+    target: Target,
+    image_path: String,
+    resume: bool,
+) -> Result<(), HostError> {
+    engines.start_image(app, &broker, job_id, target, image_path, resume)
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -266,7 +280,8 @@ fn main() -> anyhow::Result<()> {
             browse_cancel_scan,
             job_start_copy,
             copied_open,
-            copied_reveal
+            copied_reveal,
+            job_start_image
         ])
         .run(tauri::generate_context!())?;
     Ok(())
