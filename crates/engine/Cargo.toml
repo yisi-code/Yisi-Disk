@@ -15,6 +15,7 @@ yisi-formats.workspace = true
 yisi-fs.workspace = true
 yisi-io.workspace = true
 yisi-part.workspace = true
+yisi-repair.workspace = true
 yisi-rpc.workspace = true
 
 [dev-dependencies]

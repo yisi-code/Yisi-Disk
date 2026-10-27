@@ -4,5 +4,13 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[dependencies]
+yisi-io.workspace = true
+yisi-part.workspace = true
+
+[dev-dependencies]
+yisi-fs = { workspace = true, features = ["test-samples"] }
+yisi-part = { workspace = true, features = ["test-samples"] }
+
 [lints]
 workspace = true

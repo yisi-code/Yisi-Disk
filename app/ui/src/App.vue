@@ -6,6 +6,7 @@ import BadSectorCheck from './components/BadSectorCheck.vue'
 import CarveWizard from './components/CarveWizard.vue'
 import DiskImage from './components/DiskImage.vue'
 import FeatureCatalog from './components/FeatureCatalog.vue'
+import FsCheckWizard from './components/FsCheckWizard.vue'
 import ProblemGuide from './components/ProblemGuide.vue'
 import ProblemOverview from './components/ProblemOverview.vue'
 import UndeleteWizard from './components/UndeleteWizard.vue'
@@ -146,6 +147,7 @@ function closeFeature() {
         <UndeleteWizard v-else-if="featureView === 'undelete'" @exit="closeFeature" />
         <BadSectorCheck v-else-if="featureView === 'badSectors'" @exit="closeFeature" />
         <DiskImage v-else-if="featureView === 'image'" @exit="closeFeature" />
+        <FsCheckWizard v-else-if="featureView === 'fsCheck'" @exit="closeFeature" />
         <ProblemOverview
           v-else-if="page === 'overview'"
           :focus-request="focusRequest"
