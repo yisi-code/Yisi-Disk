@@ -12,6 +12,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
 };
 
+use crate::volume::{Existing, nearest_existing};
 use crate::{volume_disk_numbers, volume_root as root_of};
 
 /// `GetVolumeInformationW` 报告的文件系统标志：支持稀疏文件（`FILE_SUPPORTS_SPARSE_FILES`）。
@@ -49,14 +50,11 @@ pub struct MountedVolume {
     pub disks: Vec<u32>,
 }
 
-/// `path` 最近一级已存在的目录（以 0 结尾的 UTF-16）：`path` 可以还不存在、也可以是已有的文件
-/// （剩余空间只能按目录查，给文件会报「目录名称无效」）。
+/// `path` 最近一级已存在的目录（以 0 结尾的 UTF-16）：`path` 可以还不存在、也可以是已有的文件。
 fn existing_dir(path: &Path) -> io::Result<Vec<u16>> {
-    let existing = path
-        .ancestors()
-        .find(|ancestor| !ancestor.as_os_str().is_empty() && ancestor.is_dir())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "路径及其上级目录都不存在"))?;
-    Ok(wide(existing.as_os_str()))
+    Ok(wide(
+        nearest_existing(path, Existing::Directory)?.as_os_str(),
+    ))
 }
 
 /// 目录所在卷的根路径，如 `C:\`（以 0 结尾）。
