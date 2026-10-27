@@ -75,8 +75,8 @@ export default {
         '整块盘显示「未初始化」或「没有分区」。',
       ],
       steps: {
-        findPartitions: '最好的办法：找到丢失的分区，连同里面的全部文件一起恢复。',
-        carve: '现在就能用：直接在整块盘上按文件格式找回，但没有原文件名。',
+        findPartitions: '最好的办法：找到丢失的分区，连同文件名和文件夹结构把文件另存到另一块盘。',
+        carve: '找不到分区、或分区里的文件读不出时：直接在整块盘上按文件格式找回，但没有原文件名。',
       },
       notes: [
         '不要在空出来的区域新建分区，也不要初始化磁盘：会覆盖原来的分区信息。',
@@ -130,9 +130,9 @@ export default {
     },
     findPartitions: {
       name: '找回丢失的分区',
-      summary: '搜索整块盘，找出被删除或分区表损坏后丢失的分区，确认后写回分区表。',
+      summary: '搜索整块盘，找出被删除或分区表损坏后丢失的分区，浏览里面的文件并另存到别的盘。',
       suits: '盘符不见了、磁盘管理里显示「未分配」、分区操作之后整个分区没了。',
-      notSuits: '分区还在、只是打不开时，用「修复打不开的分区」。',
+      notSuits: '分区还在、只是打不开时，用「修复打不开的分区」；这一版还不能把找到的分区写回分区表。',
     },
     repairPartition: {
       name: '修复打不开的分区',
@@ -662,6 +662,71 @@ export default {
         elapsed: '用时',
         outputDir: '保存在',
       },
+    },
+  },
+  findPartitions: {
+    steps: {
+      source: '来源',
+      search: '搜索',
+      results: '结果',
+    },
+    intro:
+      '从头到尾读一遍整块盘或镜像，逐个扇区找 FAT、exFAT、NTFS 分区的引导扇区（包括分区自带的备份），核对文件系统的结构后列出找到的分区，再浏览里面的文件、另存到别的盘。',
+    diskHint:
+      '读取物理磁盘需要管理员权限，只读、不会改动这块盘。要读完整块盘，大盘可能要几个小时，可以暂停、取消。已经报过读错误的盘，请先制作镜像，再在镜像上搜索。',
+    start: '开始搜索',
+    restart: '重新搜索',
+    status: {
+      starting: '正在启动搜索…',
+      startingDisk: '正在请求管理员权限并打开磁盘…',
+      running: '已搜索 {done} / {total}（{percent}%），{rate}/秒',
+      paused: '已暂停：停在 {done} / {total}（{percent}%），暂停期间不读盘',
+      completed: '搜索完成',
+      failed: '搜索失败',
+      cancelled: '已取消搜索；要看结果需要重新搜索',
+    },
+    results: {
+      separator: '',
+      summary: '找到 {count} 个分区。',
+      none: '没有找到 FAT、exFAT、NTFS 分区。分区里的文件仍可以试试「按文件类型深度恢复」。',
+      table: '现有分区表：{scheme}。',
+      scheme: {
+        mbr: 'MBR',
+        gpt: 'GPT',
+        none: '没有',
+        unreadable: '读不出',
+      },
+      elapsed: '用时 {seconds} 秒。',
+      unreadable: '有 {size} 读不出、跳过了，那些位置上的分区找不到。',
+      truncated: '找到的分区太多，只列出前 {count} 个。',
+      readOnly:
+        '这一版只读：不写回分区表，也不改动这块盘。先把需要的文件另存到另一块盘；把找到的分区写回分区表要等后续版本。',
+      opening: '正在打开浏览…',
+      openingDisk: '正在请求管理员权限并打开磁盘…',
+    },
+    list: {
+      title: '找到的分区',
+      noLabel: '无卷标',
+      name: '{filesystem} · {size}',
+      start: '起始位置 {offset}',
+      relation: {
+        inTable: '分区表里已有（分区 {number}）',
+        overlaps: '与分区 {number} 重叠',
+        lost: '丢失',
+      },
+      backup: '主引导扇区已坏，按备份找到',
+      overlapsCandidate: '与另一个找到的分区重叠',
+      truncated: '超出磁盘末尾，已截短',
+      hint: '「丢失」是分区表里没有的分区。互相重叠的分区里至少有一个不是真的（例如分区里存着的磁盘镜像文件），浏览里面的文件就能分辨。',
+    },
+    files: {
+      title: '分区里的文件',
+      pick: '在左边选一个找到的分区，浏览里面的文件。',
+      opening: '正在打开分区…',
+      openFailed: '打不开这个分区：{reason}',
+      unbrowsable: '这个分区不能浏览：{reason}',
+      scanCancelled: '已停止扫描 MFT。浏览 NTFS 分区之前要先扫描一遍，找出已删除的文件。',
+      retry: '重新打开',
     },
   },
   errors: {

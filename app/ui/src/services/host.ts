@@ -188,6 +188,45 @@ export interface PartitionRef {
   number: number
   offset: number
   length: number
+  /** 按位置打开的分区（丢失分区搜索找到的）：引擎不核对分区表，只核对范围在源之内 */
+  outsideTable?: boolean
+  /** 按位置打开时给的备份引导扇区位置 */
+  backupBoot?: number | null
+}
+
+/** 丢失分区搜索找到的一个分区 */
+export interface FoundPartition {
+  offset: number
+  /** 卷的字节数，已截到源的末尾 */
+  length: number
+  /** fat12、fat16、fat32、exfat、ntfs */
+  filesystem: string
+  label: string | null
+  /** 靠哪个引导扇区找到：primary（分区开头的）、backup（主引导扇区已坏，靠备份）、both */
+  foundBy: 'primary' | 'backup' | 'both'
+  /** 只靠备份找到时备份引导扇区的位置；浏览、复制时原样传回 */
+  backupBoot: number | null
+  /** 卷超出了源的末尾，长度已截短 */
+  truncated: boolean
+  /** 与现有分区表的关系：表里已有、与表里的分区重叠、丢失 */
+  relation: 'inTable' | 'overlaps' | 'lost'
+  /** inTable、overlaps 时是表里哪个分区 */
+  tablePartition: number | null
+  /** 与别的候选分区重叠：其中至少一个不是真的分区 */
+  overlapsCandidate: boolean
+}
+
+/** 丢失分区搜索的结果 */
+export interface SearchSummary {
+  size: number
+  sectorSize: number
+  /** 现有分区表：mbr、gpt、none；读不出时为 unreadable */
+  scheme: 'mbr' | 'gpt' | 'none' | 'unreadable'
+  /** 按起点排序 */
+  candidates: FoundPartition[]
+  candidatesTruncated: boolean
+  unreadableBytes: number
+  elapsedMs: number
 }
 
 /** 要复制的一项：定位信息，以及复制到输出目录下的相对路径（一级一项） */
@@ -431,6 +470,24 @@ export function scanDeleted(jobId: string, partition: number): Promise<ScanResul
 /** 停下正在进行的扫描；那次 scanDeleted 返回 cancelled */
 export function cancelScan(jobId: string, partition: number): Promise<void> {
   return invoke<void>('browse_cancel_scan', { jobId, partition })
+}
+
+/** 搜索丢失的分区（只读，可以暂停）；物理磁盘与扫描一样可能先等提权。结果经 completed 事件送达 */
+export function startPartitionSearch(jobId: string, target: JobTarget): Promise<void> {
+  return invoke<void>('job_start_partition_search', { jobId, target })
+}
+
+/**
+ * 在浏览会话里按位置打开一个分区（搜索找到的、不在分区表里）。答复的编号之后像表里的分区一样
+ * 用于 listFiles、previewFsFile、scanDeleted；同一位置再打开时编号相同
+ */
+export function openBrowseRange(
+  jobId: string,
+  offset: number,
+  length: number,
+  backupBoot: number | null,
+): Promise<PartitionInfo> {
+  return invoke<PartitionInfo>('browse_open_range', { jobId, offset, length, backupBoot })
 }
 
 /**

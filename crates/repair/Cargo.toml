@@ -4,5 +4,19 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[dependencies]
+tracing.workspace = true
+yisi-fs.workspace = true
+yisi-io.workspace = true
+yisi-part.workspace = true
+
+[dev-dependencies]
+yisi-fs = { workspace = true, features = ["test-samples"] }
+yisi-part = { workspace = true, features = ["test-samples"] }
+
+[features]
+# 测试样本（丢失分区搜索用的整盘镜像），供其他 crate 的测试使用
+test-samples = ["yisi-fs/test-samples", "yisi-part/test-samples"]
+
 [lints]
 workspace = true

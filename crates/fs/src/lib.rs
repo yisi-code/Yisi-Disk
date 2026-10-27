@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
+mod boot;
 mod clusters;
 mod entry;
 mod exfat;
@@ -21,6 +22,7 @@ use std::sync::Arc;
 
 use yisi_io::{BlockDevice, IoError};
 
+pub use boot::{BootLayout, BootSector, inspect_boot};
 pub use entry::{ClusterRef, Entry, FileRef, Listing, Location, State, Unsupported};
 pub use reader::FileReader;
 

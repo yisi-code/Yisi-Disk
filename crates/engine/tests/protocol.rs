@@ -1174,3 +1174,250 @@ fn image_stopped_midway_resumes_to_identical_bytes() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 丢失分区搜索的镜像：分区表清空，NTFS 的主引导扇区也清零（只剩末尾的备份）。
+fn lost_partitions_image(dir: &Path) -> (String, yisi_repair::samples::SearchDisk) {
+    let mut disk = yisi_repair::samples::search_disk();
+    disk.clear_table();
+    disk.wipe_primary_boot(disk.ntfs.0);
+    let path = dir.join("lost.img");
+    std::fs::write(&path, &disk.image).unwrap();
+    (path.to_string_lossy().into_owned(), disk)
+}
+
+#[test]
+fn partition_search_finds_lost_partitions_then_browses_and_copies_one() {
+    use yisi_engine::protocol::{
+        OPEN_RANGE, PartitionInfo, RANGE_PARTITION_BASE, SEARCH_PARTITIONS, SearchSummary,
+    };
+
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-search");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (image, disk) = lost_partitions_image(&dir);
+    let source = json!({"type": "image", "path": image, "sectorSize": 512});
+
+    let mut searcher = Engine::start();
+    assert_eq!(
+        searcher
+            .call(SEARCH_PARTITIONS, json!({"jobId": "s1", "source": source}))
+            .unwrap(),
+        json!({})
+    );
+    let notifications = searcher.notifications_until(COMPLETED);
+    let progress = notifications
+        .iter()
+        .rfind(|(method, _)| method == PROGRESS)
+        .unwrap();
+    assert_eq!(progress.1["done"], progress.1["total"]);
+    let summary: SearchSummary =
+        serde_json::from_value(notifications.last().unwrap().1["result"].clone()).unwrap();
+    assert!(searcher.wait_exit().success());
+
+    assert_eq!(summary.scheme, "none");
+    assert_eq!(summary.size, disk.image.len() as u64);
+    let found: Vec<_> = summary
+        .candidates
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.offset,
+                candidate.filesystem.as_str(),
+                candidate.found_by.as_str(),
+                candidate.relation.as_str(),
+                candidate.overlaps_candidate,
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (disk.fat32.0, "fat32", "both", "lost", false),
+            (disk.ntfs.0, "ntfs", "backup", "lost", true),
+            (disk.nested_fat12.0, "fat12", "primary", "lost", true),
+            (disk.exfat.0, "exfat", "both", "lost", false),
+        ]
+    );
+    let ntfs = &summary.candidates[1];
+    assert_eq!(ntfs.length, disk.ntfs.1);
+    assert_eq!(ntfs.backup_boot, Some(disk.ntfs.0 + disk.ntfs.1 - 512));
+    assert_eq!(ntfs.label.as_deref(), Some("NTFS SAMPLE"));
+    assert_eq!(summary.candidates[0].label.as_deref(), Some("DATA32"));
+
+    // 浏览：按位置打开候选分区，之后与表里的分区一样列目录、预览、扫描
+    let mut engine = Engine::start();
+    let opened: BrowseOpened = serde_json::from_value(
+        engine
+            .call(BROWSE_OPEN, json!({"jobId": "b1", "source": source}))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(opened.scheme, "none");
+    let range = json!({"jobId": "b1", "offset": ntfs.offset, "length": ntfs.length,
+                       "backupBoot": ntfs.backup_boot});
+    let info: PartitionInfo =
+        serde_json::from_value(engine.call(OPEN_RANGE, range.clone()).unwrap()).unwrap();
+    assert_eq!(info.number, RANGE_PARTITION_BASE);
+    assert_eq!(
+        (
+            info.filesystem.as_str(),
+            info.label.as_deref(),
+            info.browsable,
+            info.needs_scan,
+            info.times_utc
+        ),
+        ("ntfs", Some("NTFS SAMPLE"), true, true, true)
+    );
+    assert_eq!((info.offset, info.length), (ntfs.offset, ntfs.length));
+    // 同一位置再打开：同一个编号
+    let again: PartitionInfo =
+        serde_json::from_value(engine.call(OPEN_RANGE, range).unwrap()).unwrap();
+    assert_eq!(again.number, RANGE_PARTITION_BASE);
+    let fat32: PartitionInfo = serde_json::from_value(
+        engine
+            .call(
+                OPEN_RANGE,
+                json!({"jobId": "b1", "offset": disk.fat32.0, "length": disk.fat32.1}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        (fat32.number, fat32.filesystem.as_str()),
+        (RANGE_PARTITION_BASE + 1, "fat32")
+    );
+    let outside = engine
+        .call(
+            OPEN_RANGE,
+            json!({"jobId": "b1", "offset": disk.exfat.0, "length": disk.image.len()}),
+        )
+        .unwrap_err();
+    assert_eq!(outside.code, rpc_error::INVALID_PARAMS);
+
+    let root: FileListPage = serde_json::from_value(
+        engine
+            .call(
+                LIST_FILES,
+                json!({"jobId": "b1", "partition": RANGE_PARTITION_BASE, "offset": 0, "limit": 100}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let names: Vec<&str> = root
+        .entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    assert_eq!(names, ["inner.img", "report.bin"]);
+    let report = &root.entries[1];
+    let preview: FilePreview = serde_json::from_value(
+        engine
+            .call(
+                PREVIEW_FS_FILE,
+                json!({"jobId": "b1", "partition": RANGE_PARTITION_BASE, "file": report.file}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(preview.length, disk.report.len() as u64);
+    let scanned: ScanResult = serde_json::from_value(
+        engine
+            .call(
+                SCAN_DELETED,
+                json!({"jobId": "b1", "partition": RANGE_PARTITION_BASE}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!scanned.cancelled);
+    // 扫过 MFT 后数据位置按源上的偏移给出
+    let root: FileListPage = serde_json::from_value(
+        engine
+            .call(
+                LIST_FILES,
+                json!({"jobId": "b1", "partition": RANGE_PARTITION_BASE, "offset": 0, "limit": 100}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let position = root.entries[1].position.unwrap();
+    assert!(position > disk.ntfs.0 && position < disk.ntfs.0 + disk.ntfs.1);
+    engine.call(CANCEL, json!({"jobId": "b1"})).unwrap();
+    engine.notifications_until(CANCELLED);
+    assert!(engine.wait_exit().success());
+
+    // 复制：按位置打开的分区不核对分区表；没标明时按表核对，表里没有就拒绝
+    let partition = json!({"number": RANGE_PARTITION_BASE, "offset": ntfs.offset,
+                           "length": ntfs.length, "outsideTable": true, "backupBoot": ntfs.backup_boot});
+    let items = json!([{"file": report.file, "path": ["report.bin"]}]);
+    let mut refused = Engine::start();
+    let error = refused
+        .call(
+            COPY_FILES,
+            json!({"jobId": "copy-x", "source": source, "outputDir": dir,
+                   "partition": {"number": RANGE_PARTITION_BASE, "offset": ntfs.offset, "length": ntfs.length},
+                   "items": items}),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, error_code::FS_UNAVAILABLE);
+    refused.close_input();
+    assert!(refused.wait_exit().success());
+
+    let mut copier = Engine::start();
+    copier
+        .call(
+            COPY_FILES,
+            json!({"jobId": "copy-lost", "source": source, "outputDir": dir,
+                   "partition": partition, "items": items}),
+        )
+        .unwrap();
+    let notifications = copier.notifications_until(COMPLETED);
+    let summary: CopySummary =
+        serde_json::from_value(notifications.last().unwrap().1["result"].clone()).unwrap();
+    assert_eq!((summary.files, summary.failed), (1, 0));
+    assert_eq!(
+        std::fs::read(dir.join("restored-copy-los").join("report.bin")).unwrap(),
+        disk.report
+    );
+    assert!(copier.wait_exit().success());
+}
+
+#[test]
+fn partition_search_pauses_and_resumes() {
+    use yisi_engine::protocol::{SEARCH_PARTITIONS, SearchSummary};
+
+    // 1 GiB 的空白镜像（只设长度，不写内容）：暂停请求到达时还远没搜完
+    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-search-pause.img");
+    std::fs::File::create(&path)
+        .unwrap()
+        .set_len(1 << 30)
+        .unwrap();
+    let source = json!({"type": "image", "path": path, "sectorSize": 512});
+    let started = Instant::now();
+    let mut engine = Engine::start();
+    engine
+        .call(SEARCH_PARTITIONS, json!({"jobId": "sp", "source": source}))
+        .unwrap();
+    engine.call(PAUSE, json!({"jobId": "sp"})).unwrap();
+    engine.notifications_for(Duration::from_millis(300));
+    let quiet = engine.notifications_for(Duration::from_millis(1200));
+    assert!(
+        quiet
+            .iter()
+            .all(|(method, _)| method != PROGRESS && method != COMPLETED),
+        "暂停后仍有进度或已完成：{quiet:?}"
+    );
+    engine.call(RESUME, json!({"jobId": "sp"})).unwrap();
+    let notifications = engine.notifications_until(COMPLETED);
+    let wall_ms = started.elapsed().as_millis() as u64;
+    let summary: SearchSummary =
+        serde_json::from_value(notifications.last().unwrap().1["result"].clone()).unwrap();
+    assert!(summary.candidates.is_empty());
+    assert!(
+        summary.elapsed_ms + 1000 < wall_ms,
+        "用时 {} ms 应扣掉暂停的约 1.5 秒（总共 {wall_ms} ms）",
+        summary.elapsed_ms
+    );
+    assert!(engine.wait_exit().success());
+    let _ = std::fs::remove_file(&path);
+}

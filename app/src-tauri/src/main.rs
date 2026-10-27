@@ -10,6 +10,7 @@ mod shell;
 use serde::Serialize;
 use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Manager, State};
+use yisi_engine::protocol::PartitionInfo;
 use yisi_engine::protocol::{
     BrowseOpened, Capabilities, CopyItem, DiskList, ExtractItem, FileListPage, FilePreview,
     FileTypeList, PartitionRef, ScanResult,
@@ -115,7 +116,7 @@ fn job_cancel(engines: State<'_, Engines>, job_id: String) -> Result<(), HostErr
     engines.cancel(&job_id)
 }
 
-/// 暂停或继续任务；目前只有深度恢复的扫描可以暂停。
+/// 暂停或继续任务；目前只有深度恢复的扫描与丢失分区搜索可以暂停。
 #[tauri::command(async)]
 fn job_set_paused(
     engines: State<'_, Engines>,
@@ -241,6 +242,30 @@ fn browse_cancel_scan(
     engines.cancel_scan(job_id, partition)
 }
 
+/// 搜索丢失的分区（只读，可以暂停）。源为物理磁盘时与读取扫描一样，第一次需要时提权启动磁盘代理。
+#[tauri::command(async)]
+fn job_start_partition_search(
+    app: AppHandle,
+    engines: State<'_, Engines>,
+    broker: State<'_, BrokerSession>,
+    job_id: String,
+    target: Target,
+) -> Result<(), HostError> {
+    engines.start_partition_search(app, &broker, job_id, target)
+}
+
+/// 在浏览会话里按位置打开搜索找到的分区；答复的编号之后用于 `browse_list` 等命令。
+#[tauri::command(async)]
+fn browse_open_range(
+    engines: State<'_, Engines>,
+    job_id: String,
+    offset: u64,
+    length: u64,
+    backup_boot: Option<u64>,
+) -> Result<PartitionInfo, HostError> {
+    engines.open_range(job_id, offset, length, backup_boot)
+}
+
 /// 把浏览中选中的项复制到另一块盘（另存为）。不给输出目录时是为打开而复制：存到程序目录下的 `open-cache`，
 /// 同时在后台清掉以前的副本。
 #[tauri::command(async)]
@@ -330,6 +355,8 @@ fn main() -> anyhow::Result<()> {
             browse_preview,
             browse_scan,
             browse_cancel_scan,
+            job_start_partition_search,
+            browse_open_range,
             job_start_copy,
             copied_open,
             copied_reveal,

@@ -1,5 +1,7 @@
 //! 管理引擎进程：每个任务一个引擎，经 stdin / stdout 走 JSON-RPC；引擎的通知转成界面事件。
 
+mod partitions;
+
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -553,7 +555,7 @@ impl Engines {
         started
     }
 
-    /// 暂停或继续任务（目前只有深度恢复的扫描可以暂停）。
+    /// 暂停或继续任务（目前只有深度恢复的扫描与丢失分区搜索可以暂停）。
     pub fn set_paused(&self, job_id: &str, paused: bool) -> Result<(), HostError> {
         let params = serde_json::to_value(JobRef {
             job_id: job_id.to_owned(),

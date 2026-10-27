@@ -25,6 +25,8 @@
     "allow-browse-preview",
     "allow-browse-scan",
     "allow-browse-cancel-scan",
+    "allow-job-start-partition-search",
+    "allow-browse-open-range",
     "allow-job-start-copy",
     "allow-copied-open",
     "allow-copied-reveal",

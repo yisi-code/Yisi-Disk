@@ -1,7 +1,7 @@
 /** 首页按问题导航：有哪些功能、哪些问题、每个问题按什么顺序推荐哪些功能。文案在 features.* 与 problems.* 下 */
 
 /** 能进入的功能页；没有对应页面的功能还在开发中 */
-export type FeatureView = 'undelete' | 'carve' | 'badSectors' | 'image'
+export type FeatureView = 'undelete' | 'carve' | 'badSectors' | 'image' | 'findPartitions'
 
 export type FeatureKey = FeatureView | 'findPartitions' | 'repairPartition' | 'fsCheck'
 
@@ -11,7 +11,7 @@ export const FEATURE_VIEWS: Record<FeatureKey, FeatureView | null> = {
   carve: 'carve',
   badSectors: 'badSectors',
   image: 'image',
-  findPartitions: null,
+  findPartitions: 'findPartitions',
   repairPartition: null,
   fsCheck: null,
 }
