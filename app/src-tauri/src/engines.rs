@@ -28,6 +28,10 @@ use yisi_engine::protocol::{
 
 use yisi_engine::protocol::{BootCopy, BootDiagnosis, DIAGNOSE_BOOT, DiagnoseBootParams};
 
+mod fs_check;
+
+pub use fs_check::save_report as save_fs_check_report;
+
 use crate::broker::BrokerSession;
 use yisi_rpc::{ErrorObject, FrameError, Id, Message, Request, read_message, write_message};
 
@@ -579,7 +583,7 @@ impl Engines {
         started
     }
 
-    /// 暂停或继续任务（目前只有深度恢复的扫描与丢失分区搜索可以暂停）。
+    /// 暂停或继续任务（目前深度恢复的扫描、丢失分区搜索与文件系统检查可以暂停）。
     pub fn set_paused(&self, job_id: &str, paused: bool) -> Result<(), HostError> {
         let params = serde_json::to_value(JobRef {
             job_id: job_id.to_owned(),

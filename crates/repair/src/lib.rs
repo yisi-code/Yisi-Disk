@@ -5,6 +5,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 pub mod boot;
+pub mod check;
 #[cfg(any(test, feature = "test-samples"))]
 pub mod samples;
 pub mod search;

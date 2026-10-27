@@ -8,8 +8,10 @@ export type FeatureView =
   | 'image'
   | 'findPartitions'
   | 'repairPartition'
+  | 'fsCheck'
 
-export type FeatureKey = FeatureView | 'findPartitions' | 'fsCheck'
+/** 功能的标识；全部功能都已有页面时与 FeatureView 相同 */
+export type FeatureKey = FeatureView
 
 /** 每个功能进入哪个功能页；null 表示还在开发中 */
 export const FEATURE_VIEWS: Record<FeatureKey, FeatureView | null> = {
@@ -19,7 +21,7 @@ export const FEATURE_VIEWS: Record<FeatureKey, FeatureView | null> = {
   image: 'image',
   findPartitions: 'findPartitions',
   repairPartition: 'repairPartition',
-  fsCheck: null,
+  fsCheck: 'fsCheck',
 }
 
 /** 「全部功能」页的顺序：能用的在前 */
@@ -28,8 +30,8 @@ export const ALL_FEATURES: FeatureKey[] = [
   'carve',
   'badSectors',
   'image',
-  'repairPartition',
   'findPartitions',
+  'repairPartition',
   'fsCheck',
 ]
 
