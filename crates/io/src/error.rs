@@ -36,7 +36,7 @@ pub enum IoError {
     #[error("扇区大小 {0} 不受支持，应为 512 到 65536 之间的 2 的幂")]
     InvalidSectorSize(u32),
 
-    #[error("无法查询 {} 所在的磁盘", .path.display())]
+    #[error("无法查询 {} 所在的卷或磁盘", .path.display())]
     Locate {
         path: PathBuf,
         #[source]
