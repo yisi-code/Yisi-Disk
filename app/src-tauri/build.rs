@@ -9,6 +9,7 @@ fn main() {
         "job_start_disk_scan",
         "job_start_carve",
         "job_cancel",
+        "job_set_paused",
         "recovered_preview",
         "recovered_open",
         "recovered_open_with",

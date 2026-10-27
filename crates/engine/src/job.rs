@@ -1,9 +1,9 @@
-//! 任务：在独立线程里运行，可取消、进度节流；panic 在任务边界捕获并转成失败。
+//! 任务：在独立线程里运行，可取消、可暂停（任务自己在检查点等待）、进度节流；panic 在任务边界捕获并转成失败。
 
 use std::any::Any;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -26,6 +26,8 @@ pub enum JobOutcome {
 pub struct RunningJob {
     id: String,
     cancel: Arc<AtomicBool>,
+    pause: Arc<PauseGate>,
+    pausable: bool,
 }
 
 impl RunningJob {
@@ -33,9 +35,53 @@ impl RunningJob {
         &self.id
     }
 
-    /// 请求取消；任务在下一个检查点结束。
+    /// 请求取消；任务在下一个检查点结束。暂停中的任务也会被放行，好让它看到取消。
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
+        self.pause.wake();
+    }
+
+    /// 标明这个任务会在检查点调用 [`JobContext::wait_while_paused`]，可以暂停。
+    pub fn pausable(mut self) -> Self {
+        self.pausable = true;
+        self
+    }
+
+    pub fn is_pausable(&self) -> bool {
+        self.pausable
+    }
+
+    /// 暂停或继续；任务在下一个检查点停下，继续后接着做。
+    pub fn set_paused(&self, paused: bool) {
+        let mut state = self.pause.lock();
+        state.paused = paused;
+        drop(state);
+        self.pause.changed.notify_all();
+    }
+}
+
+/// 暂停闸门：暂停时任务在检查点等着，继续或取消时放行；记下累计暂停了多久，报告用时时扣掉。
+#[derive(Default)]
+struct PauseGate {
+    state: Mutex<PauseState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct PauseState {
+    paused: bool,
+    paused_total: Duration,
+}
+
+impl PauseGate {
+    fn lock(&self) -> MutexGuard<'_, PauseState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// 先拿锁再通知：等待方在锁内查过取消标志才睡下，这样不会漏掉这次唤醒。
+    fn wake(&self) {
+        drop(self.lock());
+        self.changed.notify_all();
     }
 }
 
@@ -43,6 +89,7 @@ pub struct JobContext {
     id: String,
     outbox: Arc<Outbox>,
     cancel: Arc<AtomicBool>,
+    pause: Arc<PauseGate>,
     progress: ProgressSender,
 }
 
@@ -97,6 +144,28 @@ impl JobContext {
         self.cancel.load(Ordering::Relaxed)
     }
 
+    /// 暂停中就在这里等，直到继续或取消；没暂停时立即返回。
+    pub fn wait_while_paused(&self) {
+        let mut state = self.pause.lock();
+        if !state.paused {
+            return;
+        }
+        let since = Instant::now();
+        while state.paused && !self.is_cancelled() {
+            state = self
+                .pause
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        state.paused_total += since.elapsed();
+    }
+
+    /// 到目前为止累计暂停的时长。
+    pub fn paused_total(&self) -> Duration {
+        self.pause.lock().paused_total
+    }
+
     /// 报告进度。距上次不足 [`PROGRESS_INTERVAL`] 时丢弃，但完成那一次（`done == total`）总会发出。
     pub fn progress(&self, done: u64, total: u64) {
         self.progress.send(None, done, total);
@@ -115,11 +184,13 @@ where
     D: FnOnce() + Send + 'static,
 {
     let cancel = Arc::new(AtomicBool::new(false));
+    let pause = Arc::new(PauseGate::default());
     let context = JobContext {
         id: id.clone(),
         progress: ProgressSender::new(id.clone(), Arc::clone(&outbox)),
         outbox,
         cancel: Arc::clone(&cancel),
+        pause: Arc::clone(&pause),
     };
     thread::spawn(move || {
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| work(&context)));
@@ -140,7 +211,12 @@ where
         }
         on_finished();
     });
-    RunningJob { id, cancel }
+    RunningJob {
+        id,
+        cancel,
+        pause,
+        pausable: false,
+    }
 }
 
 fn panic_message(payload: &(dyn Any + Send)) -> String {
@@ -242,6 +318,66 @@ mod tests {
             (method.as_str(), &params["message"]),
             (FAILED, &Value::from("打不开"))
         );
+    }
+
+    /// 任务每轮过一次暂停闸门，把轮数发回来；`stop` 置位后结束。
+    fn start_counting_job() -> (RunningJob, mpsc::Receiver<u32>, Arc<AtomicBool>) {
+        let outbox = Arc::new(Outbox::new(SharedBuffer::default()));
+        let (rounds, received) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let should_stop = Arc::clone(&stop);
+        let running = start(
+            "j1".to_owned(),
+            outbox,
+            move |context| {
+                let mut round = 0;
+                while !should_stop.load(Ordering::Relaxed) {
+                    context.wait_while_paused();
+                    if context.is_cancelled() {
+                        return Ok(JobOutcome::Cancelled);
+                    }
+                    round += 1;
+                    let _ = rounds.send(round);
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Ok(JobOutcome::Completed(Value::Null))
+            },
+            || {},
+        );
+        (running, received, stop)
+    }
+
+    #[test]
+    fn paused_job_waits_until_resumed() {
+        let (running, rounds, stop) = start_counting_job();
+        rounds.recv_timeout(Duration::from_secs(5)).unwrap();
+        running.set_paused(true);
+        // 已经过了闸门的那一轮可能还会发出来，之后就停住
+        thread::sleep(Duration::from_millis(50));
+        while rounds.try_recv().is_ok() {}
+        assert!(
+            rounds.recv_timeout(Duration::from_millis(200)).is_err(),
+            "暂停后不应再有新的一轮"
+        );
+        running.set_paused(false);
+        rounds.recv_timeout(Duration::from_secs(5)).unwrap();
+        stop.store(true, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn cancel_releases_a_paused_job() {
+        let (running, rounds, _stop) = start_counting_job();
+        rounds.recv_timeout(Duration::from_secs(5)).unwrap();
+        running.set_paused(true);
+        thread::sleep(Duration::from_millis(50));
+        while rounds.try_recv().is_ok() {}
+        running.cancel();
+        // 任务退出后发送端被丢弃，通道断开；还停在闸门上的话这里会超时
+        match rounds.recv_timeout(Duration::from_secs(5)) {
+            Ok(_) => panic!("取消后不应再有新的一轮"),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!("取消没能放行暂停中的任务"),
+        }
     }
 
     #[test]

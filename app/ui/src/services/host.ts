@@ -366,6 +366,11 @@ export function cancelJob(jobId: string): Promise<void> {
   return invoke<void>('job_cancel', { jobId })
 }
 
+/** 暂停或继续任务；目前只有深度恢复的扫描可以暂停 */
+export function setJobPaused(jobId: string, paused: boolean): Promise<void> {
+  return invoke<void>('job_set_paused', { jobId, paused })
+}
+
 /** 深度恢复找到的文件按任务 ID 加文件名指定：宿主只认恢复时起的文件名，不接受其他路径 */
 export function previewRecoveredFile(jobId: string, name: string): Promise<FilePreview> {
   return invoke<FilePreview>('recovered_preview', { jobId, name })

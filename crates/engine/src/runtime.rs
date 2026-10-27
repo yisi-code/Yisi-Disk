@@ -14,9 +14,9 @@ use yisi_engine::protocol::{
     self, BROWSE_OPEN, BrowseParams, CANCEL, CANCEL_SCAN, CAPABILITIES, CARVE_EXTRACT, CARVE_START,
     COPY_FILES, Capabilities, CarveParams, CarveStarted, CopyParams, CopyStarted, ExtractParams,
     HEARTBEAT, HEARTBEAT_INTERVAL, IMAGE_CREATE, IMAGE_RESUME, ImageParams, JobRef, LIST_DISKS,
-    LIST_FILE_TYPES, LIST_FILES, ListFilesParams, PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE,
-    PreviewFsParams, PreviewParams, PreviewRangeParams, READ_SCAN, ReadScanParams, SCAN_DELETED,
-    ScanParams, Source,
+    LIST_FILE_TYPES, LIST_FILES, ListFilesParams, PAUSE, PREVIEW_FILE, PREVIEW_FS_FILE,
+    PREVIEW_RANGE, PreviewFsParams, PreviewParams, PreviewRangeParams, READ_SCAN, RESUME,
+    ReadScanParams, SCAN_DELETED, ScanParams, Source,
 };
 #[cfg(windows)]
 use yisi_engine::protocol::{DiskList, DiskSummary};
@@ -177,6 +177,8 @@ fn dispatch_now(
             let mut methods = vec![
                 READ_SCAN.to_owned(),
                 CANCEL.to_owned(),
+                PAUSE.to_owned(),
+                RESUME.to_owned(),
                 LIST_FILE_TYPES.to_owned(),
                 CARVE_START.to_owned(),
                 PREVIEW_FILE.to_owned(),
@@ -261,23 +263,26 @@ fn dispatch_now(
                 output_dir: output_dir.as_ref().map(|dir| dir.display().to_string()),
             };
             let finished = events.clone();
-            state.job = Some(job::start(
-                params.job_id,
-                Arc::clone(outbox),
-                move |context| {
-                    carve_job::run(
-                        device.as_ref(),
-                        &registry,
-                        enabled,
-                        sink.as_mut(),
-                        output_dir.as_deref(),
-                        context,
-                    )
-                },
-                move || {
-                    let _ = finished.send(Event::JobFinished);
-                },
-            ));
+            state.job = Some(
+                job::start(
+                    params.job_id,
+                    Arc::clone(outbox),
+                    move |context| {
+                        carve_job::run(
+                            device.as_ref(),
+                            &registry,
+                            enabled,
+                            sink.as_mut(),
+                            output_dir.as_deref(),
+                            context,
+                        )
+                    },
+                    move || {
+                        let _ = finished.send(Event::JobFinished);
+                    },
+                )
+                .pausable(),
+            );
             to_result(&started)
         }
         CARVE_EXTRACT => {
@@ -438,6 +443,25 @@ fn dispatch_now(
             match &state.job {
                 Some(running) if running.id() == job_id => {
                     running.cancel();
+                    Ok(json!({}))
+                }
+                _ => Err(ErrorObject::new(
+                    protocol::error_code::JOB_NOT_FOUND,
+                    format!("没有正在运行的任务 {job_id}"),
+                )),
+            }
+        }
+        PAUSE | RESUME => {
+            let JobRef { job_id } = request.params()?;
+            match &state.job {
+                Some(running) if running.id() == job_id => {
+                    if !running.is_pausable() {
+                        return Err(ErrorObject::new(
+                            error_code::INVALID_PARAMS,
+                            format!("任务 {job_id} 不能暂停"),
+                        ));
+                    }
+                    running.set_paused(request.method == PAUSE);
                     Ok(json!({}))
                 }
                 _ => Err(ErrorObject::new(

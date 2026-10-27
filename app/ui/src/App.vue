@@ -289,8 +289,11 @@ function closeFeature() {
   border-left-color: var(--color-accent);
 }
 
+/* 纵向排列，向导的结果页能铺满剩下的高度（wizard.css 的 .wizard--fill） */
 .app-main {
+  display: flex;
   flex: 1;
+  flex-direction: column;
   min-width: 0;
   overflow: auto;
   padding: var(--space-lg);

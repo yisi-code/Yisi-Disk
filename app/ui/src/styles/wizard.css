@@ -8,6 +8,19 @@
   border-radius: var(--radius-card);
 }
 
+/* 结果页铺满窗口高度：向导、表单与通向文件区的各层一路 flex: 1，列表框与详情框分到剩下的高度；
+   内容更多时不压缩，整页照常滚动 */
+.wizard--fill {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+}
+
+.wizard--fill .wizard__form,
+.wizard--fill .wizard__fill {
+  flex: 1 0 auto;
+}
+
 .wizard__header {
   display: flex;
   align-items: center;

@@ -2,6 +2,7 @@
 import { computed, ref, shallowRef, useId, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useHostErrorText } from '../composables/useHostErrorText'
+import { useVisibleRows } from '../composables/useVisibleRows'
 import { listFiles, toHostError, type FsEntry, type HostError } from '../services/host'
 import { formatBytes } from '../utils/format'
 
@@ -44,7 +45,8 @@ type TreeRow = EntryRow | StatusRow
 
 const ROOT_ID = 'root'
 const ROW_HEIGHT = 28
-const VIEWPORT_ROWS = 16
+/** 列表框至少这么多行高；更高时由所在布局拉伸，跟着窗口变 */
+const MIN_ROWS = 10
 const OVERSCAN = 6
 /** 每次向引擎要这么多项 */
 const PAGE_SIZE = 1000
@@ -74,6 +76,7 @@ const expandedIds = ref(new Set<string>())
 const activeId = ref<string | null>(null)
 const scrollTop = ref(0)
 const viewport = ref<HTMLElement | null>(null)
+const rowsInView = useVisibleRows(viewport, ROW_HEIGHT, MIN_ROWS)
 /** 换分区或重新打开时作废旧请求 */
 let generation = 0
 
@@ -87,7 +90,7 @@ const activeIndex = computed(() => rows.value.findIndex((row) => row.id === acti
 
 const visibleRows = computed(() => {
   const first = Math.max(0, Math.floor(scrollTop.value / ROW_HEIGHT) - OVERSCAN)
-  const last = Math.min(rows.value.length, first + VIEWPORT_ROWS + OVERSCAN * 2)
+  const last = Math.min(rows.value.length, first + rowsInView.value + OVERSCAN * 2)
   return rows.value.slice(first, last).map((row, offset) => ({ row, index: first + offset }))
 })
 
@@ -283,10 +286,10 @@ function handleKeydown(event: KeyboardEvent) {
       moveTo(activeIndex.value < 0 ? 0 : activeIndex.value - 1)
       break
     case 'PageDown':
-      moveTo(activeIndex.value + VIEWPORT_ROWS)
+      moveTo(activeIndex.value + rowsInView.value)
       break
     case 'PageUp':
-      moveTo(activeIndex.value - VIEWPORT_ROWS)
+      moveTo(activeIndex.value - rowsInView.value)
       break
     case 'Home':
       moveTo(0)
@@ -403,7 +406,7 @@ function withShownName(entry: FsEntry): FsEntry {
       tabindex="0"
       :aria-labelledby="`${domPrefix}-title`"
       :aria-activedescendant="activeDomId"
-      :style="{ height: `${VIEWPORT_ROWS * ROW_HEIGHT}px` }"
+      :style="{ minHeight: `${MIN_ROWS * ROW_HEIGHT}px` }"
       @scroll="handleScroll"
       @keydown="handleKeydown"
     >
@@ -495,9 +498,11 @@ function withShownName(entry: FsEntry): FsEntry {
   min-width: 0;
 }
 
+/* 高度不按内容撑开（内容可能有十万行）：至少 MIN_ROWS 行，其余由所在布局拉伸 */
 .fs-browser__viewport {
   position: relative;
   overflow-y: auto;
+  contain: size;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-card);
 }

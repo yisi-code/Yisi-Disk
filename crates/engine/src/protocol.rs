@@ -12,6 +12,11 @@ pub const CAPABILITIES: &str = "engine.capabilities";
 pub const READ_SCAN: &str = "disk.readScan";
 /// 取消任务：参数 [`JobRef`]。
 pub const CANCEL: &str = "job.cancel";
+/// 暂停任务：参数 [`JobRef`]，立即返回空对象，任务在下一个检查点停下，不再读盘。
+/// 目前只有深度恢复（[`CARVE_START`]）可以暂停，其他任务答复 `INVALID_PARAMS`。暂停的时长不计入报告的用时。
+pub const PAUSE: &str = "job.pause";
+/// 继续暂停的任务：参数 [`JobRef`]，立即返回空对象。没暂停时什么也不做。
+pub const RESUME: &str = "job.resume";
 /// 列出物理磁盘：没有参数，结果是 [`DiskList`]。只查询设备属性、不读磁盘内容，不需要管理员权限；目前只在 Windows 上提供。
 pub const LIST_DISKS: &str = "disk.list";
 /// 列出深度恢复支持的格式：没有参数，结果是 [`FileTypeList`]。

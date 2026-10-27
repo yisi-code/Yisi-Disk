@@ -4,7 +4,6 @@
   flex-direction: column;
   gap: var(--space-lg);
   width: 100%;
-  max-width: 880px;
 }
 
 .guide-page__header {
@@ -58,9 +57,10 @@
   list-style: none;
 }
 
+/* 按窗口宽度排两到四列 */
 .guide-page__cards--grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
   gap: var(--space-md);
 }
 

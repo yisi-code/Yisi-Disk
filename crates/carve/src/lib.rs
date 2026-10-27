@@ -43,6 +43,7 @@ pub struct CarveOptions {
 
 /// 扫描过程中查询取消、报告进度与找到的文件。
 pub trait CarveControl {
+    /// 每处理一块查询一次。实现可以在这里阻塞（暂停），这时识别停下，读线程预读满队列后也停下。
     fn is_cancelled(&self) -> bool;
     fn progress(&self, done: u64, total: u64);
     fn found(&self, file: &RecoveredFile);
