@@ -5,6 +5,7 @@ import FsBrowser, { type TreeItem } from './FsBrowser.vue'
 import FsEntryDetails from './FsEntryDetails.vue'
 import JobControls from './JobControls.vue'
 import FailureList from './FailureList.vue'
+import ReadHealthHint from './ReadHealthHint.vue'
 import { useCopy } from '../composables/useCopy'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { useHostDialog } from '../composables/useHostDialog'
@@ -303,6 +304,11 @@ async function revealOutput() {
         :max="copy.total.value || 1"
       ></progress>
       <p class="wizard__status">{{ copyStatusText }}</p>
+      <ReadHealthHint
+        :health="copy.readHealth.value"
+        :source-is-disk="source.kind === 'disk'"
+        context="scan"
+      />
       <p v-if="copy.failure.value" class="wizard__error" role="alert">
         {{ formatHostError(copy.failure.value) }}
       </p>

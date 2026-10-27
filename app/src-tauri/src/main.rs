@@ -5,20 +5,24 @@
 
 mod broker;
 mod engines;
+mod image_history;
 mod shell;
 
 use serde::Serialize;
 use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Manager, State};
 use yisi_engine::protocol::PartitionInfo;
-use yisi_engine::protocol::{BootCopy, BootDiagnosis};
+use yisi_engine::protocol::{BootCopy, BootDiagnosis, ImageDescription, ImageInspection};
 use yisi_engine::protocol::{
     BrowseOpened, Capabilities, CopyItem, DiskList, ExtractItem, FileListPage, FilePreview,
     FileTypeList, PartitionRef, ScanResult,
 };
 
 use crate::broker::BrokerSession;
-use crate::engines::{Engines, HostError, Target, refuse_executable, save_fs_check_report};
+use crate::engines::{
+    Engines, HostError, ImagePlan, Target, refuse_executable, save_fs_check_report,
+};
+use crate::image_history::{ImageHistory, ImageRecord};
 
 #[derive(Serialize)]
 struct AppInfo {
@@ -322,18 +326,125 @@ fn copied_reveal(
         .map_err(|error| HostError::new("openFailed", error.to_string()))
 }
 
-/// 制作能识别坏区的镜像；`resume` 时按同一路径的坏区图续做。物理磁盘与读取扫描一样，第一次需要时提权启动代理。
+/// 制作能识别坏区的镜像；`resume` 时按同一路径的坏区图续做，`plan` 指定只读哪些范围、只做复制这一轮、先重做哪些范围。
+/// 物理磁盘与读取扫描一样，第一次需要时提权启动代理。开始后把镜像记进做过的镜像列表（`source_label` 是界面给的来源描述）。
+#[expect(clippy::too_many_arguments, reason = "与界面命令的参数一一对应")]
 #[tauri::command(async)]
 fn job_start_image(
     app: AppHandle,
     engines: State<'_, Engines>,
     broker: State<'_, BrokerSession>,
+    history: State<'_, ImageHistory>,
     job_id: String,
     target: Target,
     image_path: String,
     resume: bool,
+    plan: Option<ImagePlan>,
+    source_label: Option<String>,
 ) -> Result<(), HostError> {
-    engines.start_image(app, &broker, job_id, target, image_path, resume)
+    let started = engines.start_image(
+        app,
+        &broker,
+        job_id,
+        target.clone(),
+        image_path,
+        resume,
+        plan.unwrap_or_default(),
+    )?;
+    let recorded = history.record(ImageRecord {
+        image_path: started.image_path,
+        target,
+        source_identity: started.source_identity,
+        source_label: source_label.unwrap_or_default(),
+        size: started.size,
+        used_at_ms: 0,
+    });
+    // 记不下来不影响做镜像，下次只是不能从列表里选
+    if let Err(error) = recorded {
+        tracing::warn!(?error, "没能记下做过的镜像");
+    }
+    Ok(())
+}
+
+/// 做镜像之前看一眼源与镜像（只读）：源上的分区、输出位置、已有镜像能不能续做、源变没变。物理磁盘第一次需要时弹出 UAC。
+#[tauri::command(async)]
+fn image_inspect(
+    engines: State<'_, Engines>,
+    broker: State<'_, BrokerSession>,
+    target: Target,
+    image_path: String,
+) -> Result<ImageInspection, HostError> {
+    engines.inspect_image(&broker, target, image_path)
+}
+
+/// 做过的镜像，各带现在的状态（还在不在、做到哪了）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImageHistoryItem {
+    record: ImageRecord,
+    status: ImageDescription,
+}
+
+#[tauri::command(async)]
+fn image_history_list(
+    engines: State<'_, Engines>,
+    history: State<'_, ImageHistory>,
+) -> Result<Vec<ImageHistoryItem>, HostError> {
+    let records = history.records();
+    if records.is_empty() {
+        return Ok(Vec::new());
+    }
+    let paths = records
+        .iter()
+        .map(|record| record.image_path.clone())
+        .collect();
+    let described = engines.describe_images(paths)?;
+    Ok(records
+        .into_iter()
+        .zip(described.images)
+        .map(|(record, status)| ImageHistoryItem { record, status })
+        .collect())
+}
+
+/// 从做过的镜像列表移除（不删除文件）。
+#[tauri::command(async)]
+fn image_history_remove(
+    history: State<'_, ImageHistory>,
+    image_path: String,
+) -> Result<(), HostError> {
+    history.remove(&image_path)
+}
+
+/// 镜像被移走了：用户重新指定的位置上要有同名的坏区图，而且记的来源与容量与原来一致，才改记录。
+#[tauri::command(async)]
+fn image_history_relocate(
+    engines: State<'_, Engines>,
+    history: State<'_, ImageHistory>,
+    image_path: String,
+    new_path: String,
+) -> Result<ImageHistoryItem, HostError> {
+    let record = history
+        .find(&image_path)
+        .ok_or_else(|| HostError::new("imageRecordNotFound", image_path.clone()))?;
+    let status = engines
+        .describe_images(vec![new_path.clone()])?
+        .images
+        .into_iter()
+        .next()
+        .ok_or_else(|| HostError::new("engineProtocol", "没有答复"))?;
+    if status.state != "ok" {
+        return Err(HostError::new("imageRelocateInvalid", status.state));
+    }
+    if status.source_identity.as_deref() != Some(record.source_identity.as_str())
+        || status.size != Some(record.size)
+    {
+        return Err(HostError::new(
+            "imageRelocateMismatch",
+            status.source_identity.unwrap_or_default(),
+        ));
+    }
+    let record = history.relocate(&image_path, &new_path)?;
+    Ok(ImageHistoryItem { record, status })
 }
 
 /// 检查文件系统（只读）。物理磁盘与读取扫描一样，第一次需要时提权启动代理。
@@ -364,6 +475,17 @@ fn main() -> anyhow::Result<()> {
         .plugin(tauri_plugin_dialog::init())
         .manage(Engines::default())
         .manage(BrokerSession::default())
+        .setup(|app| {
+            let file = app
+                .path()
+                .app_data_dir()
+                .map(|dir| dir.join("image-history.json"));
+            if let Err(error) = &file {
+                tracing::warn!(%error, "查不到程序数据目录，不记做过的镜像");
+            }
+            app.manage(ImageHistory::new(file.ok()));
+            Ok(())
+        })
         // 页面开始（重新）加载时，旧页面发起的任务已经没人管了：全部取消，引擎随之退出
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {
@@ -398,6 +520,10 @@ fn main() -> anyhow::Result<()> {
             copied_open,
             copied_reveal,
             job_start_image,
+            image_inspect,
+            image_history_list,
+            image_history_remove,
+            image_history_relocate,
             boot_diagnose,
             job_start_fs_check,
             fs_check_save_report

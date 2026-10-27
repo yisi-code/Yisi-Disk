@@ -204,6 +204,18 @@ const enUS: typeof zhCN = {
     failed: 'Cannot connect to host: {reason}',
     version: 'Version {version}',
   },
+  engineStatus: {
+    checking: 'Checking the engine…',
+    idle: 'Engine ready',
+    session: 'Engine has the source open, waiting',
+    paused: 'Paused',
+    running: 'Engine running',
+    starting: 'Starting the engine…',
+    cancelling: 'Stopping…',
+    unresponsive: 'Engine not responding',
+    unavailable: 'Engine unavailable',
+    unavailableWithReason: 'Engine unavailable: {reason}',
+  },
   badSectors: {
     intro:
       'Reads a whole disk or image file from start to end and records the areas that cannot be read. It is read-only and does not change the disk; it does not repair bad sectors or recover files, but tells you whether the disk can still be read safely.',
@@ -239,17 +251,119 @@ const enUS: typeof zhCN = {
   },
   diskImage: {
     intro:
-      'Copies a whole disk or image file byte for byte into an image file; the source is only read, never changed. Healthy areas are read first and bad areas are revisited bit by bit at the end; unreadable areas are recorded in a bad sector map. Recover from the image afterwards instead of reading the failing disk again and again.',
+      'Copies a whole disk or image file byte for byte into an image file; the source is only read, never changed. Healthy areas are read first and bad areas are revisited bit by bit at the end; unreadable areas are recorded in a bad sector map. You can image the whole disk in one go, or do the important partitions first and finish the rest later. Recover from the image afterwards instead of reading the failing disk again and again.',
     guide: {
       title: 'How it works',
       copy: 'Copy: reads in 1 MiB blocks from start to end. When an area cannot be read, a stretch is skipped (the skip doubles on consecutive errors) so the healthy areas are read first; the skipped parts are then read back from the other end.',
       trimScrape:
         'Trim and scrape: goes back to the blocks that failed, reads sector by sector inwards from both edges, then reads what is left in the middle one sector at a time to rescue as much as possible. Sectors that still cannot be read are marked bad.',
       map: 'Bad sector map: a text file with the image name plus .map that records which ranges were read and which could not be. Unreadable areas are zeros in the image, not real data.',
-      resume:
-        'You can stop at any time; progress is saved to the map every few seconds. Later, "Continue" with the same image path skips everything already read. If the disk disconnects midway, imaging stops on its own instead of marking the rest as bad.',
+      parts:
+        'In several runs: pick a few partitions (or the space outside partitions) to do first. Finished ones are marked "Done" in the list; later pick the rest and continue, or redo a finished one. With "Copy healthy areas first" only the copy pass runs and bad areas are left for later, which saves most of the data first when the disk may get worse at any moment.',
       space:
-        'Save the image to another disk with free space of at least the source size (reserved up front); FAT32 disks cannot hold files larger than 4 GiB.',
+        'Save the image to another disk. On an NTFS disk the image is a sparse file that only takes up what has been read, and free space is checked against what this run may write; on FAT32 or exFAT the full source size is reserved up front and only whole-disk imaging in order is possible, and FAT32 cannot hold files larger than 4 GiB.',
+    },
+    resumeRules: {
+      title: 'When an image can be continued',
+      files:
+        'The image file and its bad sector map (same name plus .map) must both exist side by side: move or rename them together (the map is named after the image file plus .map). If they were moved, use "Locate…" under "Previous images".',
+      sameSource:
+        'The source must be the same: a physical disk is recognized by vendor, model and serial number, so another USB port or a new disk number does not matter; size and sector size must be unchanged.',
+      noWrites:
+        'Do not write to the source between runs (do not open, tidy up or repair it in the system). When the same image is chosen again, the partition table is compared and copied areas are spot-checked; if the source changed, the changes are listed and you choose to redo the changed parts, keep the old content and continue, or start a new image.',
+      ntfs: 'To image partition by partition in several runs, keep the image on an NTFS disk; images made by older versions or kept on FAT32 or exFAT can only be continued as a whole disk.',
+      crash:
+        'If the program is closed, power fails or the disk disconnects: copied data is written to the image before the map is saved, so at most the last few seconds of progress are lost and nothing already written is damaged. Come back, choose the same image and continue.',
+    },
+    history: {
+      title: 'Previous images',
+      hint: 'Images are added here when imaging starts. "Use" fills in the path and the original source; "Remove from list" only deletes the entry, not the image file.',
+      source: 'Source: {source}',
+      savedAt: 'last saved {time}',
+      done: 'Finished ({size}, {bad} unreadable)',
+      partial: '{read} of {size} read, {left} not finished',
+      state: {
+        missing: 'Not found: neither the image nor its map is where it was (deleted or moved?)',
+        imageMissing: 'The image file is gone and only the map is left; if it was moved, locate it again',
+        mapMissing: 'The bad sector map (.map) is gone, so it cannot be continued; move the .map together with the image',
+        mapUnreadable: 'The bad sector map cannot be read (it may be damaged), so it cannot be continued',
+      },
+      use: 'Use',
+      relocate: 'Locate…',
+      relocateTitle: 'Choose where the image file is now (its .map must be next to it)',
+      remove: 'Remove from list',
+      removeHint: 'Only removes the entry; the image file is kept',
+      diskLabel: '{name} · {size}',
+      diskMissing: 'The original disk ({source}) is not connected now. Connect it and click "Use" again, or choose the source below by hand.',
+    },
+    inspect: {
+      loading: 'Checking the image location…',
+      loadingDisk: 'Reading the partition table and checking the image location (reading a physical disk asks for administrator rights the first time)…',
+      outputUnknown: 'Could not query the disk holding the image location ({reason})',
+    },
+    existing: {
+      title: 'An image already exists here',
+      ok: 'It can be continued: {read} of {size} read, {bad} unreadable, {left} not finished.',
+      imageMissing:
+        'Only the bad sector map is here, without the image file, so it cannot be continued. If the image was moved, locate it under "Previous images", or use another file name for a new image.',
+      mapMissing:
+        'A file with this name exists but has no bad sector map (.map) next to it, so it is unknown what was read and it cannot be continued. Use another file name for a new image.',
+      mapUnreadable: 'The bad sector map here cannot be read (it may be damaged), so it cannot be continued. Use another file name for a new image.',
+      otherSource:
+        'The image here was made from another source (or the source size or sector size changed), so it cannot be continued. Check the source, or use another file name for a new image.',
+      lengthMismatch:
+        'The image file length does not match the source size (it may have been truncated or changed), so it cannot be continued. Use another file name for a new image.',
+      noSnapshot: 'This image was made by an older version that did not record the partition table, so only spot checks can tell whether the source changed.',
+      choosePlace: 'Choose another location',
+    },
+    changes: {
+      title: 'The source changed since it was last imaged:',
+      where: '{size} at {offset}',
+      added: 'New partition {number} ({after})',
+      removed: 'Partition {number} is gone (was {before})',
+      moved: 'Partition {number} moved or changed size (was {before}, now {after})',
+      mismatched: '{region}: {count} spot check differs from the image; this area was written after imaging (e.g. files were added, deleted or changed) | {region}: {count} spot checks differ from the image; this area was written after imaging (e.g. files were added, deleted or changed)',
+      question: 'What should happen?',
+      redo: 'Redo the changed parts (recommended)',
+      redoHint: 'Clears the progress of the changed partitions and differing areas so they are read again; the image then matches the source as it is now.',
+      keep: 'Keep the old content and continue',
+      keepHint: 'Copied areas are not read again, so the image mixes content from before and after the change. Only choose this if the change does not matter.',
+      newImage: 'New image…',
+      newImageHint: 'Keeps the old image as it is and starts a fresh one at another location.',
+    },
+    scope: {
+      title: '③ What to copy',
+      whole: 'Whole disk ({size})',
+      select: 'Only the selected partitions (several allowed, finish in several runs)',
+      notSparse:
+        'The disk holding the image is {fileSystem}, which has no sparse files, so only whole-disk imaging in order is possible; to image by partition, keep the image on an NTFS disk.',
+      oldImage: 'This image is a regular file made by an older version, so it can only be continued as a whole disk; to image by partition, start a new image at another location.',
+      outputUnknown: 'Could not tell whether the disk holding the image supports sparse files, so only whole-disk imaging is possible.',
+      noRegions: 'The partition table could not be read, so there are no partitions to choose; image the whole disk.',
+      tableAreas: 'The small areas holding the partition table ({size} in total) are always read as well, so partitions can be recognized in the image later.',
+      redoSelected: 'Clear the progress of the selected parts and read them again',
+      redoWhole: 'Clear all progress and read the whole disk again',
+      redoHint: 'Use this to redo finished parts; without it, areas already read are not read again.',
+      copyOnly: 'Copy healthy areas first',
+      copyOnlyHint:
+        'Runs only the copy pass: blocks that fail (about 1 MiB around each bad spot) and skipped stretches are left for later, saving most of the data first when the disk may get worse at any moment. Run again without this option afterwards to read the rest.',
+      space: 'This run may write up to {needed}; the disk holding the image has {free} free.',
+      spaceWhole: 'The image reserves the full source size of {size}; the disk holding the image has {free} free.',
+      nothingToDo: 'The selected parts are already finished; to redo them, tick "Clear the progress of the selected parts".',
+    },
+    regions: {
+      caption: 'Partitions and space outside partitions on the source',
+      choose: 'Select',
+      name: 'Partition',
+      status: 'Progress',
+      untouched: 'Not started',
+      partial: '{percent}% copied',
+      partialPending: '{percent}% copied, {pending} near bad areas left to scrape',
+      done: 'Done',
+      doneWithBad: 'Done ({bad} unreadable)',
+      checked: '{count} spot check matches the source | {count} spot checks match the source',
+      changed: '{count} of {checked} spot checks differs from the source | {count} of {checked} spot checks differ from the source',
+      checkUnreadable: '{count} spot check could not be read on the source | {count} spot checks could not be read on the source',
     },
     diskHint:
       'Reading a physical disk needs administrator rights. It is read-only and does not change the disk; a disk with bad sectors reads slowly, and you can stop and continue later.',
@@ -263,16 +377,14 @@ const enUS: typeof zhCN = {
       label: 'Save image as',
       placeholder: 'Full path of the new image file, e.g. F:/images/disk1.img',
       pickTitle: 'Choose a folder for the image',
-      hint: 'A new image file the same size as the source is created here, with a bad sector map next to it (same name plus .map) recording which areas could not be read. "Choose folder…" fills in a file name for you; you can also edit the path. If an image already exists here, you can choose to continue it.',
+      hint: 'A new image file is created here, with a bad sector map next to it (same name plus .map) recording which areas were read and which could not be. "Choose folder…" fills in a file name for you; you can also edit the path. If an image already exists here, its progress is shown and you can continue it.',
       diskHint: 'The image must be saved on another disk: writing to the disk being read would overwrite data not yet rescued. This is checked again when imaging starts.',
     },
     start: 'Start imaging',
     stop: 'Stop (can continue later)',
     stopping: 'Stopping…',
     continue: 'Continue imaging',
-    continueHint: 'Progress is saved in the bad sector map; "Continue imaging" picks up where it stopped (if the source disconnected, check the connection first): {path}',
-    exists: 'An image or bad sector map already exists here. If it is an unfinished image of the same source, you can continue it; otherwise choose another file name.',
-    resumeExisting: 'Continue the existing image',
+    continueHint: 'Progress is saved in the bad sector map; "Continue imaging" picks up where it stopped with the same selection (if the source disconnected, check the connection first): {path}',
     unresponsive: 'The engine has not responded for over 10 seconds (a single read can take that long on bad areas)',
     round: {
       copy: 'Pass 1 · Copy',
@@ -285,7 +397,7 @@ const enUS: typeof zhCN = {
       stopping: 'Stopping and saving the bad sector map…',
       stopped: 'Stopped; progress is saved in the bad sector map',
       sourceLost: 'The source can no longer be read (it may have disconnected), so imaging stopped; unread areas were not marked bad',
-      completed: 'Image complete',
+      completed: 'Imaging run complete',
       failed: 'Imaging failed',
     },
     run: {
@@ -303,19 +415,36 @@ const enUS: typeof zhCN = {
       remainingHours: 'About {hours} h {minutes} min',
     },
     result: {
-      clean: 'Image complete with no unreadable areas',
-      found: 'Image complete; {bytes} could not be read',
+      clean: 'This run is complete with no unreadable areas',
+      found: 'This run is complete; {bytes} could not be read',
       read: 'Read',
       bad: 'Unreadable ranges',
       badValue: '{count} range, {bytes} in total | {count} ranges, {bytes} in total',
+      device: 'Whole disk',
+      deviceValue: '{read} of {size} read, {left} not finished',
       elapsed: 'Time this run',
       imagePath: 'Image file',
       mapPath: 'Bad sector map',
+      copyOnlyLeft:
+        'Healthy areas are copied. {left} (failed blocks and skipped stretches) is left for later: run again without "Copy healthy areas first" to read it.',
+      partialLeft: 'The selected parts are finished. Parts of the disk are still not imaged: choose the same image later and select other partitions to continue.',
       moreRanges: 'Showing the first {shown} of {count} ranges; the bad sector map lists all of them.',
       truncated: 'Too many unreadable ranges: only the first {count} are shown here; the bad sector map lists all of them.',
       next: 'Next: in "Recover deleted files" or "Deep recovery by file type", choose "Image file" and enter {path} to recover from the image.',
       nextBad: 'Unreadable areas are zeros in the image, so files lying in them will be incomplete.',
     },
+  },
+  readHealth: {
+    damaged: 'Damaged areas found: {errors} reads failed and {slow} reads took over 2 seconds (the disk kept retrying internally).',
+    stuck: 'The current read has not finished for {seconds} seconds; it has most likely hit a bad sector that the disk keeps retrying.',
+    scattered:
+      'Reading is slow because the data is scattered (recent reads average only {size}, mostly small or fragmented files). The disk shows no errors, so this is normal; imaging first would not make it much faster.',
+    slowDevice:
+      'This disk itself reads slowly (about {rate}/s recently) but shows no errors. For a single pass there is no need to image it first; if you will scan it again, image it to an internal disk with "Create a disk image" first and later passes will be much faster.',
+    adviceImage:
+      'Continuing on this disk will stall on the bad areas every time and may make the damage worse. Stop and use "Create a disk image" to copy the disk to another disk first (you can copy the healthy areas first), then run this step on the image.',
+    adviceBadSectors:
+      'This is what the bad sector check looks for. Before recovering data from this disk, use "Create a disk image" to copy it first and work on the image, touching the bad areas as little as possible.',
   },
   disk: {
     legend: 'Choose a disk',
@@ -466,6 +595,7 @@ const enUS: typeof zhCN = {
     hexTitle: 'First {bytes} of the file',
   },
   partition: {
+    gap: 'Unpartitioned space ({size})',
     line: 'Partition {number}{label} ({filesystem}, {size})',
     fs: {
       fat12: 'FAT12',
@@ -1224,6 +1354,10 @@ const enUS: typeof zhCN = {
     scanStillRunning: 'Wait until scanning or saving finishes before opening an unsaved file',
     imageExists: 'An image or bad sector map already exists at this location',
     imageMismatch: 'The existing bad sector map belongs to another source or is damaged, so it cannot be continued',
+    imageRecordNotFound: 'This image is no longer in the list (it may have been removed)',
+    imageRelocateInvalid: 'The chosen file cannot be used as this image: its bad sector map (same name plus .map) must be next to it and readable',
+    imageRelocateMismatch: 'The chosen image was made from another source (source or size differs), so the entry was not changed',
+    historyUnavailable: 'Could not save the list of previous images',
     invalidReportPath: 'The problem list can only be saved as a .txt file',
   },
 }

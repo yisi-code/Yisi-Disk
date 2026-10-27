@@ -224,6 +224,16 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* 只给读屏软件读的文字（例如表格里选择框那一列的列名） */
+.wizard__visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .wizard__nav {
   display: flex;
   align-items: center;

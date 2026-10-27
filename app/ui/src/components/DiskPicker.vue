@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useHostErrorText } from '../composables/useHostErrorText'
+import { usePartitionText } from '../composables/usePartitionText'
 import { listDisks, toHostError, type DiskSummary, type HostError } from '../services/host'
 import { formatBytes } from '../utils/format'
 
@@ -10,6 +11,7 @@ const selectedDisk = defineModel<number | null>({ required: true })
 
 const { t, te } = useI18n()
 const { formatHostError } = useHostErrorText()
+const { diskName } = usePartitionText()
 
 const disks = ref<DiskSummary[]>([])
 const isLoading = ref(false)
@@ -31,11 +33,6 @@ async function refreshDisks() {
   } finally {
     isLoading.value = false
   }
-}
-
-function diskName(disk: DiskSummary): string {
-  const name = [disk.vendor, disk.model].filter((part) => part !== '').join(' ')
-  return name === '' ? t('disk.unnamed') : name
 }
 
 function busLabel(disk: DiskSummary): string {

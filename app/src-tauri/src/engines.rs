@@ -1,5 +1,6 @@
 //! 管理引擎进程：每个任务一个引擎，经 stdin / stdout 走 JSON-RPC；引擎的通知转成界面事件。
 
+mod image;
 mod partitions;
 
 use std::collections::HashMap;
@@ -20,11 +21,11 @@ use yisi_engine::protocol::{
     BROWSE_OPEN, BrowseOpened, BrowseParams, CANCEL, CANCEL_SCAN, CANCELLED, CAPABILITIES,
     CARVE_EXTRACT, CARVE_START, COMPLETED, COPIED, COPY_FILES, Capabilities, CarveParams,
     CarveStarted, CopyItem, CopyParams, CopyStarted, DiskList, ExtractItem, ExtractParams, FAILED,
-    FOUND, FileListPage, FilePreview, FileTypeList, HEARTBEAT, IMAGE_CREATE, IMAGE_RESUME, IMAGING,
-    ImageParams, JobRef, LIST_DISKS, LIST_FILE_TYPES, LIST_FILES, LOG, ListFilesParams,
-    PARTIAL_SUFFIX, PAUSE, PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS, PartitionRef,
-    PreviewFsParams, PreviewParams, PreviewRangeParams, READ_SCAN, RESUME, ReadScanParams,
-    SCAN_DELETED, ScanParams, ScanResult, Source, error_code,
+    FOUND, FileListPage, FilePreview, FileTypeList, HEARTBEAT, IMAGING, JobRef, LIST_DISKS,
+    LIST_FILE_TYPES, LIST_FILES, LOG, ListFilesParams, PARTIAL_SUFFIX, PAUSE, PREVIEW_FILE,
+    PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS, PartitionRef, PreviewFsParams, PreviewParams,
+    PreviewRangeParams, READ_SCAN, READING, RESUME, ReadScanParams, SCAN_DELETED, ScanParams,
+    ScanResult, Source, error_code,
 };
 
 use yisi_engine::protocol::{BootCopy, BootDiagnosis, DIAGNOSE_BOOT, DiagnoseBootParams};
@@ -32,6 +33,7 @@ use yisi_engine::protocol::{BootCopy, BootDiagnosis, DIAGNOSE_BOOT, DiagnoseBoot
 mod fs_check;
 
 pub use fs_check::save_report as save_fs_check_report;
+pub use image::ImagePlan;
 
 use crate::broker::BrokerSession;
 use yisi_rpc::{ErrorObject, FrameError, Id, Message, Request, read_message, write_message};
@@ -72,7 +74,7 @@ impl HostError {
 }
 
 /// 界面选定的源：镜像文件，或按编号指定的物理磁盘。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Target {
     Image {
@@ -94,7 +96,8 @@ impl Target {
     }
 }
 
-/// 发给界面的任务事件。`kind` 为 progress、found、copied、imaging、log、completed、failed、cancelled、unresponsive、responsive。
+/// 发给界面的任务事件。`kind` 为 progress、found、copied、imaging、reading、log、completed、failed、cancelled、
+/// unresponsive、responsive。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobEvent {
@@ -470,30 +473,6 @@ impl Engines {
         Ok(())
     }
 
-    /// 制作镜像（`resume` 时按坏区图续做）。源为物理磁盘时，引擎在开始前核对镜像不在这块盘上（`outputOnSource`）；
-    /// 新建时镜像或坏区图已存在答复 `imageExists`，续做时坏区图对不上答复 `imageMismatch`。
-    pub fn start_image(
-        &self,
-        app: AppHandle,
-        broker: &BrokerSession,
-        job_id: String,
-        target: Target,
-        image_path: String,
-        resume: bool,
-    ) -> Result<(), HostError> {
-        target.validate()?;
-        let method = if resume { IMAGE_RESUME } else { IMAGE_CREATE };
-        let params_job_id = job_id.clone();
-        self.start_job(app, job_id, method, |engine_pid| {
-            to_params(&ImageParams {
-                job_id: params_job_id,
-                source: resolve_source(target, broker, engine_pid)?,
-                image_path,
-            })
-        })
-        .map(|_| ())
-    }
-
     /// 复制任务输出目录里的一个文件。`path` 是引擎报告的相对路径（以 `/` 分隔），规则见 [`file_in_output`]。
     pub fn copied_file(&self, job_id: &str, path: &str) -> Result<PathBuf, HostError> {
         file_in_output(&self.copied_dirs, job_id, path, false).map_err(|error| match error {
@@ -755,6 +734,7 @@ impl EngineProcess {
             FOUND => "found",
             COPIED => "copied",
             IMAGING => "imaging",
+            READING => "reading",
             LOG => "log",
             COMPLETED => "completed",
             FAILED => "failed",
