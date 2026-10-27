@@ -168,7 +168,7 @@ const saveStatusText = computed(() => {
         total: formatBytes(save.total.value),
         percent: save.percent.value,
         count: save.succeeded.value.length,
-      })
+      }, save.succeeded.value.length)
     case 'completed':
       return t('carve.save.status.completed')
     case 'failed':
@@ -770,7 +770,7 @@ function handleAdvancedToggle(event: Event) {
                     t('carve.run.report.filesValue', {
                       count: summary.files,
                       bytes: formatBytes(summary.bytes),
-                    })
+                    }, summary.files)
                   }}
                 </dd>
               </div>
@@ -869,7 +869,7 @@ function handleAdvancedToggle(event: Event) {
                 </p>
                 <template v-if="save.failures.value.length > 0">
                   <p class="wizard__error">
-                    {{ t('carve.save.failedCount', { count: save.failures.value.length }) }}
+                    {{ t('carve.save.failedCount', { count: save.failures.value.length }, save.failures.value.length) }}
                   </p>
                   <ul class="carve-wizard__failures">
                     <li v-for="failed in save.failures.value.slice(0, 20)" :key="failed.path">
@@ -883,7 +883,7 @@ function handleAdvancedToggle(event: Event) {
                       count: save.summary.value.files,
                       bytes: formatBytes(save.summary.value.bytes),
                       dir: save.summary.value.outputDir,
-                    })
+                    }, save.summary.value.files)
                   }}
                 </p>
               </template>

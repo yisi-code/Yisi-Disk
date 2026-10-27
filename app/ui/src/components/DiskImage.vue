@@ -365,7 +365,7 @@ function formatPosition(offset: number): string {
               t('diskImage.result.badValue', {
                 count: finishedSummary.badRanges.length,
                 bytes: formatBytes(finishedSummary.badBytes),
-              })
+              }, finishedSummary.badRanges.length)
             }}
           </dd>
           <dt>{{ t('diskImage.result.elapsed') }}</dt>

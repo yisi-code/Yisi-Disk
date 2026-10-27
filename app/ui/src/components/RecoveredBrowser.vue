@@ -475,7 +475,7 @@ function fileDetail(file: FoundFile): string {
                 t('carve.browser.groupTotals', {
                   count: row.group.files.length,
                   bytes: formatBytes(row.group.bytes),
-                })
+                }, row.group.files.length)
               }}
             </span>
           </template>
