@@ -16,7 +16,7 @@ use yisi_engine::protocol::{
 };
 
 use crate::broker::BrokerSession;
-use crate::engines::{Engines, HostError, Target, is_executable_type};
+use crate::engines::{Engines, HostError, Target, is_executable_type, save_fs_check_report};
 
 #[derive(Serialize)]
 struct AppInfo {
@@ -115,7 +115,7 @@ fn job_cancel(engines: State<'_, Engines>, job_id: String) -> Result<(), HostErr
     engines.cancel(&job_id)
 }
 
-/// 暂停或继续任务；目前只有深度恢复的扫描可以暂停。
+/// 暂停或继续任务；目前只有深度恢复的扫描与文件系统检查可以暂停。
 #[tauri::command(async)]
 fn job_set_paused(
     engines: State<'_, Engines>,
@@ -294,6 +294,26 @@ fn job_start_image(
     engines.start_image(app, &broker, job_id, target, image_path, resume)
 }
 
+/// 检查文件系统（只读）。物理磁盘与读取扫描一样，第一次需要时提权启动代理。
+#[tauri::command(async)]
+fn job_start_fs_check(
+    app: AppHandle,
+    engines: State<'_, Engines>,
+    broker: State<'_, BrokerSession>,
+    job_id: String,
+    target: Target,
+    partition: PartitionRef,
+) -> Result<(), HostError> {
+    engines.start_fs_check(app, &broker, job_id, target, partition)
+}
+
+/// 把检查出的问题清单存成文本文件（界面已按当前语言生成内容，路径来自另存为对话框）。
+/// 检查的是物理磁盘时，不能存到这块盘上（`outputOnSource`）。
+#[tauri::command(async)]
+fn fs_check_save_report(target: Target, path: String, text: String) -> Result<(), HostError> {
+    save_fs_check_report(&target, &path, &text)
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -333,7 +353,9 @@ fn main() -> anyhow::Result<()> {
             job_start_copy,
             copied_open,
             copied_reveal,
-            job_start_image
+            job_start_image,
+            job_start_fs_check,
+            fs_check_save_report
         ])
         .run(tauri::generate_context!())?;
     Ok(())

@@ -13,7 +13,8 @@ pub const READ_SCAN: &str = "disk.readScan";
 /// 取消任务：参数 [`JobRef`]。
 pub const CANCEL: &str = "job.cancel";
 /// 暂停任务：参数 [`JobRef`]，立即返回空对象，任务在下一个检查点停下，不再读盘。
-/// 目前只有深度恢复（[`CARVE_START`]）可以暂停，其他任务答复 `INVALID_PARAMS`。暂停的时长不计入报告的用时。
+/// 目前只有深度恢复（[`CARVE_START`]）与文件系统检查（[`FS_CHECK`]）可以暂停，其他任务答复 `INVALID_PARAMS`。
+/// 暂停的时长不计入报告的用时。
 pub const PAUSE: &str = "job.pause";
 /// 继续暂停的任务：参数 [`JobRef`]，立即返回空对象。没暂停时什么也不做。
 pub const RESUME: &str = "job.resume";
@@ -58,6 +59,10 @@ pub const IMAGE_CREATE: &str = "image.create";
 /// 按坏区图续做镜像（任务）：参数、答复、通知与结果同 [`IMAGE_CREATE`]。坏区图不存在、读不懂，
 /// 或者记录的容量、扇区大小、来源与当前的源不符时答复 [`error_code::IMAGE_MISMATCH`]。
 pub const IMAGE_RESUME: &str = "image.resume";
+/// 文件系统一致性检查（任务，只读）：参数 [`FsCheckParams`]，立即返回空对象；进度经 [`PROGRESS`] 按阶段送达
+/// （`stage` 见 [`FsCheckReport`]），结果是 [`FsCheckReport`]。可以暂停、取消。分区要在源的分区表里、偏移与长度都对得上，
+/// 否则答复 [`error_code::FS_UNAVAILABLE`]。只检查、不修复。
+pub const FS_CHECK: &str = "fs.check";
 
 /// 引擎每隔 [`HEARTBEAT_INTERVAL`] 发一次，没有参数。
 pub const HEARTBEAT: &str = "engine.heartbeat";
@@ -162,7 +167,8 @@ pub struct Progress {
     pub job_id: String,
     pub done: u64,
     pub total: u64,
-    /// 任务里的哪个阶段；只有一个阶段的任务不给。目前只有 `scanMft`（扫描 MFT，单位是字节）。
+    /// 任务里的哪个阶段；只有一个阶段的任务不给。浏览与复制是 `scanMft`（扫描 MFT，单位是字节），
+    /// 制作镜像是轮次，文件系统检查见 [`FsCheckReport`]。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage: Option<String>,
 }
@@ -619,6 +625,76 @@ pub struct ByteRange {
     pub length: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsCheckParams {
+    pub job_id: String,
+    pub source: Source,
+    /// 浏览时得到的分区编号、偏移与长度；引擎重新读分区表核对，对不上就拒绝。
+    pub partition: PartitionRef,
+}
+
+/// 文件系统检查的结果。进度的阶段（`stage`）依次是：`boot`（引导区）、`fat`（读一遍 FAT 或分配位图，单位是簇）、
+/// `directories`（遍历目录树，单位是已认领 / 已占用的簇）、`clusters`（逐簇汇总，单位是簇）；NTFS 是 `boot`、`mft`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsCheckReport {
+    /// fat12、fat16、fat32、exfat、ntfs、unknown（主、备引导扇区都认不出）之一。
+    pub filesystem: String,
+    pub cluster_size: u64,
+    pub cluster_count: u64,
+    /// FAT 或分配位图里记为已占用的簇数（NTFS 为 0）。
+    pub used_clusters: u64,
+    /// 遍历到的文件与目录数（不含根目录）。
+    pub files: u64,
+    pub directories: u64,
+    /// 按发现的顺序；最多 1000 项，名字很长时引擎会少给一些，保证一条消息不超过大小上限。
+    pub issues: Vec<FsIssue>,
+    /// 没有列出的问题数。
+    pub omitted_issues: u64,
+    /// 各严重程度的问题数，含没有列出的。
+    pub totals: FsIssueTotals,
+    /// 读不出的字节数（相同位置只算一次）。
+    pub unreadable_bytes: u64,
+    /// 做了的检查与没能做的检查：boot、backupBoot、bootChecksum、fatCopies、chains、entries、crossLinks、
+    /// lostClusters、bitmap、upcase、mft、mftMirror。
+    pub checked: Vec<String>,
+    pub skipped: Vec<String>,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsIssueTotals {
+    pub data_loss: u64,
+    pub structure: u64,
+    pub minor: u64,
+}
+
+/// 检查发现的一个问题。界面按 `kind` 给出说明与以后的修法；没用到的位置信息为空。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsIssue {
+    /// 问题的类型，如 chainLoop、crossLink、lostClusters、entrySetChecksum、bootChecksum、unreadable。
+    pub kind: String,
+    /// dataLoss（会丢数据）、structure（结构错误）、minor（可以忽略）之一。
+    pub severity: String,
+    /// 问题出在哪个结构上：boot、backupBoot、fsInfo、fat、bitmap、upcase、rootDir、directory、mft、mftMirror。
+    pub area: Option<String>,
+    /// 涉及的文件或目录，以 `/` 开头；`$Bitmap`、`$UpCase` 是 exFAT 的分配位图与大写表。
+    pub path: Option<String>,
+    /// 交叉链接的另一个文件。
+    pub other_path: Option<String>,
+    pub cluster: Option<u64>,
+    pub count: Option<u64>,
+    /// 在源上的字节偏移（读不出的区段）。
+    pub offset: Option<u64>,
+    pub expected: Option<u64>,
+    pub actual: Option<u64>,
+    /// 引导扇区里出问题的那一项，如 bytesPerSector。
+    pub field: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -638,5 +714,32 @@ mod tests {
             serde_json::to_value(&params).unwrap(),
             json!({"jobId": "j1", "source": {"type": "image", "path": "a.img", "sectorSize": 512}})
         );
+    }
+
+    #[test]
+    fn fs_check_wire_format() {
+        let params: FsCheckParams = serde_json::from_value(json!({
+            "jobId": "c1",
+            "source": {"type": "disk", "handle": 8},
+            "partition": {"number": 2, "offset": 1048576, "length": 4096}
+        }))
+        .unwrap();
+        assert_eq!(params.partition.number, 2);
+        let issue = FsIssue {
+            kind: "crossLink".to_owned(),
+            severity: "dataLoss".to_owned(),
+            area: None,
+            path: Some("/a".to_owned()),
+            other_path: Some("/b".to_owned()),
+            cluster: Some(7),
+            count: Some(1),
+            offset: None,
+            expected: None,
+            actual: None,
+            field: None,
+        };
+        let value = serde_json::to_value(&issue).unwrap();
+        assert_eq!(value["otherPath"], "/b");
+        assert_eq!(value["area"], Value::Null);
     }
 }

@@ -4877,6 +4877,7 @@ dependencies = [
  "tracing-subscriber",
  "yisi-broker",
  "yisi-engine",
+ "yisi-io",
  "yisi-rpc",
 ]
 
@@ -4918,6 +4919,7 @@ dependencies = [
  "yisi-fs",
  "yisi-io",
  "yisi-part",
+ "yisi-repair",
  "yisi-rpc",
 ]
 
@@ -4956,6 +4958,11 @@ dependencies = [
 [[package]]
 name = "yisi-repair"
 version = "0.1.0"
+dependencies = [
+ "yisi-fs",
+ "yisi-io",
+ "yisi-part",
+]
 
 [[package]]
 name = "yisi-rpc"
