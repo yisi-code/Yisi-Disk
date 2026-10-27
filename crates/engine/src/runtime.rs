@@ -740,11 +740,10 @@ fn volume_identity(guid: &str) -> String {
 /// 源是一个卷时，输出不能写到这个卷上（规则见 [`yisi_io::ensure_off_volume`]）。
 #[cfg(windows)]
 fn ensure_output_off_volume(letter: char, output: &Path) -> Result<(), ErrorObject> {
-    let query = |what: &'static str| move |source| yisi_io::IoError::Query { what, source };
     yisi_io::ensure_off_volume(
         letter,
-        yisi_io::volume_guid(yisi_io::volume_root(letter)).map_err(query("源卷")),
-        yisi_io::volume_guid(output).map_err(query("输出位置所在的卷")),
+        yisi_io::volume_guid(yisi_io::volume_root(letter)),
+        yisi_io::volume_guid(output),
     )
     .map_err(|error| ErrorObject::new(protocol::error_code::OUTPUT_ON_SOURCE, error_chain(&error)))
 }

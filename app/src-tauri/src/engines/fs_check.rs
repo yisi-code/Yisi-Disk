@@ -62,11 +62,10 @@ fn ensure_not_on_disk(target: &Target, file: &Path) -> Result<(), HostError> {
         }
         Target::Volume { letter } => {
             let letter = letter.chars().next().unwrap_or('?');
-            let query = |what: &'static str| move |source| yisi_io::IoError::Query { what, source };
             yisi_io::ensure_off_volume(
                 letter,
-                yisi_io::volume_guid(yisi_io::volume_root(letter)).map_err(query("源卷")),
-                yisi_io::volume_guid(file).map_err(query("输出位置所在的卷")),
+                yisi_io::volume_guid(yisi_io::volume_root(letter)),
+                yisi_io::volume_guid(file),
             )
         }
     };

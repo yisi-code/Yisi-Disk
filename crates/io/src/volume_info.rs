@@ -8,12 +8,11 @@ use std::path::Path;
 use std::ptr;
 
 use windows_sys::Win32::Storage::FileSystem::{
-    GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
-    GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
+    GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW, GetVolumePathNameW,
 };
 
 use crate::volume::{Existing, nearest_existing};
-use crate::{volume_disk_numbers, volume_root as root_of};
+use crate::{volume_disk_numbers, volume_guid, volume_root as root_of};
 
 /// `GetVolumeInformationW` 报告的文件系统标志：支持稀疏文件（`FILE_SUPPORTS_SPARSE_FILES`）。
 const SUPPORTS_SPARSE_FILES: u32 = 0x0000_0040;
@@ -67,20 +66,6 @@ fn volume_root(existing: &[u16]) -> io::Result<Vec<u16>> {
         return Err(io::Error::last_os_error());
     }
     Ok(root)
-}
-
-/// `path` 所在的卷的 GUID 名，如 `\\?\Volume{0a1b…}\`：同一个卷换了盘符、重新插拔也不变，用来认卷、比较两个路径在不在同一个卷上。
-pub fn volume_guid(path: impl AsRef<Path>) -> io::Result<String> {
-    let root = volume_root(&existing_dir(path.as_ref())?)?;
-    let mut name = vec![0u16; NAME_BUFFER];
-    // SAFETY: `root` 是以 0 结尾、以反斜杠结尾的卷根路径；`name` 的指针与长度来自独占借用的缓冲区。
-    let found = unsafe {
-        GetVolumeNameForVolumeMountPointW(root.as_ptr(), name.as_mut_ptr(), NAME_BUFFER as u32)
-    };
-    if found == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(until_nul(&name))
 }
 
 /// 查询 `path` 所在的卷。`path` 可以还不存在、也可以是已有的文件：取最近一级已存在的目录。
@@ -182,6 +167,38 @@ mod tests {
         let of_file = volume_info(&file);
         std::fs::remove_file(&file).unwrap();
         assert_eq!(of_file.unwrap().file_system, volume.file_system);
+    }
+
+    /// 坏区图里记的源卷标识就是卷的 GUID 名：从最终路径取的必须与按挂载点查的一字不差，
+    /// 否则续做以前的镜像时认不出源。只查系统盘与本仓库所在的卷。
+    #[test]
+    fn guid_matches_the_mount_point_name() {
+        use windows_sys::Win32::Storage::FileSystem::GetVolumeNameForVolumeMountPointW;
+
+        let system = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_owned());
+        let system_root = format!(r"{system}\");
+        for path in [
+            Path::new(&system_root),
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+        ] {
+            let root = volume_root(&existing_dir(path).unwrap()).unwrap();
+            let mut name = vec![0u16; NAME_BUFFER];
+            // SAFETY: `root` 是以 0 结尾、以反斜杠结尾的卷根路径；`name` 的指针与长度来自独占借用的缓冲区。
+            let found = unsafe {
+                GetVolumeNameForVolumeMountPointW(
+                    root.as_ptr(),
+                    name.as_mut_ptr(),
+                    NAME_BUFFER as u32,
+                )
+            };
+            assert_ne!(found, 0, "{}", io::Error::last_os_error());
+            assert_eq!(
+                volume_guid(path).unwrap(),
+                until_nul(&name),
+                "{}",
+                path.display()
+            );
+        }
     }
 
     #[test]

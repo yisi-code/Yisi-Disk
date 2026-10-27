@@ -43,9 +43,11 @@ pub use scan::{SCAN_BLOCK, ScanControl, scan_device};
 #[cfg(windows)]
 pub use sparse::{is_sparse, make_sparse};
 #[cfg(windows)]
-pub use volume::{OnSource, ensure_off_source, ensure_off_volume, volume_disk_numbers};
+pub use volume::{
+    OnSource, ensure_off_source, ensure_off_volume, volume_disk_numbers, volume_guid,
+};
 #[cfg(windows)]
-pub use volume_info::{MountedVolume, VolumeInfo, mounted_volumes, volume_guid, volume_info};
+pub use volume_info::{MountedVolume, VolumeInfo, mounted_volumes, volume_info};
 pub use window::Window;
 #[cfg(windows)]
 pub use windows_disk::WindowsDisk;

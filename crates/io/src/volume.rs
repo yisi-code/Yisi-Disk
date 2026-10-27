@@ -39,7 +39,7 @@ pub fn ensure_off_source(
     Ok(())
 }
 
-/// 源是一个卷（盘符 `letter`）时的判断：输出所在的卷（[`crate::volume_guid`] 的结果）不能就是它。
+/// 源是一个卷（盘符 `letter`）时的判断：输出所在的卷（[`volume_guid`] 的结果）不能就是它。
 /// 同一块盘上的别的卷可以：写在那里不会覆盖源卷的空闲空间。任何一项查不到都不通过。
 pub fn ensure_off_volume(
     letter: char,
@@ -68,38 +68,10 @@ pub enum OnSource {
 }
 
 /// `path` 所在的卷落在哪些物理磁盘上，编号与 `\\.\PhysicalDriveN` 的 N 相同；跨盘的卷会有多个。
-///
-/// `path` 可以还不存在：取最近一级已存在的文件或目录，打开它（随目录联接、符号链接走到真实位置），
-/// 再查它所在卷的磁盘区段。还不存在的那几级目录之后才创建，不会改变所在的卷。
-/// 网络路径、查不到磁盘区段的卷都返回错误。
+/// 卷怎么找见 [`locate_volume`]。网络路径、查不到磁盘区段的卷都返回错误。
 pub fn volume_disk_numbers(path: impl AsRef<Path>) -> Result<Vec<u32>, IoError> {
-    let path = path.as_ref();
-    let locate = |path: &Path, source| IoError::Locate {
-        path: path.to_path_buf(),
-        source,
-    };
-    let existing = nearest_existing(path, Existing::Any).map_err(|source| locate(path, source))?;
-    let open = |path: &Path, flags: u32| {
-        OpenOptions::new()
-            .access_mode(0)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-            .custom_flags(flags)
-            .open(path)
-            .map_err(|source| IoError::Open {
-                path: path.to_path_buf(),
-                source,
-            })
-    };
-    let directory = open(existing, FILE_FLAG_BACKUP_SEMANTICS)?;
-    let final_path = final_path_by_guid(&directory).map_err(|source| locate(existing, source))?;
-    let volume = volume_root(&final_path).ok_or_else(|| {
-        let shown = String::from_utf16_lossy(&final_path);
-        locate(
-            existing,
-            invalid_data(format!("不是卷的 GUID 路径：{shown}")),
-        )
-    })?;
-    let volume = open(&PathBuf::from(OsString::from_wide(volume)), 0)?;
+    let (existing, volume) = locate_volume(path.as_ref())?;
+    let volume = open_for_query(&PathBuf::from(OsString::from_wide(&volume)), 0)?;
 
     let mut extents = [0u8; EXTENTS_BUFFER_SIZE];
     let returned = ioctl(
@@ -111,6 +83,54 @@ pub fn volume_disk_numbers(path: impl AsRef<Path>) -> Result<Vec<u32>, IoError> 
     .map_err(|source| locate(existing, source))?;
     parse_disk_extents(extents.get(..returned).unwrap_or_default())
         .map_err(|source| locate(existing, source))
+}
+
+/// `path` 所在的卷的 GUID 名，如 `\\?\Volume{0a1b…}\`：同一个卷换了盘符、重新插拔也不变，用来认卷、
+/// 比较两个路径在不在同一个卷上。卷怎么找见 [`locate_volume`]，与 [`volume_disk_numbers`] 相同。
+pub fn volume_guid(path: impl AsRef<Path>) -> Result<String, IoError> {
+    let (_, volume) = locate_volume(path.as_ref())?;
+    let mut name = String::from_utf16_lossy(&volume);
+    name.push('\\');
+    Ok(name)
+}
+
+/// `path` 所在的卷 `\\?\Volume{…}`（不带结尾的反斜杠），以及实际打开查询的那一级路径。
+///
+/// `path` 可以还不存在：取最近一级已存在的文件或目录，打开它（随目录联接、符号链接走到真实位置），
+/// 从它的最终路径里取卷。还不存在的那几级目录之后才创建，不会改变所在的卷。
+/// 「输出不在源盘上」与「输出不在源卷上」两项检查都经这里，同一个路径不会落到两个不同的卷。
+fn locate_volume(path: &Path) -> Result<(&Path, Vec<u16>), IoError> {
+    let existing = nearest_existing(path, Existing::Any).map_err(|source| locate(path, source))?;
+    let opened = open_for_query(existing, FILE_FLAG_BACKUP_SEMANTICS)?;
+    let final_path = final_path_by_guid(&opened).map_err(|source| locate(existing, source))?;
+    let volume = volume_root(&final_path).ok_or_else(|| {
+        let shown = String::from_utf16_lossy(&final_path);
+        locate(
+            existing,
+            invalid_data(format!("不是卷的 GUID 路径：{shown}")),
+        )
+    })?;
+    Ok((existing, volume.to_vec()))
+}
+
+/// 以零访问权限打开，只查询属性、不读写内容。
+fn open_for_query(path: &Path, flags: u32) -> Result<File, IoError> {
+    OpenOptions::new()
+        .access_mode(0)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(flags)
+        .open(path)
+        .map_err(|source| IoError::Open {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+fn locate(path: &Path, source: io::Error) -> IoError {
+    IoError::Locate {
+        path: path.to_path_buf(),
+        source,
+    }
 }
 
 /// 往上找最近一级已存在的路径时，停在哪一种上。
@@ -261,9 +281,9 @@ mod tests {
     fn the_system_volume_has_a_guid_and_is_not_another_volume() {
         let system = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_owned());
         let root = format!(r"{system}\");
-        let guid = crate::volume_guid(&root).unwrap();
+        let guid = volume_guid(&root).unwrap();
         assert!(guid.starts_with(VOLUME_PREFIX), "{guid}");
-        let inside = crate::volume_guid(std::env::temp_dir());
+        let inside = volume_guid(std::env::temp_dir());
         assert!(inside.is_ok());
     }
 
