@@ -2,7 +2,7 @@
 
 use tauri::AppHandle;
 use yisi_engine::protocol::{
-    OPEN_RANGE, OpenRangeParams, PartitionInfo, SEARCH_PARTITIONS, SearchParams,
+    BootCopy, OPEN_RANGE, OpenRangeParams, PartitionInfo, SEARCH_PARTITIONS, SearchParams,
 };
 
 use super::{
@@ -38,13 +38,13 @@ impl Engines {
         job_id: String,
         offset: u64,
         length: u64,
-        backup_boot: Option<u64>,
+        boot: BootCopy,
     ) -> Result<PartitionInfo, HostError> {
         let params = to_params(&OpenRangeParams {
             job_id: job_id.clone(),
             offset,
             length,
-            backup_boot,
+            boot,
         })?;
         from_value(
             self.running(&job_id)?

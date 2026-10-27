@@ -6,8 +6,7 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
-pub mod backup;
-mod boot;
+pub mod boot;
 mod clusters;
 mod entry;
 mod exfat;
@@ -24,9 +23,10 @@ use std::sync::Arc;
 
 use yisi_io::{BlockDevice, IoError};
 
-pub use backup::BootCopy;
-pub use boot::{BootLayout, BootSector, inspect_boot};
+pub use boot::{BootCopy, BootLayout, BootSector, inspect_boot};
 pub use entry::{ClusterRef, Entry, FileRef, Listing, Location, State, Unsupported};
+/// FAT 短文件名的长文件名校验和与显示形式。文件系统检查（`yisi-repair`）用的也是这一份。
+pub use fat::{short_checksum as fat_short_checksum, short_display as fat_short_display};
 pub use reader::FileReader;
 
 use crate::region::Region;
@@ -145,10 +145,9 @@ pub fn detect_with(
 ) -> Result<FsKind, IoError> {
     match copy {
         BootCopy::Primary => detect(device, offset, length),
-        BootCopy::Backup => {
-            Ok(backup::read_backup(device, offset, length)?
-                .map_or(FsKind::Unknown, |(kind, _)| kind))
-        }
+        BootCopy::Backup => Ok(
+            boot::read_backup(device, offset, length)?.map_or(FsKind::Unknown, |(kind, _)| kind)
+        ),
     }
 }
 
@@ -188,7 +187,7 @@ impl Volume {
                 device.read_exact_at(offset, &mut sector)?;
                 (kind, sector)
             }
-            BootCopy::Backup => backup::read_backup(device.as_ref(), offset, length)?
+            BootCopy::Backup => boot::read_backup(device.as_ref(), offset, length)?
                 .ok_or(FsError::Invalid("没有找到有效的备份引导扇区"))?,
         };
         let region = Region::new(device, offset, length);

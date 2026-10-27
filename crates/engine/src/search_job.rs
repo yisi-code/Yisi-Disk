@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use yisi_engine::protocol::{FoundPartition, SearchSummary};
+use yisi_engine::protocol::{BootCopy, FoundPartition, SearchSummary};
 use yisi_io::BlockDevice;
 use yisi_part::Scheme;
 use yisi_repair::search::{self, FoundBy, Relation, SearchControl};
@@ -44,7 +44,10 @@ pub fn run(device: Arc<dyn BlockDevice>, context: &JobContext) -> Result<JobOutc
                         FoundBy::Both => "both",
                     }
                     .to_owned(),
-                    backup_boot: candidate.backup_boot,
+                    boot: match candidate.boot {
+                        yisi_fs::BootCopy::Primary => BootCopy::Primary,
+                        yisi_fs::BootCopy::Backup => BootCopy::Backup,
+                    },
                     truncated: candidate.truncated,
                     relation: relation.to_owned(),
                     table_partition,

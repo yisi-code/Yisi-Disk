@@ -2,11 +2,11 @@
 //! 比较主备之间哪些字段不一样，核对分区表里的类型、长度与引导扇区是否相符，给出结论。只读。
 //!
 //! 依据微软公开的 FAT 与 exFAT 规范；NTFS 依据公开的结构资料。备份的位置与 `yisi-fs` 打开卷时找的一致
-//! （[`yisi_fs::backup::backup_candidates`]），诊断说「备份可用」时就能用备份浏览。
+//! （[`yisi_fs::boot::backup_candidates`]），诊断说「备份可用」时就能用备份浏览。
 
 use std::sync::Arc;
 
-use yisi_fs::backup::{
+use yisi_fs::boot::{
     BackupFamily, Candidate, backup_candidates, backup_kind, exfat_boot_checksum,
     exfat_stored_checksum,
 };

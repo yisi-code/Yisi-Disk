@@ -540,9 +540,6 @@ pub struct PartitionRef {
     /// 按位置打开的分区（[`OPEN_RANGE`]）：不核对分区表，只核对范围在设备之内。
     #[serde(default)]
     pub outside_table: bool,
-    /// 按位置打开时给的备份引导扇区位置（[`OpenRangeParams::backup_boot`]）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backup_boot: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -630,8 +627,8 @@ pub struct FoundPartition {
     pub label: Option<String>,
     /// 靠哪个引导扇区找到：primary（分区开头的主引导扇区）、backup（主引导扇区已坏，靠备份）、both。
     pub found_by: String,
-    /// 只靠备份找到时，备份引导扇区在源上的位置；浏览、复制时原样传给 [`OPEN_RANGE`] 与 [`PartitionRef`]。
-    pub backup_boot: Option<u64>,
+    /// 浏览、复制时按哪一份引导扇区打开（只靠备份找到的为 backup）；原样传给 [`OPEN_RANGE`] 与 [`COPY_FILES`]。
+    pub boot: BootCopy,
     /// 卷超出了设备末尾，长度已截短。
     pub truncated: bool,
     /// 与现有分区表的关系：inTable（表里有起点相同的分区）、overlaps（与表里的分区部分重叠）、lost（丢失）。
@@ -651,9 +648,9 @@ pub struct OpenRangeParams {
     pub job_id: String,
     pub offset: u64,
     pub length: u64,
-    /// 主引导扇区已坏时，用这个位置的备份引导扇区代替（只在内存里替换，不写盘）。
+    /// 按哪一份引导扇区打开；搜索时只靠备份找到的分区用备份。
     #[serde(default)]
-    pub backup_boot: Option<u64>,
+    pub boot: BootCopy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -901,14 +898,14 @@ mod tests {
         let listed: PartitionRef =
             serde_json::from_value(json!({"number": 2, "offset": 1024, "length": 4096})).unwrap();
         assert!(!listed.outside_table);
-        assert_eq!(listed.backup_boot, None);
         let found: PartitionRef = serde_json::from_value(json!({
-            "number": RANGE_PARTITION_BASE, "offset": 1024, "length": 4096,
-            "outsideTable": true, "backupBoot": 7168
+            "number": RANGE_PARTITION_BASE, "offset": 1024, "length": 4096, "outsideTable": true
         }))
         .unwrap();
         assert!(found.outside_table);
-        assert_eq!(found.backup_boot, Some(7168));
+        let range: OpenRangeParams =
+            serde_json::from_value(json!({"jobId": "b1", "offset": 1024, "length": 4096})).unwrap();
+        assert_eq!(range.boot, BootCopy::Primary);
     }
 
     #[test]

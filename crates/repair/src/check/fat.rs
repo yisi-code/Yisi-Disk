@@ -1,6 +1,7 @@
 //! FAT12 / FAT16 / FAT32 的检查：引导扇区、备份引导扇区与 FSInfo、两份 FAT 是否一致、
 //! 目录树（长文件名的校验和与序号、`.` 与 `..`）、每个文件的 FAT 链、丢失簇。依据微软公开的 FAT 规范。
 
+use yisi_fs::{fat_short_checksum as short_checksum, fat_short_display};
 use yisi_part::bytes::{le16, le32};
 
 use crate::check::chains::{Layout, MAX_DEPTH, Volume};
@@ -14,8 +15,6 @@ const ATTR_LFN: u8 = 0x0F;
 const ATTR_VOLUME_ID: u8 = 0x08;
 const ATTR_DIRECTORY: u8 = 0x10;
 const DELETED: u8 = 0xE5;
-/// 名字首字节确实是 0xE5 时，目录项里存的是 0x05。
-const KANJI_E5: u8 = 0x05;
 /// 长文件名最多 20 段（255 个字符）。
 const MAX_LFN_PARTS: usize = 20;
 /// 比对两份 FAT 时每次读这么多。
@@ -583,7 +582,7 @@ impl FatChecker {
             if attr & ATTR_VOLUME_ID != 0 || attr & 0xC0 != 0 {
                 continue;
             }
-            let short_name = short_display(&short, raw[12]);
+            let short_name = fat_short_display(&short, raw[12]).0;
             let long = if parts.is_empty() {
                 None
             } else {
@@ -730,75 +729,10 @@ impl FatChecker {
     }
 }
 
-/// 短文件名（11 字节）的校验和，长文件名的每一段都记着它。
-fn short_checksum(short: &[u8; 11]) -> u8 {
-    short
-        .iter()
-        .fold(0u8, |sum, &byte| sum.rotate_right(1).wrapping_add(byte))
-}
-
-/// 8.3 名字显示成 `NAME.EXT`，按大小写标记（第 12 字节）转小写；非 ASCII 字节显示为 `_`。
-fn short_display(short: &[u8; 11], case_flags: u8) -> String {
-    let part = |bytes: &[u8], lower: bool| -> String {
-        let length = bytes
-            .iter()
-            .rposition(|&byte| byte != b' ')
-            .map_or(0, |end| end + 1);
-        bytes
-            .iter()
-            .take(length)
-            .enumerate()
-            .map(|(index, &byte)| {
-                let byte = if index == 0 && byte == KANJI_E5 {
-                    DELETED
-                } else {
-                    byte
-                };
-                if !byte.is_ascii_graphic() && byte != b' ' {
-                    '_'
-                } else if lower {
-                    char::from(byte.to_ascii_lowercase())
-                } else {
-                    char::from(byte)
-                }
-            })
-            .collect()
-    };
-    let (base, ext) = short.split_at(8);
-    let base = part(base, case_flags & 0x08 != 0);
-    let ext = part(ext, case_flags & 0x10 != 0);
-    if ext.is_empty() {
-        base
-    } else {
-        format!("{base}.{ext}")
-    }
-}
-
 pub(crate) fn join(dir: &str, name: &str) -> String {
     if dir.ends_with('/') {
         format!("{dir}{name}")
     } else {
         format!("{dir}/{name}")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn short_checksum_matches_the_specification() {
-        let short = *b"FOO     BAR";
-        let mut sum = 0u8;
-        for byte in short {
-            sum = ((sum & 1) << 7).wrapping_add(sum >> 1).wrapping_add(byte);
-        }
-        assert_eq!(short_checksum(&short), sum);
-    }
-
-    #[test]
-    fn short_names_respect_case_flags() {
-        assert_eq!(short_display(b"README  TXT", 0x08), "readme.TXT");
-        assert_eq!(short_display(b"NOEXT      ", 0), "NOEXT");
     }
 }

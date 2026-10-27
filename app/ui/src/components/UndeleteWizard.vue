@@ -2,10 +2,12 @@
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import PartitionFiles from './PartitionFiles.vue'
+import PartitionPicker from './PartitionPicker.vue'
 import SourcePicker from './SourcePicker.vue'
 import { useBrowse } from '../composables/useBrowse'
 import { useHostErrorText } from '../composables/useHostErrorText'
-import type { JobTarget, PartitionInfo, PartitionRef } from '../services/host'
+import { usePartitionText } from '../composables/usePartitionText'
+import type { JobTarget, PartitionRef } from '../services/host'
 import { formatBytes } from '../utils/format'
 
 const STEPS = ['source', 'partition', 'browse'] as const
@@ -13,8 +15,9 @@ type WizardStep = (typeof STEPS)[number]
 
 const emit = defineEmits<{ exit: [] }>()
 
-const { t, te, locale } = useI18n()
+const { t, locale } = useI18n()
 const { formatHostError } = useHostErrorText()
+const { filesystemName, tableNote, sourceName, unbrowsableReason } = usePartitionText()
 const browse = useBrowse()
 
 const titleElement = ref<HTMLHeadingElement | null>(null)
@@ -82,15 +85,7 @@ const scanStatusText = computed(() =>
     : t('undelete.scan.starting'),
 )
 
-const sourceText = computed(() => {
-  const current = browse.target.value
-  if (current === null) {
-    return ''
-  }
-  return current.kind === 'image'
-    ? t('undelete.sourceImage', { path: current.path })
-    : t('undelete.sourceDisk', { number: current.diskNumber })
-})
+const sourceText = computed(() => sourceName(browse.target.value))
 
 const openingText = computed(() =>
   target.value?.kind === 'disk' ? t('undelete.openingDisk') : t('undelete.opening'),
@@ -156,30 +151,6 @@ async function openSource() {
       partitions.value.find((partition) => partition.browsable)?.number ?? null
     step.value = 'partition'
   }
-}
-
-function partitionRole(partition: PartitionInfo): string {
-  const key = `partition.role.${partition.role ?? ''}`
-  if (partition.role !== null && te(key)) {
-    return t(key)
-  }
-  return partition.typeId === '' ? '-' : partition.typeId
-}
-
-function partitionFs(partition: PartitionInfo): string {
-  const key = `partition.fs.${partition.filesystem}`
-  return te(key) ? t(key) : partition.filesystem
-}
-
-/** 不能浏览的原因；文件系统认得出、却打不开时按「参数不对」说 */
-function unsupportedReason(partition: PartitionInfo): string {
-  const key = `undelete.partition.reason.${partition.filesystem}`
-  return te(key) ? t(key) : t('undelete.partition.reason.invalid')
-}
-
-function noteText(note: string): string {
-  const key = `undelete.notes.${note}`
-  return te(key) ? t(key) : note
 }
 </script>
 
@@ -262,55 +233,16 @@ function noteText(note: string): string {
           }}
         </p>
         <ul v-if="browse.opened.value?.notes.length" class="undelete-wizard__notes">
-          <li v-for="note in browse.opened.value.notes" :key="note">{{ noteText(note) }}</li>
+          <li v-for="note in browse.opened.value.notes" :key="note">{{ tableNote(note) }}</li>
         </ul>
-        <table class="wizard__table undelete-wizard__partitions">
-          <caption class="wizard__caption">{{ t('undelete.partition.caption') }}</caption>
-          <thead>
-            <tr>
-              <th scope="col"><span class="undelete-wizard__visually-hidden">{{ t('undelete.partition.choose') }}</span></th>
-              <th scope="col">{{ t('undelete.partition.number') }}</th>
-              <th scope="col">{{ t('undelete.partition.label') }}</th>
-              <th scope="col">{{ t('undelete.partition.filesystem') }}</th>
-              <th scope="col">{{ t('undelete.partition.role') }}</th>
-              <th scope="col" class="wizard__number">{{ t('undelete.partition.start') }}</th>
-              <th scope="col" class="wizard__number">{{ t('undelete.partition.size') }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="partition in partitions"
-              :key="partition.number"
-              :class="{ 'undelete-wizard__row--disabled': !partition.browsable }"
-            >
-              <td>
-                <input
-                  :id="`undelete-partition-${partition.number}`"
-                  v-model="selectedPartition"
-                  type="radio"
-                  name="undelete-partition"
-                  :value="partition.number"
-                  :disabled="!partition.browsable || browse.isScanning.value"
-                />
-              </td>
-              <th scope="row">
-                <label :for="`undelete-partition-${partition.number}`">
-                  {{ partition.number }}{{ partition.logical ? ` ${t('undelete.partition.logical')}` : '' }}
-                </label>
-              </th>
-              <td>{{ partition.label ?? partition.name ?? '' }}</td>
-              <td>
-                {{ partitionFs(partition) }}
-                <span v-if="!partition.browsable" class="wizard__note">
-                  · {{ unsupportedReason(partition) }}
-                </span>
-              </td>
-              <td>{{ partitionRole(partition) }}</td>
-              <td class="wizard__number">{{ formatBytes(partition.offset) }}</td>
-              <td class="wizard__number">{{ formatBytes(partition.length) }}</td>
-            </tr>
-          </tbody>
-        </table>
+        <PartitionPicker
+          v-model="selectedPartition"
+          :partitions="partitions"
+          :caption="t('undelete.partition.caption')"
+          :is-selectable="(partition) => partition.browsable"
+          :note="(partition) => (partition.browsable ? '' : unbrowsableReason(partition.filesystem))"
+          :disabled="browse.isScanning.value"
+        />
         <p v-if="!partitions.some((partition) => partition.browsable)" class="wizard__note">
           {{ t('undelete.partition.none') }}
         </p>
@@ -348,7 +280,7 @@ function noteText(note: string): string {
               t('undelete.browse.partitionValue', {
                 number: currentPartition.number,
                 label: currentPartition.label ?? '',
-                filesystem: partitionFs(currentPartition),
+                filesystem: filesystemName(currentPartition.filesystem),
                 size: formatBytes(currentPartition.length),
               })
             }}
@@ -397,23 +329,6 @@ function noteText(note: string): string {
   margin: 0;
   padding-left: var(--space-lg);
   font-size: var(--font-size-small);
-}
-
-.undelete-wizard__partitions {
-  max-width: none;
-}
-
-.undelete-wizard__row--disabled {
-  color: var(--color-text-muted);
-}
-
-.undelete-wizard__visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
 }
 
 /* 列表与详情两栏都分标题、框体、底部三行，三行上下边对齐；列表要放名字、状态与时间，占得宽一些 */

@@ -1602,7 +1602,7 @@ fn lost_partitions_image(dir: &Path) -> (String, yisi_repair::samples::SearchDis
 #[test]
 fn partition_search_finds_lost_partitions_then_browses_and_copies_one() {
     use yisi_engine::protocol::{
-        OPEN_RANGE, PartitionInfo, RANGE_PARTITION_BASE, SEARCH_PARTITIONS, SearchSummary,
+        BootCopy, OPEN_RANGE, PartitionInfo, RANGE_PARTITION_BASE, SEARCH_PARTITIONS, SearchSummary,
     };
 
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-search");
@@ -1654,7 +1654,7 @@ fn partition_search_finds_lost_partitions_then_browses_and_copies_one() {
     );
     let ntfs = &summary.candidates[1];
     assert_eq!(ntfs.length, disk.ntfs.1);
-    assert_eq!(ntfs.backup_boot, Some(disk.ntfs.0 + disk.ntfs.1 - 512));
+    assert_eq!(ntfs.boot, BootCopy::Backup);
     assert_eq!(ntfs.label.as_deref(), Some("NTFS SAMPLE"));
     assert_eq!(summary.candidates[0].label.as_deref(), Some("DATA32"));
 
@@ -1668,7 +1668,7 @@ fn partition_search_finds_lost_partitions_then_browses_and_copies_one() {
     .unwrap();
     assert_eq!(opened.scheme, "none");
     let range = json!({"jobId": "b1", "offset": ntfs.offset, "length": ntfs.length,
-                       "backupBoot": ntfs.backup_boot});
+                       "boot": ntfs.boot});
     let info: PartitionInfo =
         serde_json::from_value(engine.call(OPEN_RANGE, range.clone()).unwrap()).unwrap();
     assert_eq!(info.number, RANGE_PARTITION_BASE);
@@ -1762,7 +1762,7 @@ fn partition_search_finds_lost_partitions_then_browses_and_copies_one() {
 
     // 复制：按位置打开的分区不核对分区表；没标明时按表核对，表里没有就拒绝
     let partition = json!({"number": RANGE_PARTITION_BASE, "offset": ntfs.offset,
-                           "length": ntfs.length, "outsideTable": true, "backupBoot": ntfs.backup_boot});
+                           "length": ntfs.length, "outsideTable": true});
     let items = json!([{"file": report.file, "path": ["report.bin"]}]);
     let mut refused = Engine::start();
     let error = refused
@@ -1782,7 +1782,7 @@ fn partition_search_finds_lost_partitions_then_browses_and_copies_one() {
         .call(
             COPY_FILES,
             json!({"jobId": "copy-lost", "source": source, "outputDir": dir,
-                   "partition": partition, "items": items}),
+                   "partition": partition, "boot": ntfs.boot, "items": items}),
         )
         .unwrap();
     let notifications = copier.notifications_until(COMPLETED);

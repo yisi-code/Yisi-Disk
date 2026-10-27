@@ -268,15 +268,16 @@ fn job_start_partition_search(
 }
 
 /// 在浏览会话里按位置打开搜索找到的分区；答复的编号之后用于 `browse_list` 等命令。
+/// `boot` 为 `backup` 时按备份引导扇区打开（只靠备份找到的分区）；不给时用主引导扇区。
 #[tauri::command(async)]
 fn browse_open_range(
     engines: State<'_, Engines>,
     job_id: String,
     offset: u64,
     length: u64,
-    backup_boot: Option<u64>,
+    boot: Option<BootCopy>,
 ) -> Result<PartitionInfo, HostError> {
-    engines.open_range(job_id, offset, length, backup_boot)
+    engines.open_range(job_id, offset, length, boot.unwrap_or_default())
 }
 
 /// 把浏览中选中的项复制到另一块盘（另存为）。不给输出目录时是为打开而复制：存到程序目录下的 `open-cache`，

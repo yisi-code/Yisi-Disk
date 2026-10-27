@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import PartitionPicker from './PartitionPicker.vue'
 import SourcePicker from './SourcePicker.vue'
 import { useBrowse } from '../composables/useBrowse'
 import { useFsCheck } from '../composables/useFsCheck'
 import { useHostErrorText } from '../composables/useHostErrorText'
+import { usePartitionText } from '../composables/usePartitionText'
 import {
   pickSaveFile,
   saveFsCheckReport,
@@ -30,6 +32,7 @@ const emit = defineEmits<{ exit: [] }>()
 
 const { t, te, locale } = useI18n()
 const { formatHostError } = useHostErrorText()
+const { filesystemName, sourceName } = usePartitionText()
 const browse = useBrowse()
 const fsCheck = useFsCheck()
 
@@ -83,7 +86,7 @@ const canRecheck = computed(
     fsCheck.partition.value !== null,
 )
 
-const sourceText = computed(() => targetText(browse.target.value ?? fsCheck.target.value))
+const sourceText = computed(() => sourceName(browse.target.value ?? fsCheck.target.value))
 
 const checkStatusText = computed(() => {
   const stage = fsCheck.stage.value
@@ -242,28 +245,6 @@ function isCheckable(partition: PartitionInfo): boolean {
   return CHECKABLE.includes(partition.filesystem)
 }
 
-function targetText(source: JobTarget | null): string {
-  if (source === null) {
-    return ''
-  }
-  return source.kind === 'image'
-    ? t('undelete.sourceImage', { path: source.path })
-    : t('undelete.sourceDisk', { number: source.diskNumber })
-}
-
-function partitionFs(filesystem: string): string {
-  const key = `partition.fs.${filesystem}`
-  return te(key) ? t(key) : filesystem
-}
-
-function partitionRole(partition: PartitionInfo): string {
-  const key = `partition.role.${partition.role ?? ''}`
-  if (partition.role !== null && te(key)) {
-    return t(key)
-  }
-  return partition.typeId === '' ? '-' : partition.typeId
-}
-
 /** 分区这一步每行的附注：不能检查的原因，或者这种文件系统查得到哪些 */
 function partitionNote(partition: PartitionInfo): string {
   const key = `fsCheck.partition.note.${partition.filesystem}`
@@ -279,7 +260,7 @@ function partitionText(partition: PartitionInfo): string {
     number: partition.number,
     // 没有卷标时不留多余的空格
     label: label === undefined ? '' : ` ${label}`,
-    filesystem: partitionFs(partition.filesystem),
+    filesystem: filesystemName(partition.filesystem),
     size: formatBytes(partition.length),
   })
 }
@@ -376,7 +357,7 @@ function summaryText(): string {
     return ''
   }
   return t('fsCheck.result.volumeValue', {
-    filesystem: partitionFs(current.filesystem),
+    filesystem: filesystemName(current.filesystem),
     clusterSize: formatBytes(current.clusterSize),
     clusters: number(current.clusterCount),
     files: number(current.files),
@@ -421,7 +402,7 @@ function buildReportText(): string {
   const lines = [
     t('fsCheck.export.heading'),
     '',
-    field(t('fsCheck.result.source'), targetText(fsCheck.target.value)),
+    field(t('fsCheck.result.source'), sourceName(fsCheck.target.value)),
     field(t('fsCheck.result.partition'), partitionText(partition)),
     field(t('fsCheck.result.finishedAt'), formatTime(finishedAt.value ?? new Date())),
     field(t('fsCheck.result.volume'), summaryText()),
@@ -581,51 +562,13 @@ function buildReportText(): string {
             })
           }}
         </p>
-        <table class="wizard__table fs-check__partitions">
-          <caption class="wizard__caption">{{ t('fsCheck.partition.caption') }}</caption>
-          <thead>
-            <tr>
-              <th scope="col"><span class="fs-check__visually-hidden">{{ t('undelete.partition.choose') }}</span></th>
-              <th scope="col">{{ t('undelete.partition.number') }}</th>
-              <th scope="col">{{ t('undelete.partition.label') }}</th>
-              <th scope="col">{{ t('undelete.partition.filesystem') }}</th>
-              <th scope="col">{{ t('undelete.partition.role') }}</th>
-              <th scope="col" class="wizard__number">{{ t('undelete.partition.start') }}</th>
-              <th scope="col" class="wizard__number">{{ t('undelete.partition.size') }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="partition in partitions"
-              :key="partition.number"
-              :class="{ 'fs-check__row--disabled': !isCheckable(partition) }"
-            >
-              <td>
-                <input
-                  :id="`fs-check-partition-${partition.number}`"
-                  v-model="selectedPartition"
-                  type="radio"
-                  name="fs-check-partition"
-                  :value="partition.number"
-                  :disabled="!isCheckable(partition)"
-                />
-              </td>
-              <th scope="row">
-                <label :for="`fs-check-partition-${partition.number}`">
-                  {{ partition.number }}{{ partition.logical ? ` ${t('undelete.partition.logical')}` : '' }}
-                </label>
-              </th>
-              <td>{{ partition.label ?? partition.name ?? '' }}</td>
-              <td>
-                {{ partitionFs(partition.filesystem) }}
-                <span v-if="partitionNote(partition)" class="wizard__note">· {{ partitionNote(partition) }}</span>
-              </td>
-              <td>{{ partitionRole(partition) }}</td>
-              <td class="wizard__number">{{ formatBytes(partition.offset) }}</td>
-              <td class="wizard__number">{{ formatBytes(partition.length) }}</td>
-            </tr>
-          </tbody>
-        </table>
+        <PartitionPicker
+          v-model="selectedPartition"
+          :partitions="partitions"
+          :caption="t('fsCheck.partition.caption')"
+          :is-selectable="isCheckable"
+          :note="partitionNote"
+        />
         <p v-if="!partitions.some(isCheckable)" class="wizard__note">{{ t('fsCheck.partition.none') }}</p>
         <p class="wizard__hint">{{ t('fsCheck.partition.hint') }}</p>
         <p v-if="browse.failure.value" class="wizard__error" role="alert">
@@ -636,7 +579,7 @@ function buildReportText(): string {
       <div v-else-if="step === 'check'" class="wizard__panel">
         <dl v-if="checkedPartition" class="wizard__details">
           <dt>{{ t('fsCheck.result.source') }}</dt>
-          <dd class="wizard__path-text">{{ targetText(fsCheck.target.value) }}</dd>
+          <dd class="wizard__path-text">{{ sourceName(fsCheck.target.value) }}</dd>
           <dt>{{ t('fsCheck.result.partition') }}</dt>
           <dd>{{ partitionText(checkedPartition) }}</dd>
         </dl>
@@ -661,7 +604,7 @@ function buildReportText(): string {
       <div v-else-if="report && checkedPartition" class="wizard__panel wizard__fill fs-check__result">
         <dl class="wizard__details">
           <dt>{{ t('fsCheck.result.source') }}</dt>
-          <dd class="wizard__path-text">{{ targetText(fsCheck.target.value) }}</dd>
+          <dd class="wizard__path-text">{{ sourceName(fsCheck.target.value) }}</dd>
           <dt>{{ t('fsCheck.result.partition') }}</dt>
           <dd>{{ partitionText(checkedPartition) }}</dd>
           <dt>{{ t('fsCheck.result.volume') }}</dt>
@@ -726,22 +669,6 @@ function buildReportText(): string {
 </template>
 
 <style scoped>
-.fs-check__partitions {
-  max-width: none;
-}
-
-.fs-check__row--disabled {
-  color: var(--color-text-muted);
-}
-
-.fs-check__visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
 
 .fs-check__result {
   display: flex;

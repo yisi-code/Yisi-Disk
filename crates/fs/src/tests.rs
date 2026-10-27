@@ -786,7 +786,7 @@ fn backup_boot_sector_is_not_invented() {
 
 #[test]
 fn backup_candidates_follow_the_primary_hints() {
-    use crate::backup::{BackupFamily, backup_candidates};
+    use crate::boot::{BackupFamily, backup_candidates};
     let ntfs = NtfsImage::new().finish();
     let length = ntfs.len() as u64;
     let candidates = backup_candidates(&ntfs[..512], 512, length);

@@ -478,7 +478,7 @@ fn dispatch_now(
             }
             let params: FsCheckParams = request.params()?;
             let device = open_source(&params.source)?;
-            fs_check_job::verify_partition(device.as_ref(), params.partition)?;
+            browse::verify_partition(device.as_ref(), params.partition)?;
             let partition = params.partition;
             let finished = events.clone();
             state.job = Some(
@@ -694,57 +694,20 @@ fn copy_items(params: &CopyParams) -> Result<Vec<Planned>, ErrorObject> {
         .collect()
 }
 
-/// 重新读分区表，核对浏览时看到的分区还在原处，再打开它上面的卷。
-/// 按位置打开的分区（搜索找到的）不在表里，只核对范围在设备之内。
+/// 核对浏览时看到的分区还在原处（[`browse::verify_partition`]），再按浏览时那一份引导扇区打开它上面的卷。
 fn copy_volume(
     device: Arc<dyn BlockDevice>,
     partition: protocol::PartitionRef,
     boot: protocol::BootCopy,
 ) -> Result<yisi_fs::Volume, ErrorObject> {
-    let unavailable =
-        |message: String| ErrorObject::new(protocol::error_code::FS_UNAVAILABLE, message);
-    if partition.outside_table {
-        let size = device.size();
-        let inside = |offset: u64, length: u64| {
-            length > 0 && offset.checked_add(length).is_some_and(|end| end <= size)
-        };
-        if !inside(partition.offset, partition.length)
-            || partition
-                .backup_boot
-                .is_some_and(|backup| !inside(backup, 512))
-        {
-            return Err(ErrorObject::new(
-                error_code::INVALID_PARAMS,
-                format!(
-                    "偏移 {} 起 {} 字节超出了设备范围",
-                    partition.offset, partition.length
-                ),
-            ));
-        }
-        let device = browse::range_device(&device, partition.offset, partition.backup_boot)?;
-        return yisi_fs::Volume::open(device, partition.offset, partition.length)
-            .map_err(|error| unavailable(error_chain(&error)));
-    }
-    let table =
-        yisi_part::read_table(device.as_ref()).map_err(|error| unavailable(error_chain(&error)))?;
-    let found = table.partitions.iter().any(|candidate| {
-        candidate.number == partition.number
-            && candidate.offset == partition.offset
-            && candidate.length == partition.length
-    });
-    if !found {
-        return Err(unavailable(format!(
-            "分区 {} 已不在浏览时的位置",
-            partition.number
-        )));
-    }
+    browse::verify_partition(device.as_ref(), partition)?;
     yisi_fs::Volume::open_with(
         device,
         partition.offset,
         partition.length,
         boot_check::fs_copy(boot),
     )
-    .map_err(|error| unavailable(error_chain(&error)))
+    .map_err(|error| ErrorObject::new(protocol::error_code::FS_UNAVAILABLE, error_chain(&error)))
 }
 
 #[cfg(windows)]
