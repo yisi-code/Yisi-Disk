@@ -3,6 +3,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+pub(crate) use yisi_fs::format::{Run, push_run};
+
 use crate::check::disk::Span;
 use crate::check::issue::{Area, Issue, IssueKind};
 use crate::check::table::{FatTable, Link, Owners};
@@ -16,13 +18,6 @@ pub(crate) const MAX_DEPTH: usize = 256;
 const STEP_CHECKPOINT: u64 = 1 << 16;
 /// 丢失簇最多逐段列出这么多段，其余的合成一项。
 const MAX_LOST_RUNS: usize = 100;
-
-/// 连续的若干簇。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Run {
-    pub first: u32,
-    pub count: u32,
-}
 
 /// 文件的簇怎么找。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,17 +322,6 @@ impl Volume {
             ctx.checked(CheckItem::Bitmap);
         }
         Some(())
-    }
-}
-
-/// 把簇接到最后一段上，接不上就另起一段。
-pub(crate) fn push_run(runs: &mut Vec<Run>, cluster: u32) {
-    match runs.last_mut() {
-        Some(run) if run.first.checked_add(run.count) == Some(cluster) => run.count += 1,
-        _ => runs.push(Run {
-            first: cluster,
-            count: 1,
-        }),
     }
 }
 

@@ -1,15 +1,11 @@
 //! FAT 与 exFAT 共用的簇区与 FAT 表：簇号换算成位置、沿 FAT 链找出文件占用的簇。
 
 use crate::FsError;
+use crate::format::{
+    FatEntry, decode_fat_entry, fat_entry_raw, fat_entry_span, is_cluster, push_run,
+};
+pub(crate) use crate::format::{FatWidth, Run};
 use crate::region::{ChunkCache, Region};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FatWidth {
-    Fat12,
-    Fat16,
-    Fat32,
-    Exfat,
-}
 
 /// FAT 表项的含义。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,13 +15,6 @@ pub(crate) enum Link {
     Free,
     /// 坏簇标记，或指向簇区之外的值。
     Broken,
-}
-
-/// 连续的若干簇。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Run {
-    pub first: u32,
-    pub count: u32,
 }
 
 /// 沿 FAT 链找到的簇。
@@ -61,7 +50,7 @@ pub(crate) struct Clusters {
 
 impl Clusters {
     pub fn is_valid(&self, cluster: u32) -> bool {
-        cluster >= 2 && u64::from(cluster) < u64::from(self.count) + 2
+        is_cluster(cluster, self.count)
     }
 
     /// 簇在分区里的字节偏移。
@@ -76,44 +65,19 @@ impl Clusters {
 
     /// 读 FAT 里 `cluster` 的表项。
     pub fn link(&self, cluster: u32) -> Result<Link, FsError> {
-        let raw = match self.width {
-            FatWidth::Fat12 => {
-                let at = u64::from(cluster) + u64::from(cluster / 2);
-                let Some(bytes) = self.fat.bytes::<2>(at)? else {
-                    return Ok(Link::Broken);
-                };
-                let pair = u16::from_le_bytes(bytes);
-                u32::from(if cluster % 2 == 1 {
-                    pair >> 4
-                } else {
-                    pair & 0x0FFF
-                })
-            }
-            FatWidth::Fat16 => match self.fat.bytes::<2>(u64::from(cluster) * 2)? {
-                Some(bytes) => u32::from(u16::from_le_bytes(bytes)),
-                None => return Ok(Link::Broken),
-            },
-            FatWidth::Fat32 | FatWidth::Exfat => {
-                match self.fat.bytes::<4>(u64::from(cluster) * 4)? {
-                    Some(bytes) => u32::from_le_bytes(bytes),
-                    None => return Ok(Link::Broken),
-                }
-            }
+        let (at, len) = fat_entry_span(self.width, cluster);
+        let bytes = match len {
+            2 => self.fat.bytes::<2>(at)?.map(|bytes| bytes.to_vec()),
+            _ => self.fat.bytes::<4>(at)?.map(|bytes| bytes.to_vec()),
         };
-        let (value, end) = match self.width {
-            FatWidth::Fat12 => (raw, 0xFF8),
-            FatWidth::Fat16 => (raw, 0xFFF8),
-            FatWidth::Fat32 => (raw & 0x0FFF_FFFF, 0x0FFF_FFF8),
-            FatWidth::Exfat => (raw, 0xFFFF_FFF8),
+        let Some(raw) = bytes.and_then(|bytes| fat_entry_raw(self.width, cluster, &bytes)) else {
+            return Ok(Link::Broken);
         };
-        Ok(if value >= end {
-            Link::End
-        } else if value == 0 {
-            Link::Free
-        } else if self.is_valid(value) {
-            Link::Next(value)
-        } else {
-            Link::Broken
+        Ok(match decode_fat_entry(self.width, raw, self.count) {
+            FatEntry::Next(next) => Link::Next(next),
+            FatEntry::End => Link::End,
+            FatEntry::Free => Link::Free,
+            FatEntry::Bad | FatEntry::Invalid(_) => Link::Broken,
         })
     }
 
@@ -129,13 +93,7 @@ impl Clusters {
             });
         }
         loop {
-            match runs.last_mut() {
-                Some(run) if run.first.checked_add(run.count) == Some(cluster) => run.count += 1,
-                _ => runs.push(Run {
-                    first: cluster,
-                    count: 1,
-                }),
-            }
+            push_run(&mut runs, cluster);
             found += 1;
             // 链长超过簇总数就一定成环了
             if found >= limit || found > u64::from(self.count) {

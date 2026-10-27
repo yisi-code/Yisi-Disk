@@ -1,12 +1,16 @@
 import { useI18n } from 'vue-i18n'
 import type { JobTarget } from '../services/host'
+import { formatHex } from '../utils/format'
+
+/** 引导扇区里按十六进制显示的字段 */
+const HEX_BOOT_FIELDS = ['volumeSerial', 'volumeSerialHigh', 'mediaDescriptor', 'extFlags']
 
 /**
  * 分区与来源的显示文字：文件系统名、分区用途、读分区表时的说明、来源，以及不能浏览的原因。
  * 找回删除的文件、找回丢失的分区、修复打不开的分区、检查文件系统共用，规则只有一份
  */
 export function usePartitionText() {
-  const { t, te } = useI18n()
+  const { t, te, locale } = useI18n()
 
   /** 文件系统的显示名；没有文案的原样显示 */
   function filesystemName(filesystem: string): string {
@@ -45,5 +49,24 @@ export function usePartitionText() {
     return te(key) ? t(key) : t('undelete.partition.reason.invalid')
   }
 
-  return { filesystemName, roleName, tableNote, sourceName, unbrowsableReason }
+  /** 引导扇区字段（规范里的名字）的显示名；修复打不开的分区比对主备、检查文件系统报参数问题共用 */
+  function bootFieldName(field: string): string {
+    const key = `bootField.${field}`
+    return te(key) ? t(key) : field
+  }
+
+  /** 引导扇区字段的值：序列号、介质描述符、标志按十六进制，其余按本地数字格式 */
+  function bootFieldValue(field: string, value: number): string {
+    return HEX_BOOT_FIELDS.includes(field) ? formatHex(value, 2) : value.toLocaleString(locale.value)
+  }
+
+  return {
+    filesystemName,
+    roleName,
+    tableNote,
+    sourceName,
+    unbrowsableReason,
+    bootFieldName,
+    bootFieldValue,
+  }
 }

@@ -2,8 +2,10 @@
 
 use yisi_part::bytes::{le16, le32};
 
-use crate::clusters::{Clusters, FatWidth, Link};
+use crate::bpb::FatBpb;
+use crate::clusters::{Clusters, Link};
 use crate::entry::{ClusterRef, Entry, FileRef, Listing, Location, State, dos_time};
+use crate::format::{LfnPart, MAX_LFN_PARTS, fat_first_cluster, lfn_name, lfn_ordered, lfn_part};
 use crate::reader::FileReader;
 use crate::region::{ChunkCache, Region};
 use crate::{FsError, FsKind, MAX_DIR_BYTES, MAX_ENTRIES, bpb};
@@ -15,63 +17,12 @@ const ATTR_DIRECTORY: u8 = 0x10;
 const DELETED: u8 = 0xE5;
 /// 名字首字节确实是 0xE5 时，目录项里存的是 0x05。
 const KANJI_E5: u8 = 0x05;
-/// 长文件名最多 20 个目录项（255 个字符）。
-const MAX_LFN_PARTS: usize = 20;
 
-/// 引导扇区里的几何参数。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Geometry {
-    pub width: FatWidth,
-    pub bytes_per_sector: u64,
-    pub sectors_per_cluster: u64,
-    pub reserved: u64,
-    pub fats: u64,
-    pub root_entries: u64,
-    pub total_sectors: u64,
-    pub fat_sectors: u64,
-    pub root_cluster: u32,
-    pub active_fat: u64,
-    pub cluster_count: u32,
-    pub label: Option<String>,
-}
-
-impl Geometry {
-    fn root_dir_sectors(&self) -> u64 {
-        (self.root_entries * ENTRY as u64).div_ceil(self.bytes_per_sector)
-    }
-
-    fn first_data_sector(&self) -> u64 {
-        self.reserved + self.fats * self.fat_sectors + self.root_dir_sectors()
-    }
-}
-
-/// 解析引导扇区；有致命问题时返回 `None`（规则在 [`bpb`](crate::bpb)，与诊断、文件系统检查共用）。
-/// 簇数按 FAT 装得下的截短。
-pub(crate) fn parse_boot(sector: &[u8]) -> Option<Geometry> {
-    let bpb = bpb::check_fat(sector, None).geometry?;
-    let width = match bpb.kind {
-        FsKind::Fat12 => FatWidth::Fat12,
-        FsKind::Fat16 => FatWidth::Fat16,
-        _ => FatWidth::Fat32,
-    };
-    let cluster_count = bpb.cluster_count.min(bpb.fat_capacity).min(0x0FFF_FFF5);
-    if cluster_count == 0 {
-        return None;
-    }
-    Some(Geometry {
-        width,
-        bytes_per_sector: bpb.bytes_per_sector,
-        sectors_per_cluster: bpb.sectors_per_cluster,
-        reserved: bpb.reserved,
-        fats: bpb.fats,
-        root_entries: bpb.root_entries,
-        total_sectors: bpb.total_sectors,
-        fat_sectors: bpb.fat_sectors,
-        root_cluster: bpb.root_cluster,
-        active_fat: bpb.active_fat.unwrap_or(0),
-        cluster_count: u32::try_from(cluster_count).ok()?,
-        label: bpb.label,
-    })
+/// 解析引导扇区；有致命问题、或 FAT 一个簇也装不下时返回 `None`（规则在 [`bpb`](crate::bpb)，与诊断、文件系统检查共用）。
+pub(crate) fn parse_boot(sector: &[u8]) -> Option<FatBpb> {
+    bpb::check_fat(sector, None)
+        .geometry
+        .filter(|bpb| bpb.usable_clusters(u64::MAX) > 0)
 }
 
 pub(crate) struct Fat {
@@ -87,34 +38,31 @@ impl Fat {
     /// 按引导扇区 `boot`（主的或备份的）打开。
     pub fn open(region: Region, boot: &[u8]) -> Result<Self, FsError> {
         let geometry = parse_boot(boot).ok_or(FsError::Invalid("FAT 引导扇区的参数不自洽"))?;
-        let bps = geometry.bytes_per_sector;
-        let fat_bytes = geometry.fat_sectors * bps;
-        let fat_start = (geometry.reserved + geometry.active_fat * geometry.fat_sectors) * bps;
-        let heap_offset = geometry.first_data_sector() * bps;
-        let cluster_size = geometry.sectors_per_cluster * bps;
+        let heap_offset = geometry.heap_offset();
         if heap_offset >= region.length() {
             return Err(FsError::Invalid("FAT 的数据区在分区之外"));
         }
         // 分区被截短时，簇区只算到分区末尾
-        let fits = (region.length() - heap_offset) / cluster_size;
-        let count = u64::from(geometry.cluster_count).min(fits);
-        let count = u32::try_from(count).map_err(|_| FsError::Invalid("簇数过大"))?;
-        let kind = match geometry.width {
-            FatWidth::Fat12 => FsKind::Fat12,
-            FatWidth::Fat16 => FsKind::Fat16,
-            _ => FsKind::Fat32,
-        };
+        let count = u32::try_from(geometry.usable_clusters(region.length()))
+            .map_err(|_| FsError::Invalid("簇数过大"))?;
+        let kind = geometry.kind;
         let fixed_root = (kind != FsKind::Fat32).then(|| {
-            let offset = (geometry.reserved + geometry.fats * geometry.fat_sectors) * bps;
-            (offset, geometry.root_entries * ENTRY as u64)
+            (
+                geometry.root_dir_offset(),
+                geometry.root_entries * ENTRY as u64,
+            )
         });
         let clusters = Clusters {
-            fat: ChunkCache::new(region.clone(), fat_start, fat_bytes),
+            fat: ChunkCache::new(
+                region.clone(),
+                geometry.active_fat_offset(),
+                geometry.fat_bytes(),
+            ),
             region,
             heap_offset,
-            cluster_size,
+            cluster_size: geometry.cluster_size(),
             count,
-            width: geometry.width,
+            width: geometry.width(),
         };
         if kind == FsKind::Fat32 && !clusters.is_valid(geometry.root_cluster) {
             return Err(FsError::Invalid("FAT32 根目录的簇号不合法"));
@@ -169,7 +117,7 @@ impl Fat {
             return Err(FsError::BadRef);
         }
         let (bytes, overwritten) = self.dir_bytes(dir)?;
-        let raw = parse_dir(&bytes, dir.deleted);
+        let raw = parse_dir(&bytes, dir.deleted, self.kind == FsKind::Fat32);
         let mut entries = Vec::with_capacity(raw.entries.len());
         for item in raw.entries {
             entries.push(self.entry(item)?);
@@ -349,15 +297,8 @@ struct RawListing {
     truncated: bool,
 }
 
-/// 一个长文件名目录项：序号字节（删除后是 0xE5）、校验和、13 个 UTF-16 单元。
-struct LfnPart {
-    order: u8,
-    checksum: u8,
-    units: [u16; 13],
-}
-
 /// 解析目录内容。`parent_deleted` 为真时，所在目录已被删除，里面的项一律按已删除处理（簇链也已释放）。
-fn parse_dir(bytes: &[u8], parent_deleted: bool) -> RawListing {
+fn parse_dir(bytes: &[u8], parent_deleted: bool, is_fat32: bool) -> RawListing {
     let mut entries = Vec::new();
     let mut pending: Vec<LfnPart> = Vec::new();
     for raw in bytes.as_chunks::<ENTRY>().0 {
@@ -399,7 +340,14 @@ fn parse_dir(bytes: &[u8], parent_deleted: bool) -> RawListing {
                 truncated: true,
             };
         }
-        entries.push(raw_entry(raw, attr, deleted_here, parent_deleted, &parts));
+        entries.push(raw_entry(
+            raw,
+            attr,
+            deleted_here,
+            parent_deleted,
+            is_fat32,
+            &parts,
+        ));
     }
     RawListing {
         entries,
@@ -412,6 +360,7 @@ fn raw_entry(
     attr: u8,
     deleted_here: bool,
     parent_deleted: bool,
+    is_fat32: bool,
     parts: &[LfnPart],
 ) -> RawEntry {
     let mut short: [u8; 11] = raw
@@ -432,7 +381,7 @@ fn raw_entry(
         match recovered {
             Some(byte) if lfn_consistent(parts, true) => {
                 short[0] = byte;
-                long = long_name(parts);
+                long = lfn_name(parts);
             }
             _ => {
                 short[0] = b'_';
@@ -442,14 +391,18 @@ fn raw_entry(
     } else if lfn_consistent(parts, false)
         && parts.first().map(|part| part.checksum) == Some(short_checksum(&short))
     {
-        long = long_name(parts);
+        long = lfn_name(parts);
     }
     let (short_name, non_ascii) = short_display(&short, raw.get(12).copied().unwrap_or(0));
     if long.is_none() && non_ascii {
         name_uncertain = true;
     }
-    let cluster_high = le16(raw, 20).unwrap_or(0);
-    let cluster_low = le16(raw, 26).unwrap_or(0);
+    // FAT12/16 的第 20 字节另有用途，首簇只在 FAT32 上带高 16 位
+    let cluster_high = if is_fat32 {
+        le16(raw, 20).unwrap_or(0)
+    } else {
+        0
+    };
     let date_time = |date_at, time_at| dos_time(le16(raw, date_at)?, le16(raw, time_at)?);
     RawEntry {
         name: long.unwrap_or_else(|| short_name.clone()),
@@ -457,28 +410,12 @@ fn raw_entry(
         name_uncertain,
         is_dir: attr & ATTR_DIRECTORY != 0,
         deleted: deleted_here || parent_deleted,
-        first_cluster: u32::from(cluster_high) << 16 | u32::from(cluster_low),
+        first_cluster: fat_first_cluster(raw, is_fat32),
         cluster_high,
         size: u64::from(le32(raw, 28).unwrap_or(0)),
         modified: date_time(24, 22),
         created: date_time(16, 14),
     }
-}
-
-fn lfn_part(raw: &[u8]) -> Option<LfnPart> {
-    let mut units = [0u16; 13];
-    let positions = (1..11)
-        .step_by(2)
-        .chain((14..26).step_by(2))
-        .chain((28..32).step_by(2));
-    for (slot, at) in units.iter_mut().zip(positions) {
-        *slot = le16(raw, at)?;
-    }
-    Some(LfnPart {
-        order: *raw.first()?,
-        checksum: *raw.get(13)?,
-        units,
-    })
 }
 
 /// 长文件名的各段是否属于同一个短文件名：校验和一致、段数合理；未删除的还要序号从 `0x40 | n` 递减到 1。
@@ -492,29 +429,7 @@ fn lfn_consistent(parts: &[LfnPart], deleted: bool) -> bool {
     if deleted {
         return parts.iter().all(|part| part.order == DELETED);
     }
-    let count = parts.len();
-    first.order & 0x40 != 0
-        && usize::from(first.order & 0x1F) == count
-        && parts
-            .iter()
-            .enumerate()
-            .all(|(index, part)| usize::from(part.order & 0x1F) == count - index)
-}
-
-/// 各段在目录里是倒着存的（最后一段在前），拼起来到 0 为止；`0xFFFF` 是填充。
-fn long_name(parts: &[LfnPart]) -> Option<String> {
-    let mut units = Vec::with_capacity(parts.len() * 13);
-    for part in parts.iter().rev() {
-        units.extend_from_slice(&part.units);
-    }
-    if let Some(end) = units.iter().position(|&unit| unit == 0) {
-        units.truncate(end);
-    }
-    while units.last() == Some(&0xFFFF) {
-        units.pop();
-    }
-    let name = String::from_utf16_lossy(&units);
-    (!name.is_empty()).then_some(name)
+    lfn_ordered(parts)
 }
 
 /// 短文件名（11 字节）的校验和，长文件名的每一段都记着它。

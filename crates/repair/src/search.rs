@@ -7,12 +7,15 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use yisi_fs::boot::{exfat_boot_checksum, exfat_stored_checksum};
-use yisi_fs::{BootCopy, BootLayout, BootSector, FsKind, Volume, inspect_boot};
+use yisi_fs::format::{FatWidth, fat_entry_raw, fat_media_ok};
+use yisi_fs::{BootCopy, BootLayout, BootSector, FsKind, Volume, inspect_boot, mft_self_record_ok};
 use yisi_io::BlockDevice;
 use yisi_part::{PartitionKind, PartitionTable, Role};
 
 /// 每次顺序读 1 MiB。
 const CHUNK: usize = 1 << 20;
+/// exFAT 的 FAT 第 0 项固定记介质描述符 `F8`（exFAT 的引导扇区里没有这一项）。
+const EXFAT_MEDIA: u8 = 0xF8;
 /// 引导扇区按 512 字节对齐找：4 KiB 扇区的盘上分区同样落在 512 字节的边界上。
 const SECTOR: usize = 512;
 /// 最多记这么多个候选分区，挡住装满了磁盘镜像文件的盘。
@@ -246,38 +249,47 @@ fn kind_rank(kind: FsKind) -> u8 {
     }
 }
 
-/// 引导扇区之外的结构也对得上，才认作分区：FAT 的开头是介质描述符加 0xFF；exFAT 的引导区校验和对、
-/// FAT 开头是固定值；NTFS 的 `$MFT` 或 `$MFTMirr` 以 `FILE` 记录开头。
+/// 引导扇区之外的结构也对得上，才认作分区：FAT 的第 0 项是介质描述符、其余位全为 1（exFAT 的固定是 `F8`），
+/// exFAT 的引导区校验和还要对；NTFS 的 `$MFT` 或 `$MFTMirr` 的第一条记录是可用的 `$MFT` 自身记录。
+/// 判断规则与打开卷、文件系统检查共用（[`fat_media_ok`]、[`mft_self_record_ok`]）。
 /// 单是引导扇区自洽不够：引导扇区的副本（备份、镜像文件里的、格式化前留下的）随处都有。
 /// `region` 是这次用的引导区（主引导区或 exFAT 的备份引导区）在设备上的位置。
 fn confirms(device: &dyn BlockDevice, start: u64, boot: &BootSector, region: u64) -> bool {
     let at = |relative: u64| start.checked_add(relative);
+    let media_ok = |fat: u64, width: FatWidth, media: u8| {
+        at(fat)
+            .and_then(|fat| read(device, fat, 4))
+            .and_then(|bytes| fat_entry_raw(width, 0, &bytes))
+            .is_some_and(|entry0| fat_media_ok(width, media, entry0))
+    };
     match &boot.layout {
-        BootLayout::Fat { media, fats } => {
-            let head: &[u8] = match boot.kind {
-                FsKind::Fat16 => &[*media, 0xFF],
-                _ => &[*media, 0xFF, 0xFF],
-            };
-            fats.iter()
-                .any(|&fat| at(fat).is_some_and(|fat| read_equals(device, fat, head)))
+        BootLayout::Fat { width, media, fats } => {
+            fats.iter().any(|&fat| media_ok(fat, *width, *media))
         }
         BootLayout::Exfat { fat_offset } => {
-            const FAT_HEAD: [u8; 8] = [0xF8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
             exfat_checksum_ok(device, region, boot.bytes_per_sector)
-                && at(*fat_offset).is_some_and(|fat| read_equals(device, fat, &FAT_HEAD))
+                && media_ok(*fat_offset, FatWidth::Exfat, EXFAT_MEDIA)
         }
         BootLayout::Ntfs {
             mft_offset,
             mirror_offset,
-        } => [*mft_offset, *mirror_offset]
-            .iter()
-            .any(|&record| at(record).is_some_and(|record| read_equals(device, record, b"FILE"))),
+            record_size,
+        } => {
+            let Ok(record_size) = usize::try_from(*record_size) else {
+                return false;
+            };
+            [*mft_offset, *mirror_offset].iter().any(|&record| {
+                at(record)
+                    .and_then(|record| read(device, record, record_size))
+                    .is_some_and(|bytes| mft_self_record_ok(&bytes))
+            })
+        }
     }
 }
 
-fn read_equals(device: &dyn BlockDevice, at: u64, expected: &[u8]) -> bool {
-    let mut actual = vec![0u8; expected.len()];
-    device.read_exact_at(at, &mut actual).is_ok() && actual == expected
+fn read(device: &dyn BlockDevice, at: u64, len: usize) -> Option<Vec<u8>> {
+    let mut bytes = vec![0u8; len];
+    device.read_exact_at(at, &mut bytes).ok().map(|()| bytes)
 }
 
 /// exFAT 引导区（12 个扇区）的第 11 个扇区填满了前 11 个扇区的校验和，计算时跳过卷标志与使用百分比。

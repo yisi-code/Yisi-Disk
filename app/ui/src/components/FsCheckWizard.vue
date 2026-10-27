@@ -17,7 +17,7 @@ import {
   type JobTarget,
   type PartitionInfo,
 } from '../services/host'
-import { formatBytes } from '../utils/format'
+import { formatBytes, formatHex } from '../utils/format'
 
 const STEPS = ['source', 'partition', 'check', 'result'] as const
 type WizardStep = (typeof STEPS)[number]
@@ -32,7 +32,7 @@ const emit = defineEmits<{ exit: [] }>()
 
 const { t, te, locale } = useI18n()
 const { formatHostError } = useHostErrorText()
-const { filesystemName, sourceName } = usePartitionText()
+const { filesystemName, sourceName, bootFieldName, bootFieldValue } = usePartitionText()
 const browse = useBrowse()
 const fsCheck = useFsCheck()
 
@@ -269,9 +269,6 @@ function number(value: number | null): string {
   return value === null ? '' : value.toLocaleString(locale.value)
 }
 
-function hex(value: number | null): string {
-  return value === null ? '' : `0x${value.toString(16).toUpperCase()}`
-}
 
 /** `$Bitmap`、`$UpCase` 是 exFAT 的系统结构，换成本地化的名字 */
 function displayPath(path: string | null): string {
@@ -284,13 +281,18 @@ function displayPath(path: string | null): string {
 
 function issueParams(issue: FsIssue): Record<string, string> {
   const valueText = (value: number | null) => {
-    if (BYTE_VALUES.includes(issue.kind)) {
-      return value === null ? '' : formatBytes(value)
+    if (value === null) {
+      return ''
     }
-    return HEX_VALUES.includes(issue.kind) ? hex(value) : number(value)
+    if (issue.field !== null) {
+      return bootFieldValue(issue.field, value)
+    }
+    if (BYTE_VALUES.includes(issue.kind)) {
+      return formatBytes(value)
+    }
+    return HEX_VALUES.includes(issue.kind) ? formatHex(value) : number(value)
   }
   const areaKey = `fsCheck.areas.${issue.area ?? ''}`
-  const fieldKey = `fsCheck.fields.${issue.field ?? ''}`
   return {
     path: displayPath(issue.path),
     otherPath: displayPath(issue.otherPath),
@@ -301,7 +303,7 @@ function issueParams(issue: FsIssue): Record<string, string> {
     expected: valueText(issue.expected),
     actual: valueText(issue.actual),
     area: issue.area !== null && te(areaKey) ? t(areaKey) : (issue.area ?? ''),
-    field: issue.field !== null && te(fieldKey) ? t(fieldKey) : (issue.field ?? ''),
+    field: issue.field === null ? '' : bootFieldName(issue.field),
   }
 }
 

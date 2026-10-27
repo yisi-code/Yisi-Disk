@@ -1,34 +1,29 @@
 //! exFAT 的检查：主、备引导区（参数与校验和）、分配位图、大写表、目录项集合（校验和、次项个数、文件名长度）、
 //! 每个文件的簇（FAT 链或连续存放）与分配位图是否一致、丢失簇。依据微软公开的 exFAT 规范。
 
+use yisi_fs::FsKind;
 use yisi_fs::boot::{exfat_boot_checksum, exfat_stored_checksum};
 use yisi_fs::bpb::{self, ExfatBpb as Geometry, Problem};
-use yisi_part::bytes::{le16, le32, le64};
+use yisi_fs::format::{
+    EXFAT_IN_USE, EXFAT_TYPE_BITMAP, EXFAT_TYPE_FILE, EXFAT_TYPE_NAME, EXFAT_TYPE_STREAM, ExfatSet,
+    SetProblem, exfat_entry_set,
+};
+use yisi_part::bytes::{le32, le64};
 
 use crate::check::chains::{Layout, MAX_DEPTH, Volume};
 use crate::check::disk::Span;
 use crate::check::fat::join;
 use crate::check::issue::{Area, Issue, IssueKind};
 use crate::check::table::{FatTable, Owners, ROOT, Width};
-use crate::check::{CheckItem, Ctx, FsType, Stage, Summary};
+use crate::check::{CheckItem, Ctx, FsType, Stage, Summary, check_backup};
 
 const ENTRY: usize = 32;
-/// 目录项类型的第 7 位：1 为使用中。
-const IN_USE: u8 = 0x80;
-const TYPE_BITMAP: u8 = 0x81;
 const TYPE_UPCASE: u8 = 0x82;
-const TYPE_FILE: u8 = 0x85;
-const TYPE_STREAM: u8 = 0xC0;
-const TYPE_NAME: u8 = 0xC1;
 const ATTR_DIRECTORY: u16 = 0x10;
-/// 流扩展项的标志：第 1 位为「不走 FAT 链」（簇连续存放）。
-const NO_FAT_CHAIN: u8 = 0x02;
 /// VolumeFlags：第 0 位用第二份 FAT，第 1 位未正常卸下，第 2 位出过介质故障。
 const FLAG_ACTIVE_FAT: u16 = 0x01;
 const FLAG_DIRTY: u16 = 0x02;
 const FLAG_MEDIA_FAILURE: u16 = 0x04;
-/// 引导区校验和不计入的字节：VolumeFlags（106、107）与 PercentInUse（112）。
-const CHECKSUM_SKIPPED: [usize; 3] = [106, 107, 112];
 /// 大写表最多读这么多（规范里的完整大写表不到 6 KiB）。
 const MAX_UPCASE_BYTES: u64 = 1 << 20;
 
@@ -52,44 +47,37 @@ fn checksum_matches(region: &[u8], bytes_per_sector: usize) -> bool {
 
 /// 检查一个 exFAT 卷。`region` 是认出来的引导区（12 个扇区，`from_backup` 时来自备份）。被取消时返回 `None`。
 pub(crate) fn check(ctx: &mut Ctx, region: &[u8], from_backup: bool) -> Option<Summary> {
-    let mut area = if from_backup {
+    let area = if from_backup {
         Area::BackupBoot
     } else {
         Area::Boot
     };
-    let mut region = region.to_vec();
-    let mut using_backup = from_backup;
-    let (parsed, problems) = parse(&region);
+    let (parsed, problems) = parse(region);
     ctx.boot_problems(&problems, area);
-    let geometry = match parsed {
-        Some(geometry) => geometry,
-        None => {
-            // 主引导扇区坏了就试备份引导区
-            let backup = (!from_backup).then(|| read_backup(ctx)).flatten();
-            match backup.map(|backup| (parse(&backup), backup)) {
-                Some(((Some(geometry), problems), backup)) => {
-                    ctx.boot_problems(&problems, Area::BackupBoot);
-                    region = backup;
-                    using_backup = true;
-                    area = Area::BackupBoot;
-                    geometry
-                }
-                _ => return Some(unknown()),
-            }
-        }
+    let Some(geometry) = parsed else {
+        return Some(unknown());
     };
     ctx.checked(CheckItem::Boot);
     let bps = geometry.bytes_per_sector();
     let cluster_size = geometry.cluster_size();
     let length = ctx.disk.length();
 
-    if !checksum_matches(&region, bps as usize) {
+    if !checksum_matches(region, bps as usize) {
         ctx.issues
             .push(Issue::new(IssueKind::BootChecksum).area(area));
     }
     ctx.checked(CheckItem::BootChecksum);
-    if !using_backup {
-        check_backup(ctx, &region, bps);
+    // 备份引导区：参数按诊断的字段比对，校验和另算
+    if !from_backup && let Some(at) = check_backup(ctx, FsKind::Exfat, region) {
+        let mut backup = vec![0u8; region.len()];
+        if ctx
+            .read(at, &mut backup, Area::BackupBoot, None)
+            .is_some_and(|bad| bad.is_empty())
+            && !checksum_matches(&backup, bps as usize)
+        {
+            ctx.issues
+                .push(Issue::new(IssueKind::BootChecksum).area(Area::BackupBoot));
+        }
     }
 
     let volume_bytes = geometry.volume_length.saturating_mul(bps);
@@ -177,52 +165,6 @@ fn unknown() -> Summary {
     }
 }
 
-/// 备份引导区在第 12 个扇区起：主引导扇区坏了时用它。
-fn read_backup(ctx: &mut Ctx) -> Option<Vec<u8>> {
-    // 主引导扇区坏了，扇区大小也未必可信：先按备份自己的扇区大小试
-    for shift in 9..=12u32 {
-        let bps = 1u64 << shift;
-        let mut backup = vec![0u8; 12 * bps as usize];
-        let bad = ctx.read(12 * bps, &mut backup, Area::BackupBoot, None)?;
-        if bad.is_empty()
-            && backup.get(3..11) == Some(b"EXFAT   ".as_slice())
-            && backup.get(108).copied() == Some(shift as u8)
-        {
-            return Some(backup);
-        }
-    }
-    None
-}
-
-/// 备份引导区：校验和要对，参数（跳过 VolumeFlags 与 PercentInUse）要与主引导区一致。
-fn check_backup(ctx: &mut Ctx, main: &[u8], bps: u64) {
-    ctx.checked(CheckItem::BackupBoot);
-    let mut backup = vec![0u8; main.len()];
-    let readable = ctx
-        .read(12 * bps, &mut backup, Area::BackupBoot, None)
-        .is_some_and(|bad| bad.is_empty());
-    if !readable || parse(&backup).0.is_none() {
-        ctx.issues
-            .push(Issue::new(IssueKind::BackupBootInvalid).area(Area::BackupBoot));
-        return;
-    }
-    if !checksum_matches(&backup, bps as usize) {
-        ctx.issues
-            .push(Issue::new(IssueKind::BootChecksum).area(Area::BackupBoot));
-        return;
-    }
-    let differs = main
-        .iter()
-        .zip(&backup)
-        .take(11 * bps as usize)
-        .enumerate()
-        .any(|(index, (a, b))| a != b && !CHECKSUM_SKIPPED.contains(&index));
-    if differs {
-        ctx.issues
-            .push(Issue::new(IssueKind::BackupBootMismatch).area(Area::BackupBoot));
-    }
-}
-
 /// 读进内存的分配位图：第 n 位（从 2 号簇算起）为 1 表示已分配。读不出的部分不作判断。
 struct Bitmap {
     bytes: Vec<u8>,
@@ -253,16 +195,6 @@ struct DirJob {
 struct ExfatChecker {
     volume: Volume,
     bitmap: Option<Bitmap>,
-}
-
-/// 一组目录项（文件项 + 流扩展项 + 文件名项）里检查要用的内容。
-struct FileSet {
-    name: String,
-    attributes: u16,
-    first_cluster: u32,
-    data_length: u64,
-    valid_length: u64,
-    no_fat_chain: bool,
 }
 
 impl ExfatChecker {
@@ -308,7 +240,7 @@ impl ExfatChecker {
             }
             match raw[0] {
                 0 => break,
-                TYPE_BITMAP if bitmap_entry.is_none() => bitmap_entry = Some(*raw),
+                EXFAT_TYPE_BITMAP if bitmap_entry.is_none() => bitmap_entry = Some(*raw),
                 TYPE_UPCASE if upcase_entry.is_none() => upcase_entry = Some(*raw),
                 _ => {}
             }
@@ -448,12 +380,12 @@ impl ExfatChecker {
             if kind == 0 {
                 break;
             }
-            if kind & IN_USE == 0 {
+            if kind & EXFAT_IN_USE == 0 {
                 index += 1;
                 continue;
             }
             match kind {
-                TYPE_FILE => {
+                EXFAT_TYPE_FILE => {
                     let (consumed, set) =
                         self.file_set(ctx, &job.path, entries, index, &unreadable);
                     index += consumed;
@@ -461,7 +393,7 @@ impl ExfatChecker {
                         self.entry(ctx, job, set, stack)?;
                     }
                 }
-                TYPE_STREAM | TYPE_NAME => {
+                EXFAT_TYPE_STREAM | EXFAT_TYPE_NAME => {
                     orphans += 1;
                     index += 1;
                 }
@@ -478,8 +410,8 @@ impl ExfatChecker {
         Some(())
     }
 
-    /// 解析从 `index` 起的一组目录项，记下发现的问题。返回占了几项，以及能用来认领簇的内容
-    /// （缺流扩展项、或者集合跨进了读不出的扇区时为 `None`）。
+    /// 解析从 `index` 起的一组目录项（规则在 [`yisi_fs::format`]，与浏览共用），记下发现的问题。返回占了几项，
+    /// 以及能用来认领簇的内容（缺流扩展项、或者集合跨进了读不出的扇区时为 `None`）。
     fn file_set(
         &mut self,
         ctx: &mut Ctx,
@@ -487,116 +419,51 @@ impl ExfatChecker {
         entries: &[[u8; ENTRY]],
         index: usize,
         unreadable: &dyn Fn(usize) -> bool,
-    ) -> (usize, Option<FileSet>) {
-        let Some(primary) = entries.get(index) else {
-            return (1, None);
-        };
-        let recorded = usize::from(primary[1]);
-        if !(2..=18).contains(&recorded) {
-            ctx.issues.push(
-                Issue::new(IssueKind::EntrySetCount)
-                    .path(dir)
-                    .expected(recorded as u64)
-                    .actual(0),
-            );
-            return (1, None);
-        }
-        if (1..=recorded).any(|offset| unreadable(index + offset)) {
+    ) -> (usize, Option<ExfatSet>) {
+        let recorded = entries
+            .get(index)
+            .map_or(0, |primary| usize::from(primary[1]));
+        if (2..=18).contains(&recorded) && (1..=recorded).any(|offset| unreadable(index + offset)) {
             // 读不出的部分已记成问题，这组项不再另算
             return (recorded + 1, None);
         }
-        // 实际连着的次项：使用中、类型是次项（第 6 位为 1），第一项是流扩展项，文件名项紧随其后
-        let mut found = 0;
-        let mut stream = None;
-        let mut names = 0usize;
-        let mut units: Vec<u16> = Vec::new();
-        for offset in 1..=recorded {
-            let Some(raw) = entries.get(index + offset) else {
-                break;
-            };
-            let kind = raw[0];
-            if kind & IN_USE == 0 || kind & 0x40 == 0 {
-                break;
-            }
-            match (offset, kind) {
-                (1, TYPE_STREAM) => stream = Some(raw),
-                (1, _) => break,
-                (_, TYPE_NAME) if names + 2 == offset => {
-                    names += 1;
-                    units.extend((0..15).filter_map(|unit| le16(raw, 2 + unit * 2)));
-                }
-                (_, TYPE_NAME) => break,
-                _ => {}
-            }
-            found = offset;
-        }
-        let name_length = stream.map_or(0, |raw| usize::from(raw[3]));
-        let mut name: Vec<u16> = units.iter().copied().take(name_length).collect();
-        if name.is_empty() {
-            name = units
-                .iter()
-                .copied()
-                .take_while(|&unit| unit != 0)
-                .collect();
-        }
-        let display = String::from_utf16_lossy(&name);
-        let path = if display.is_empty() {
+        let mut set = exfat_entry_set(entries, index);
+        let path = if set.name.is_empty() {
             dir.to_owned()
         } else {
-            join(dir, &display)
+            join(dir, &set.name)
         };
-        if found < recorded {
-            ctx.issues.push(
-                Issue::new(IssueKind::EntrySetCount)
-                    .path(path.as_str())
-                    .expected(recorded as u64)
-                    .actual(found as u64),
-            );
-        } else {
-            let mut checksum = 0u16;
-            for (offset, raw) in entries.iter().skip(index).take(recorded + 1).enumerate() {
-                for (position, &byte) in raw.iter().enumerate() {
-                    if offset == 0 && (position == 2 || position == 3) {
-                        continue;
-                    }
-                    checksum = checksum.rotate_right(1).wrapping_add(u16::from(byte));
+        for problem in &set.problems {
+            let (kind, expected, actual) = match *problem {
+                SetProblem::SecondaryCount { recorded } => {
+                    (IssueKind::EntrySetCount, recorded as u64, 0)
                 }
-            }
-            let stored = le16(primary, 2).unwrap_or(0);
-            if checksum != stored {
-                ctx.issues.push(
-                    Issue::new(IssueKind::EntrySetChecksum)
-                        .path(path.as_str())
-                        .expected(u64::from(stored))
-                        .actual(u64::from(checksum)),
-                );
-            }
-        }
-        let Some(stream) = stream else {
-            return (found + 1, None);
-        };
-        let wanted = name_length.div_ceil(15);
-        if name_length == 0 || names != wanted {
+                SetProblem::Missing { recorded, found } => {
+                    (IssueKind::EntrySetCount, recorded as u64, found as u64)
+                }
+                SetProblem::Checksum { stored, computed } => (
+                    IssueKind::EntrySetChecksum,
+                    u64::from(stored),
+                    u64::from(computed),
+                ),
+                SetProblem::NameLength { expected, found } => {
+                    (IssueKind::EntryNameLength, expected as u64, found as u64)
+                }
+            };
             ctx.issues.push(
-                Issue::new(IssueKind::EntryNameLength)
+                Issue::new(kind)
                     .path(path.as_str())
-                    .expected(wanted as u64)
-                    .actual(names as u64),
+                    .expected(expected)
+                    .actual(actual),
             );
         }
-        let set = FileSet {
-            name: if display.is_empty() {
-                "?".to_owned()
-            } else {
-                display
-            },
-            attributes: le16(primary, 4).unwrap_or(0),
-            first_cluster: le32(stream, 20).unwrap_or(0),
-            data_length: le64(stream, 24).unwrap_or(0),
-            valid_length: le64(stream, 8).unwrap_or(0),
-            no_fat_chain: stream[1] & NO_FAT_CHAIN != 0,
-        };
-        (found + 1, Some(set))
+        if !set.has_stream {
+            return (set.entries, None);
+        }
+        if set.name.is_empty() {
+            set.name = "?".to_owned();
+        }
+        (set.entries, Some(set))
     }
 
     /// 认领一个文件或目录的簇；目录压栈。
@@ -604,7 +471,7 @@ impl ExfatChecker {
         &mut self,
         ctx: &mut Ctx,
         job: &DirJob,
-        set: FileSet,
+        set: ExfatSet,
         stack: &mut Vec<DirJob>,
     ) -> Option<()> {
         let path = join(&job.path, &set.name);

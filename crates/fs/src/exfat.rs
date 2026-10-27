@@ -4,52 +4,24 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use yisi_part::bytes::{le16, le32, le64};
 
+use crate::bpb::ExfatBpb;
 use crate::clusters::{Chain, Clusters, FatWidth, Run};
 use crate::entry::{ClusterRef, Entry, FileRef, Listing, Location, State, dos_time};
+use crate::format::{EXFAT_TYPE_BITMAP, EXFAT_TYPE_FILE, ExfatSet, exfat_entry_set};
 use crate::reader::FileReader;
 use crate::region::{ChunkCache, Region};
 use crate::{FsError, MAX_DIR_BYTES, MAX_ENTRIES, bpb};
 
 const ENTRY: usize = 32;
 /// 目录项类型的第 7 位：1 为使用中，删除时清零。
-const IN_USE: u8 = 0x80;
-const TYPE_BITMAP: u8 = 0x81;
 const TYPE_LABEL: u8 = 0x83;
-const TYPE_FILE: u8 = 0x85;
-const TYPE_STREAM: u8 = 0xC0;
-const TYPE_NAME: u8 = 0xC1;
 const ATTR_DIRECTORY: u16 = 0x10;
-/// 流扩展项的标志：第 1 位为「不走 FAT 链」（簇连续存放）。
-const NO_FAT_CHAIN: u8 = 0x02;
 /// 分配位图一次读进内存的上限（对应 20 亿个簇），超过时按块缓存。
 const MAX_LOADED_BITMAP: u64 = 256 << 20;
 
-/// 引导扇区里的几何参数。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Geometry {
-    pub fat_offset: u64,
-    pub fat_length: u64,
-    pub heap_offset: u64,
-    pub cluster_count: u32,
-    pub root_cluster: u32,
-    pub sector_shift: u32,
-    pub cluster_shift: u32,
-    pub use_second_fat: bool,
-}
-
 /// 解析引导扇区；有致命问题时返回 `None`（规则在 [`bpb`](crate::bpb)）。
-pub(crate) fn parse_boot(sector: &[u8]) -> Option<Geometry> {
-    let bpb = bpb::check_exfat(sector).geometry?;
-    Some(Geometry {
-        fat_offset: bpb.fat_offset,
-        fat_length: bpb.fat_length,
-        heap_offset: bpb.heap_offset,
-        cluster_count: u32::try_from(bpb.cluster_count).ok()?,
-        root_cluster: bpb.root_cluster,
-        sector_shift: bpb.sector_shift,
-        cluster_shift: bpb.cluster_shift,
-        use_second_fat: bpb.use_second_fat(),
-    })
+pub(crate) fn parse_boot(sector: &[u8]) -> Option<ExfatBpb> {
+    bpb::check_exfat(sector).geometry
 }
 
 /// 分配位图：第 n 位（从 2 号簇算起）为 1 表示已分配。
@@ -72,25 +44,21 @@ impl Exfat {
     /// 按引导扇区 `boot`（主的或备份的）打开。
     pub fn open(region: Region, boot: &[u8]) -> Result<Self, FsError> {
         let geometry = parse_boot(boot).ok_or(FsError::Invalid("exFAT 引导扇区的参数不自洽"))?;
-        let sector_size = 1u64 << geometry.sector_shift;
-        let cluster_size = sector_size << geometry.cluster_shift;
-        let fat_start = if geometry.use_second_fat {
-            geometry.fat_offset + geometry.fat_length
-        } else {
-            geometry.fat_offset
-        } * sector_size;
-        let heap_offset = geometry.heap_offset * sector_size;
+        let heap_offset = geometry.heap_offset_bytes();
         if heap_offset >= region.length() {
             return Err(FsError::Invalid("exFAT 的簇区在分区之外"));
         }
-        let fits = (region.length() - heap_offset) / cluster_size;
-        let count = u64::from(geometry.cluster_count).min(fits);
-        let count = u32::try_from(count).map_err(|_| FsError::Invalid("簇数过大"))?;
+        let count = u32::try_from(geometry.usable_clusters(region.length()))
+            .map_err(|_| FsError::Invalid("簇数过大"))?;
         let clusters = Clusters {
-            fat: ChunkCache::new(region.clone(), fat_start, geometry.fat_length * sector_size),
+            fat: ChunkCache::new(
+                region.clone(),
+                geometry.active_fat_offset(),
+                geometry.fat_bytes(),
+            ),
             region,
             heap_offset,
-            cluster_size,
+            cluster_size: geometry.cluster_size(),
             count,
             width: FatWidth::Exfat,
         };
@@ -110,7 +78,7 @@ impl Exfat {
         for raw in root.as_chunks::<ENTRY>().0 {
             match raw.first().copied() {
                 Some(0) | None => break,
-                Some(TYPE_BITMAP) if volume.bitmap_runs.is_empty() => {
+                Some(EXFAT_TYPE_BITMAP) if volume.bitmap_runs.is_empty() => {
                     let first = le32(raw, 20).unwrap_or(0);
                     let length = le64(raw, 24).unwrap_or(0);
                     let needed = volume.clusters.clusters_for(length);
@@ -176,30 +144,28 @@ impl Exfat {
         let mut entries = Vec::new();
         let mut truncated = false;
         let mut index = 0;
-        let count = bytes.len() / ENTRY;
-        while index < count {
-            let Some(raw) = entry_at(&bytes, index) else {
-                break;
-            };
-            let kind = raw.first().copied().unwrap_or(0);
+        let raw_entries = bytes.as_chunks::<ENTRY>().0;
+        while let Some(raw) = raw_entries.get(index) {
+            let kind = raw[0];
             if kind == 0 {
                 break;
             }
-            if kind & 0x7F != TYPE_FILE & 0x7F {
+            if kind & 0x7F != EXFAT_TYPE_FILE & 0x7F {
                 index += 1;
                 continue;
             }
-            match file_set(&bytes, index) {
-                Some(set) => {
-                    if entries.len() >= MAX_ENTRIES {
-                        truncated = true;
-                        break;
-                    }
-                    index += set.entries;
-                    entries.push(self.entry(set, dir.deleted)?);
-                }
-                None => index += 1,
+            // 规则在 format，与文件系统检查共用；有问题的组不列出（已删除的组可能已被新目录项部分覆盖）
+            let set = exfat_entry_set(raw_entries, index);
+            if !set.problems.is_empty() || !set.has_stream {
+                index += 1;
+                continue;
             }
+            if entries.len() >= MAX_ENTRIES {
+                truncated = true;
+                break;
+            }
+            index += set.entries;
+            entries.push(self.entry(set, dir.deleted)?);
         }
         Ok(Listing {
             entries,
@@ -249,7 +215,7 @@ impl Exfat {
         self.clusters.read_runs(&runs, limit)
     }
 
-    fn entry(&self, set: FileSet, parent_deleted: bool) -> Result<Entry, FsError> {
+    fn entry(&self, set: ExfatSet, parent_deleted: bool) -> Result<Entry, FsError> {
         let deleted = set.deleted || parent_deleted;
         let is_dir = set.attributes & ATTR_DIRECTORY != 0;
         let mut at = ClusterRef {
@@ -275,8 +241,8 @@ impl Exfat {
             short_name: None,
             name_uncertain: false,
             size: if is_dir { 0 } else { file.size },
-            modified: set.modified,
-            created: set.created,
+            modified: timestamp(set.modified),
+            created: timestamp(set.created),
             state,
             position: (is_dir || file.size > 0)
                 .then(|| self.clusters.offset(at.first_cluster))
@@ -363,89 +329,7 @@ impl Exfat {
     }
 }
 
-fn entry_at(bytes: &[u8], index: usize) -> Option<&[u8]> {
-    let start = index.checked_mul(ENTRY)?;
-    bytes.get(start..start.checked_add(ENTRY)?)
-}
-
-/// 一组目录项（文件项 + 流扩展项 + 文件名项）解析出的内容。
-struct FileSet {
-    /// 这一组占几个目录项。
-    entries: usize,
-    deleted: bool,
-    attributes: u16,
-    name: String,
-    first_cluster: u32,
-    data_length: u64,
-    valid_length: u64,
-    no_fat_chain: bool,
-    modified: Option<String>,
-    created: Option<String>,
-}
-
-/// 从第 `index` 项起解析一组目录项。类型次序、使用中标记要一致，校验和要对得上（删除的组按删除前的类型字节计算），
-/// 否则返回 `None`：已删除目录项的空间可能已被新的目录项部分覆盖。
-fn file_set(bytes: &[u8], index: usize) -> Option<FileSet> {
-    let primary = entry_at(bytes, index)?;
-    let kind = *primary.first()?;
-    let deleted = kind & IN_USE == 0;
-    let secondary = usize::from(*primary.get(1)?);
-    if !(2..=18).contains(&secondary) {
-        return None;
-    }
-    let mut checksum = 0u16;
-    let mut name_units = Vec::new();
-    let mut stream = None;
-    for offset in 0..=secondary {
-        let raw = entry_at(bytes, index + offset)?;
-        let entry_kind = *raw.first()?;
-        if (entry_kind & IN_USE == 0) != deleted {
-            return None;
-        }
-        let in_use_kind = entry_kind | IN_USE;
-        match (offset, in_use_kind) {
-            (0, TYPE_FILE) => {}
-            (1, TYPE_STREAM) => stream = Some(raw),
-            (2.., TYPE_NAME) => {
-                name_units.extend((0..15).filter_map(|unit| le16(raw, 2 + unit * 2)));
-            }
-            // 厂商扩展项等：只参与校验和
-            (2.., kind) if kind & 0x40 != 0 => {}
-            _ => return None,
-        }
-        for (position, &byte) in raw.iter().enumerate() {
-            if offset == 0 && (position == 2 || position == 3) {
-                continue;
-            }
-            let byte = if position == 0 { in_use_kind } else { byte };
-            checksum = checksum.rotate_right(1).wrapping_add(u16::from(byte));
-        }
-    }
-    if Some(checksum) != le16(primary, 2) {
-        return None;
-    }
-    let stream = stream?;
-    let name_length = usize::from(*stream.get(3)?);
-    if name_length == 0 || name_length > name_units.len() {
-        return None;
-    }
-    name_units.truncate(name_length);
-    let timestamp = |at| {
-        let value = le32(primary, at)?;
-        dos_time((value >> 16) as u16, value as u16)
-    };
-    Some(FileSet {
-        entries: secondary + 1,
-        deleted,
-        attributes: le16(primary, 4)?,
-        name: String::from_utf16_lossy(&name_units),
-        first_cluster: le32(stream, 20)?,
-        data_length: le64(stream, 24)?,
-        valid_length: le64(stream, 8)?,
-        no_fat_chain: stream
-            .get(1)
-            .is_some_and(|&flags| flags & NO_FAT_CHAIN != 0),
-        modified: timestamp(12),
-        created: timestamp(8),
-    })
+/// exFAT 时间戳：日期在高 16 位、时间在低 16 位，各按 DOS 格式。
+fn timestamp(value: u32) -> Option<String> {
+    dos_time((value >> 16) as u16, value as u16)
 }

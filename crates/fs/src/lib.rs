@@ -12,6 +12,7 @@ mod clusters;
 mod entry;
 mod exfat;
 mod fat;
+pub mod format;
 mod ntfs;
 mod reader;
 mod region;
@@ -28,6 +29,7 @@ pub use boot::{BootCopy, BootLayout, BootSector, inspect_boot};
 pub use entry::{ClusterRef, Entry, FileRef, Listing, Location, State, Unsupported};
 /// FAT 短文件名的长文件名校验和与显示形式。文件系统检查（`yisi-repair`）用的也是这一份。
 pub use fat::{short_checksum as fat_short_checksum, short_display as fat_short_display};
+pub use ntfs::mft_self_record_ok;
 pub use reader::FileReader;
 
 use crate::region::Region;
@@ -102,30 +104,13 @@ pub fn detect(device: &dyn BlockDevice, offset: u64, length: u64) -> Result<FsKi
     }
     let mut sector = [0u8; 512];
     device.read_exact_at(offset, &mut sector)?;
-    match sector.get(3..11) {
-        Some(b"EXFAT   ") => {
-            return Ok(if exfat::parse_boot(&sector).is_some() {
-                FsKind::Exfat
-            } else {
-                FsKind::Unknown
-            });
-        }
-        Some(b"NTFS    ") => {
-            return Ok(if ntfs::parse_boot(&sector).is_some() {
-                FsKind::Ntfs
-            } else {
-                FsKind::Unknown
-            });
-        }
-        Some(b"-FVE-FS-") => return Ok(FsKind::BitLocker),
-        _ => {}
+    if let Some(kind) = boot::usable_kind(&sector) {
+        return Ok(kind);
     }
-    if let Some(geometry) = fat::parse_boot(&sector) {
-        return Ok(match geometry.width {
-            clusters::FatWidth::Fat12 => FsKind::Fat12,
-            clusters::FatWidth::Fat16 => FsKind::Fat16,
-            _ => FsKind::Fat32,
-        });
+    match boot::remnant_kind(&sector) {
+        Some(FsKind::BitLocker) => return Ok(FsKind::BitLocker),
+        Some(FsKind::Exfat | FsKind::Ntfs) => return Ok(FsKind::Unknown),
+        _ => {}
     }
     // ext 的超级块在分区第 1024 字节处，魔数在其中第 56 字节
     if length >= 2048 {
