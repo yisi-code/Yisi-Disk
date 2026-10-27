@@ -8,7 +8,8 @@ mod engines;
 mod shell;
 
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::webview::PageLoadEvent;
+use tauri::{AppHandle, Manager, State};
 use yisi_engine::protocol::{
     BrowseOpened, Capabilities, CopyItem, DiskList, ExtractItem, FileListPage, FilePreview,
     FileTypeList, PartitionRef, ScanResult,
@@ -301,6 +302,12 @@ fn main() -> anyhow::Result<()> {
         .plugin(tauri_plugin_dialog::init())
         .manage(Engines::default())
         .manage(BrokerSession::default())
+        // 页面开始（重新）加载时，旧页面发起的任务已经没人管了：全部取消，引擎随之退出
+        .on_page_load(|webview, payload| {
+            if payload.event() == PageLoadEvent::Started {
+                webview.state::<Engines>().cancel_all();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             app_info,
             engine_capabilities,

@@ -580,6 +580,7 @@ export default {
     browser: {
       title: '分区里的文件',
       check: '选择 {name}',
+      checkInherited: '所在的文件夹已勾选，会一起复制；要单独取消，先取消文件夹',
       nameUncertain: '名字不完整：删除时丢了首字母',
       orphans: '找不到原目录的文件',
       hint: '单击文件夹展开或收起，单击文件查看详情，双击文件用默认程序打开；方向键移动，空格勾选。',

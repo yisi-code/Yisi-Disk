@@ -565,6 +565,16 @@ impl Engines {
         Ok(())
     }
 
+    /// 取消全部正在运行的任务。界面重新加载（例如按了 F5）后不再认得以前的任务，留着只会一直占着源盘。
+    pub fn cancel_all(&self) {
+        let job_ids: Vec<String> = lock(&self.jobs).keys().cloned().collect();
+        for job_id in job_ids {
+            if let Err(error) = self.cancel(&job_id) {
+                tracing::warn!(%job_id, ?error, "界面重新加载时没能取消任务");
+            }
+        }
+    }
+
     pub fn cancel(&self, job_id: &str) -> Result<(), HostError> {
         let process = lock(&self.jobs)
             .get(job_id)
