@@ -1,6 +1,6 @@
 import { useI18n } from 'vue-i18n'
 import type { JobTarget } from '../services/host'
-import { formatHex } from '../utils/format'
+import { formatBytes, formatHex } from '../utils/format'
 
 /** 引导扇区里按十六进制显示的字段 */
 const HEX_BOOT_FIELDS = ['volumeSerial', 'volumeSerialHigh', 'mediaDescriptor', 'extFlags']
@@ -49,6 +49,28 @@ export function usePartitionText() {
     return te(key) ? t(key) : t('undelete.partition.reason.invalid')
   }
 
+  /** 分区的名字：卷标，没有时用 GPT 分区名；都没有时为空串 */
+  function partitionLabel(partition: { label: string | null; name?: string | null }): string {
+    return [partition.label, partition.name].find((text) => typeof text === 'string' && text !== '') ?? ''
+  }
+
+  /** 「1 号分区 卷标（NTFS，8.0 MiB）」：没有名字时不留空位 */
+  function partitionLine(partition: {
+    number: number
+    label: string | null
+    name?: string | null
+    filesystem: string
+    length: number
+  }): string {
+    const label = partitionLabel(partition)
+    return t('partition.line', {
+      number: partition.number,
+      label: label === '' ? '' : ` ${label}`,
+      filesystem: filesystemName(partition.filesystem),
+      size: formatBytes(partition.length),
+    })
+  }
+
   /** 引导扇区字段（规范里的名字）的显示名；修复打不开的分区比对主备、检查文件系统报参数问题共用 */
   function bootFieldName(field: string): string {
     const key = `bootField.${field}`
@@ -66,6 +88,8 @@ export function usePartitionText() {
     tableNote,
     sourceName,
     unbrowsableReason,
+    partitionLabel,
+    partitionLine,
     bootFieldName,
     bootFieldValue,
   }

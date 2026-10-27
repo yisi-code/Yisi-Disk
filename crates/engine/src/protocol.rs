@@ -6,6 +6,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// 输出目录里写入中途的文件名后缀（写完才改成正式名字）：宿主不打开以它结尾的文件。
+pub use yisi_carve::PARTIAL_SUFFIX;
+
 /// 返回 [`Capabilities`]。
 pub const CAPABILITIES: &str = "engine.capabilities";
 /// 读取扫描（任务）：参数 [`ReadScanParams`]，立即返回空对象，结果经 [`COMPLETED`] 通知送达，内容是 [`ReadScanReport`]。
@@ -537,9 +540,14 @@ pub struct PartitionRef {
     pub number: u32,
     pub offset: u64,
     pub length: u64,
-    /// 按位置打开的分区（[`OPEN_RANGE`]）：不核对分区表，只核对范围在设备之内。
-    #[serde(default)]
-    pub outside_table: bool,
+}
+
+impl PartitionRef {
+    /// 按位置打开的分区（[`OPEN_RANGE`]，编号从 [`RANGE_PARTITION_BASE`] 起）：不在分区表里。
+    /// 是不是只看编号，浏览会话按编号找分区也是这个判据。
+    pub fn is_outside_table(&self) -> bool {
+        self.number >= RANGE_PARTITION_BASE
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -898,15 +906,15 @@ mod tests {
     }
 
     #[test]
-    fn partition_ref_outside_table_fields_are_optional() {
+    fn partitions_outside_the_table_are_known_by_number() {
         let listed: PartitionRef =
             serde_json::from_value(json!({"number": 2, "offset": 1024, "length": 4096})).unwrap();
-        assert!(!listed.outside_table);
+        assert!(!listed.is_outside_table());
         let found: PartitionRef = serde_json::from_value(json!({
-            "number": RANGE_PARTITION_BASE, "offset": 1024, "length": 4096, "outsideTable": true
+            "number": RANGE_PARTITION_BASE, "offset": 1024, "length": 4096
         }))
         .unwrap();
-        assert!(found.outside_table);
+        assert!(found.is_outside_table());
         let range: OpenRangeParams =
             serde_json::from_value(json!({"jobId": "b1", "offset": 1024, "length": 4096})).unwrap();
         assert_eq!(range.boot, BootCopy::Primary);

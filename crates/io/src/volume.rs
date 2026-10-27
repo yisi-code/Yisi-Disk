@@ -24,6 +24,32 @@ const EXTENTS_BUFFER_SIZE: usize = 4096;
 /// 卷的 GUID 路径以此开头，例如 `\\?\Volume{0a1b…}\`。
 const VOLUME_PREFIX: &str = r"\\?\Volume{";
 
+/// 输出写不写到源盘上的判断：`output_disks`（输出所在卷的磁盘，[`volume_disk_numbers`] 的结果）里没有
+/// `source_disk` 才通过。任何一项查不到都不通过：宁可换个位置，也不冒险写回源盘。
+/// 引擎的边扫边存、复制、制作镜像与宿主保存检查报告共用。
+pub fn ensure_off_source(
+    source_disk: Result<u32, IoError>,
+    output_disks: Result<Vec<u32>, IoError>,
+) -> Result<(), OnSource> {
+    let source_disk = source_disk.map_err(OnSource::SourceUnknown)?;
+    let output_disks = output_disks.map_err(OnSource::OutputUnknown)?;
+    if output_disks.contains(&source_disk) {
+        return Err(OnSource::OnSource(source_disk));
+    }
+    Ok(())
+}
+
+/// [`ensure_off_source`] 不通过的原因。
+#[derive(Debug, thiserror::Error)]
+pub enum OnSource {
+    #[error("无法确认源盘的编号")]
+    SourceUnknown(#[source] IoError),
+    #[error("无法确认输出位置所在的磁盘")]
+    OutputUnknown(#[source] IoError),
+    #[error("输出位置在源盘（磁盘 {0}）上")]
+    OnSource(u32),
+}
+
 /// `path` 所在的卷落在哪些物理磁盘上，编号与 `\\.\PhysicalDriveN` 的 N 相同；跨盘的卷会有多个。
 ///
 /// `path` 可以还不存在：取最近一级已存在的上级目录，打开它（随目录联接、符号链接走到真实位置），
@@ -148,6 +174,37 @@ fn parse_disk_extents(bytes: &[u8]) -> io::Result<Vec<u32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn query_failed() -> IoError {
+        IoError::Query {
+            what: "测试",
+            source: io::Error::other("查不到"),
+        }
+    }
+
+    #[test]
+    fn output_must_be_off_the_source_disk() {
+        assert!(ensure_off_source(Ok(1), Ok(vec![0])).is_ok());
+        assert!(ensure_off_source(Ok(0), Ok(vec![1, 2])).is_ok());
+        assert!(matches!(
+            ensure_off_source(Ok(0), Ok(vec![0])),
+            Err(OnSource::OnSource(0))
+        ));
+        // 跨盘的卷只要有一段在源盘上就不行
+        assert!(matches!(
+            ensure_off_source(Ok(2), Ok(vec![1, 2, 3])),
+            Err(OnSource::OnSource(2))
+        ));
+        // 查不到的一律不通过
+        assert!(matches!(
+            ensure_off_source(Err(query_failed()), Ok(vec![1])),
+            Err(OnSource::SourceUnknown(_))
+        ));
+        assert!(matches!(
+            ensure_off_source(Ok(0), Err(query_failed())),
+            Err(OnSource::OutputUnknown(_))
+        ));
+    }
 
     fn wide(text: &str) -> Vec<u16> {
         text.encode_utf16().collect()

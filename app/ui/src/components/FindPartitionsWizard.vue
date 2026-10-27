@@ -60,7 +60,7 @@ const selectedCandidate = computed(() =>
   selectedIndex.value === null ? null : (candidates.value[selectedIndex.value] ?? null),
 )
 
-/** 复制时交给引擎的分区位置：不在分区表里，引擎只核对范围 */
+/** 复制时交给引擎的分区位置：编号是按位置打开时引擎给的，引擎据此只核对范围 */
 const partitionRef = computed<PartitionRef | null>(() => {
   const partition = openedPartition.value
   const candidate = selectedCandidate.value
@@ -71,7 +71,6 @@ const partitionRef = computed<PartitionRef | null>(() => {
     number: partition.number,
     offset: partition.offset,
     length: partition.length,
-    outsideTable: true,
   }
 })
 

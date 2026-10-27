@@ -1762,7 +1762,7 @@ fn partition_search_finds_lost_partitions_then_browses_and_copies_one() {
 
     // 复制：按位置打开的分区不核对分区表；没标明时按表核对，表里没有就拒绝
     let partition = json!({"number": RANGE_PARTITION_BASE, "offset": ntfs.offset,
-                           "length": ntfs.length, "outsideTable": true});
+                           "length": ntfs.length});
     let items = json!([{"file": report.file, "path": ["report.bin"]}]);
     let mut refused = Engine::start();
     let error = refused

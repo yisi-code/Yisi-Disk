@@ -28,7 +28,7 @@ pub use imaging::{
 };
 pub use raw::RawImage;
 #[cfg(windows)]
-pub use volume::volume_disk_numbers;
+pub use volume::{OnSource, ensure_off_source, volume_disk_numbers};
 pub use window::Window;
 #[cfg(windows)]
 pub use windows_disk::WindowsDisk;

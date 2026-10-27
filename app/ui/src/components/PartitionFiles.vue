@@ -7,6 +7,7 @@ import { useCopy } from '../composables/useCopy'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import {
   openCopiedFile,
+  openOrReveal,
   pickDirectory,
   revealCopiedFile,
   startCopy as startCopyJob,
@@ -171,19 +172,15 @@ async function finishOpen(item: TreeItem) {
     return
   }
   try {
-    await openCopiedFile(jobId, first.path)
-  } catch (error) {
-    const hostError = toHostError(error)
-    if (hostError.code !== 'executableBlocked') {
-      fileActionError.value = hostError
-      return
-    }
-    try {
-      await revealCopiedFile(jobId, first.path)
+    const outcome = await openOrReveal(
+      () => openCopiedFile(jobId, first.path),
+      () => revealCopiedFile(jobId, first.path),
+    )
+    if (outcome === 'revealed') {
       fileActionNote.value = t('undelete.details.executableRevealed')
-    } catch (revealError) {
-      fileActionError.value = toHostError(revealError)
     }
+  } catch (error) {
+    fileActionError.value = toHostError(error)
   }
 }
 

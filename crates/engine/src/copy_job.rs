@@ -9,6 +9,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use yisi_carve::{PARTIAL_SUFFIX, partial_path, rename_new};
 use yisi_engine::protocol::{COPIED, CopiedFile, CopySummary, JobCopied};
 use yisi_fs::{FileRef, Volume};
 
@@ -101,7 +102,9 @@ pub fn run(
         let relative = names.file(&item.path, output_dir);
         let target = output_dir.join(&relative);
         let shown = to_display(&relative);
-        match copy_one(volume, &item.file, &target, context, &mut done, total) {
+        match copy_one(
+            volume, &item.file, &target, context, &reporter, &mut done, total,
+        ) {
             Ok(CopyResult::Done { size, all_zero }) => {
                 copied += 1;
                 bytes += size;
@@ -213,6 +216,7 @@ fn copy_one(
     file: &FileRef,
     target: &Path,
     context: &JobContext,
+    reporter: &Reporter<'_>,
     done: &mut u64,
     total: u64,
 ) -> io::Result<CopyResult> {
@@ -223,9 +227,7 @@ fn copy_one(
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut partial = target.as_os_str().to_owned();
-    partial.push(".part");
-    let partial = PathBuf::from(partial);
+    let partial = partial_path(target);
     let mut output = File::create_new(&partial)?;
     let mut buffer = vec![0u8; CHUNK];
     let mut written = 0u64;
@@ -254,10 +256,16 @@ fn copy_one(
         }
         *done += read as u64;
         context.progress(*done, total);
+        reporter.tick();
     };
     drop(output);
     match outcome {
-        CopyResult::Done { .. } => fs::rename(&partial, target)?,
+        CopyResult::Done { .. } => {
+            if let Err(error) = rename_new(&partial, target) {
+                let _ = fs::remove_file(&partial);
+                return Err(error);
+            }
+        }
         _ => {
             let _ = fs::remove_file(&partial);
         }
@@ -265,7 +273,8 @@ fn copy_one(
     Ok(outcome)
 }
 
-/// 输出路径：每一级清洗成系统允许的名字；同一目录下重名（例如同名的已删除文件与现存文件）时加序号。
+/// 输出路径：每一级清洗成系统允许的名字；与本任务起过的名字、目录里已有的文件（含写入中途的 `.part`）
+/// 重名时加序号，不覆盖。复制与保存深度恢复结果共用。
 #[derive(Default)]
 pub(crate) struct Names {
     taken: HashSet<PathBuf>,
@@ -295,7 +304,11 @@ impl Names {
                 format!("{stem} ({attempt}){extension}")
             };
             let relative = parent.join(candidate);
-            if !self.taken.contains(&key(&relative)) && !output_dir.join(&relative).exists() {
+            let target = output_dir.join(&relative);
+            if !self.taken.contains(&key(&relative))
+                && !target.exists()
+                && !partial_path(&target).exists()
+            {
                 self.taken.insert(key(&relative));
                 return relative;
             }
@@ -318,7 +331,8 @@ fn to_display(relative: &Path) -> String {
 }
 
 /// 清洗成各系统都能用的一级名字：去掉控制字符和 `<>:"/\|?*`，去掉结尾的点和空格，
-/// 避开 `CON`、`NUL`、`COM1` 这类保留名，不允许 `.`、`..` 和空名字，长度截到 255 个 UTF-16 单元。
+/// 避开 `CON`、`NUL`、`COM1` 这类保留名，不允许 `.`、`..` 和空名字，长度截到 255 个 UTF-16 单元；
+/// 以 `.part` 结尾的把那个点换成 `_`（这个后缀留给写入中途的文件，宿主不打开）。
 pub fn sanitize(name: &str) -> String {
     let mut clean: String = name
         .chars()
@@ -359,6 +373,10 @@ pub fn sanitize(name: &str) -> String {
             })
             .collect();
     }
+    if clean.to_ascii_lowercase().ends_with(PARTIAL_SUFFIX) {
+        let dot = clean.len() - PARTIAL_SUFFIX.len();
+        clean.replace_range(dot..=dot, "_");
+    }
     clean
 }
 
@@ -380,9 +398,16 @@ impl<'a> Reporter<'a> {
 
     pub(crate) fn push(&self, file: CopiedFile) {
         self.pending.borrow_mut().push(file);
-        let due = self.pending.borrow().len() >= COPIED_BATCH
-            || self.last_flush.get().elapsed() >= COPIED_INTERVAL;
-        if due {
+        if self.pending.borrow().len() >= COPIED_BATCH {
+            self.flush();
+        } else {
+            self.tick();
+        }
+    }
+
+    /// 攒着的到时间了就发出去。处理一个大文件的过程中也要调用，免得之前做完的几个一直等到它结束才通知。
+    pub(crate) fn tick(&self) {
+        if !self.pending.borrow().is_empty() && self.last_flush.get().elapsed() >= COPIED_INTERVAL {
             self.flush();
         }
     }
@@ -419,6 +444,10 @@ mod tests {
         assert_eq!(sanitize("COMPUTER.txt"), "COMPUTER.txt");
         assert_eq!(sanitize("tab\there"), "tab_here");
         assert_eq!(sanitize(&"字".repeat(300)).chars().count(), 255);
+        // .part 留给写入中途的文件
+        assert_eq!(sanitize("a.part"), "a_part");
+        assert_eq!(sanitize("B.PART"), "B_PART");
+        assert_eq!(sanitize("a.part.txt"), "a.part.txt");
     }
 
     #[test]
@@ -452,5 +481,31 @@ mod tests {
             names.file(&path(&["noext"]), &output),
             PathBuf::from("noext (1)")
         );
+    }
+
+    #[test]
+    fn existing_and_partial_files_are_not_reused() {
+        let output = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-copy-names");
+        let _ = fs::remove_dir_all(&output);
+        fs::create_dir_all(&output).unwrap();
+        fs::write(output.join("a.txt"), b"x").unwrap();
+        fs::write(output.join("b.txt.part"), b"x").unwrap();
+        let mut names = Names::default();
+        let one = |name: &str| vec![name.to_owned()];
+        assert_eq!(
+            names.file(&one("a.txt"), &output),
+            PathBuf::from("a (1).txt")
+        );
+        // 别的任务还在写的 .part 也算占用
+        assert_eq!(
+            names.file(&one("b.txt"), &output),
+            PathBuf::from("b (1).txt")
+        );
+        // 改名时目标已存在不覆盖
+        fs::write(output.join("c.tmp"), b"new").unwrap();
+        let error = rename_new(&output.join("c.tmp"), &output.join("a.txt")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(output.join("a.txt")).unwrap(), b"x");
+        let _ = fs::remove_dir_all(&output);
     }
 }

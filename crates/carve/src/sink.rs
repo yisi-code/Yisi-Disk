@@ -29,6 +29,28 @@ pub trait SinkFile {
     fn discard(self: Box<Self>) -> io::Result<()>;
 }
 
+/// 写入中途的文件名后缀：先写 `名字.part`，写完再改成正式名字。正式名字不会以它结尾
+/// （复制时清洗名字会避开），宿主据此不打开还在写的文件。
+pub const PARTIAL_SUFFIX: &str = ".part";
+
+/// `path` 写入中途用的名字：后面加 [`PARTIAL_SUFFIX`]。
+pub fn partial_path(path: &Path) -> PathBuf {
+    let mut partial = path.as_os_str().to_owned();
+    partial.push(PARTIAL_SUFFIX);
+    PathBuf::from(partial)
+}
+
+/// 把写好的文件改成正式名字；`to` 已存在时不覆盖，答复 `AlreadyExists`（Windows 上 `fs::rename` 会覆盖）。
+pub fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
+    if to.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} 已存在", to.display()),
+        ));
+    }
+    fs::rename(from, to)
+}
+
 /// 恢复出的文件的名字：`f` 加起始扇区号（按 512 字节计），例如 `f0000012345.jpg`。
 pub fn recovered_name(offset: u64, extension: &str) -> String {
     format!("f{:010}.{extension}", offset / 512)
@@ -61,7 +83,7 @@ impl Sink for DirectorySink {
         let offset = self.origin.saturating_add(offset);
         let name = recovered_name(offset, extension);
         let final_path = self.directory.join(&name);
-        let partial_path = self.directory.join(format!("{name}.part"));
+        let partial_path = partial_path(&final_path);
         let file = File::create_new(&partial_path)?;
         Ok(Box::new(DirectoryFile {
             writer: BufWriter::new(file),
@@ -98,13 +120,7 @@ impl SinkFile for DirectoryFile {
         // 最近改名的文件可能内容不全，源盘只读，重扫即可。
         file.set_len(length)?;
         drop(file);
-        if self.final_path.exists() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("{} 已存在", self.final_path.display()),
-            ));
-        }
-        fs::rename(&self.partial_path, &self.final_path)?;
+        rename_new(&self.partial_path, &self.final_path)?;
         Ok(RecoveredFile {
             name: self.name,
             extension: self.extension,

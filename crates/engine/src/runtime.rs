@@ -720,26 +720,15 @@ fn adopt_disk(handle: u64) -> Result<yisi_io::WindowsDisk, ErrorObject> {
     })
 }
 
-/// 核对输出目录所在的磁盘里没有源盘。任何一项查不到都拒绝：宁可不开始，也不冒险写回源盘。
+/// 输出不能写到源盘上（规则见 [`yisi_io::ensure_off_source`]）。
 #[cfg(windows)]
 fn ensure_output_elsewhere(
     source_disk: Result<u32, yisi_io::IoError>,
     output_disks: Result<Vec<u32>, yisi_io::IoError>,
 ) -> Result<(), ErrorObject> {
-    let reject =
-        |message: String| ErrorObject::new(protocol::error_code::OUTPUT_ON_SOURCE, message);
-    let source_disk = source_disk
-        .map_err(|error| reject(format!("无法确认源盘的编号：{}", error_chain(&error))))?;
-    let output_disks = output_disks.map_err(|error| {
-        reject(format!(
-            "无法确认输出目录所在的磁盘：{}",
-            error_chain(&error)
-        ))
-    })?;
-    if output_disks.contains(&source_disk) {
-        return Err(reject(format!("输出目录在被扫描的磁盘 {source_disk} 上")));
-    }
-    Ok(())
+    yisi_io::ensure_off_source(source_disk, output_disks).map_err(|error| {
+        ErrorObject::new(protocol::error_code::OUTPUT_ON_SOURCE, error_chain(&error))
+    })
 }
 
 #[cfg(windows)]
@@ -774,8 +763,8 @@ fn disk_list() -> DiskList {
     DiskList { disks }
 }
 
-/// 输出子目录名里用的任务 ID：只取字母、数字和连字符，最多 8 个。
-fn short_id(job_id: &str) -> String {
+/// 输出子目录名里用的任务 ID：只取字母、数字和连字符，最多 8 个；一个也没有时用 `job`。
+pub(crate) fn short_id(job_id: &str) -> String {
     let id: String = job_id
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
@@ -834,45 +823,4 @@ pub(crate) fn error_chain(error: &dyn std::error::Error) -> String {
         source = cause.source();
     }
     message
-}
-
-#[cfg(all(test, windows))]
-mod tests {
-    use std::io;
-
-    use yisi_io::IoError;
-
-    use super::*;
-
-    fn query_failed() -> IoError {
-        IoError::Query {
-            what: "测试",
-            source: io::Error::other("查不到"),
-        }
-    }
-
-    #[test]
-    fn output_on_another_disk_is_accepted() {
-        assert!(ensure_output_elsewhere(Ok(1), Ok(vec![0])).is_ok());
-        assert!(ensure_output_elsewhere(Ok(0), Ok(vec![1, 2])).is_ok());
-    }
-
-    #[test]
-    fn output_on_the_source_disk_is_rejected() {
-        let error = ensure_output_elsewhere(Ok(0), Ok(vec![0])).unwrap_err();
-        assert_eq!(error.code, protocol::error_code::OUTPUT_ON_SOURCE);
-        assert!(error.message.contains("磁盘 0"), "{}", error.message);
-        // 跨盘的卷只要有一段在源盘上就不行
-        let spanned = ensure_output_elsewhere(Ok(2), Ok(vec![1, 2, 3])).unwrap_err();
-        assert_eq!(spanned.code, protocol::error_code::OUTPUT_ON_SOURCE);
-    }
-
-    #[test]
-    fn unknown_locations_are_rejected() {
-        let source = ensure_output_elsewhere(Err(query_failed()), Ok(vec![1])).unwrap_err();
-        assert_eq!(source.code, protocol::error_code::OUTPUT_ON_SOURCE);
-        let output = ensure_output_elsewhere(Ok(0), Err(query_failed())).unwrap_err();
-        assert_eq!(output.code, protocol::error_code::OUTPUT_ON_SOURCE);
-        assert!(output.message.contains("查不到"), "{}", output.message);
-    }
 }
