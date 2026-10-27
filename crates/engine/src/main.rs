@@ -7,10 +7,12 @@ mod carve_job;
 mod copy_job;
 mod extract_job;
 mod fs_check_job;
+mod image_inspect;
 mod image_job;
 mod job;
 mod preview;
 mod read_scan;
+mod reading;
 mod runtime;
 mod search_job;
 

@@ -31,7 +31,7 @@ const domPrefix = useId()
     <caption class="wizard__caption">{{ caption }}</caption>
     <thead>
       <tr>
-        <th scope="col"><span class="partition-picker__visually-hidden">{{ t('partition.picker.choose') }}</span></th>
+        <th scope="col"><span class="wizard__visually-hidden">{{ t('partition.picker.choose') }}</span></th>
         <th scope="col">{{ t('partition.picker.number') }}</th>
         <th scope="col">{{ t('partition.picker.label') }}</th>
         <th scope="col">{{ t('partition.picker.filesystem') }}</th>
@@ -81,14 +81,5 @@ const domPrefix = useId()
 
 .partition-picker__row--disabled {
   color: var(--color-text-muted);
-}
-
-.partition-picker__visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
 }
 </style>

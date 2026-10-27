@@ -40,6 +40,8 @@ export interface DiskSummary {
   serial: string
   bus: DiskBus
   removable: boolean
+  /** 认盘用的标识（厂商、型号、序列号），重新插拔、盘号变了也不变；与做镜像时记下的来源相同 */
+  identity: string
 }
 
 /** 任务的源：镜像文件，或按编号指定的物理磁盘 */
@@ -326,6 +328,21 @@ export interface ByteRange {
   length: number
 }
 
+/** 任务读源的累计统计（从任务开始算），任务运行期间每秒一次，没有变化时不发 */
+export interface ReadingStats {
+  /** 完成的读取次数（含读错的） */
+  reads: number
+  bytes: number
+  /** 读错的次数 */
+  errors: number
+  /** 单次用时超过 2 秒的读取次数：盘在内部反复重试，多半是坏扇区或快坏的扇区 */
+  slowReads: number
+  /** 花在读取上的总毫秒数 */
+  busyMs: number
+  /** 此刻已经连续读了多少毫秒还没读完；没在读时为 0 */
+  stalledMs: number
+}
+
 export interface ReadScanReport {
   size: number
   bytesRead: number
@@ -338,9 +355,10 @@ export interface ReadScanReport {
 /** 制作镜像的读取轮次：复制、修边、细读 */
 export type ImagingRound = 'copy' | 'trim' | 'scrape'
 
-/** 制作镜像的进展；各项字节数取自坏区图，续做时包括以前读的 */
+/** 制作镜像的进展；各项字节数取自坏区图、只算本次的范围，续做时包括以前读的 */
 export interface ImagingStatus {
   round: ImagingRound
+  /** 本次范围的字节数；不限范围时是源的容量 */
   size: number
   readBytes: number
   badBytes: number
@@ -349,20 +367,28 @@ export interface ImagingStatus {
   scrapeBytes: number
   /** 最近几秒的读速；刚开始时为 null */
   bytesPerSecond: number | null
+  /** 只做复制这一轮 */
+  copyOnly: boolean
 }
 
-/** 制作镜像的结果 */
+/** 制作镜像的结果；字节数只算本次的范围，device* 是整个源的 */
 export interface ImageSummary {
   imagePath: string
   mapPath: string
   size: number
   readBytes: number
   badBytes: number
-  /** 还没读完的字节数；只在源设备读不到时不为 0 */
+  /** 本次范围里还没读完的字节数：源设备读不到时，或者只做了复制这一轮时不为 0 */
   unfinishedBytes: number
-  /** 读不出的区段，相邻的已合并；最多 1000 段 */
+  /** 本次范围里读不出的区段，相邻的已合并；最多 1000 段 */
   badRanges: ByteRange[]
   badRangesTruncated: boolean
+  /** 本次只读了源的一部分 */
+  partial: boolean
+  copyOnly: boolean
+  deviceSize: number
+  deviceReadBytes: number
+  deviceUnfinishedBytes: number
   /** 源设备读不到了（多半是断开），在这个偏移处停下；检查连接后可以续做 */
   sourceLostAt: number | null
   elapsedMs: number
@@ -424,6 +450,7 @@ export type JobEvent<TResult = unknown> =
   | { jobId: string; kind: 'found'; data: { files: FoundFile[] } }
   | { jobId: string; kind: 'copied'; data: { files: CopiedFile[] } }
   | { jobId: string; kind: 'imaging'; data: ImagingStatus }
+  | { jobId: string; kind: 'reading'; data: ReadingStats }
   | { jobId: string; kind: 'log'; data: { level: string; message: string } }
   | { jobId: string; kind: 'completed'; data: { result: TResult } }
   | {
@@ -658,17 +685,139 @@ export async function openOrReveal(
   return 'revealed'
 }
 
+/** 这一次怎样做镜像：只读哪些范围（不给时读整个源）、先清掉哪些范围的进度、是否只做复制这一轮 */
+export interface ImagePlan {
+  ranges?: ByteRange[]
+  reset?: ByteRange[]
+  copyOnly?: boolean
+}
+
 /**
  * 制作能识别坏区的镜像（resume 时按同一路径的坏区图续做）。新建时镜像或坏区图已存在返回 imageExists，
- * 续做时坏区图不是这个源做的返回 imageMismatch；物理磁盘的镜像在同一块盘上时返回 outputOnSource
+ * 续做时坏区图不是这个源做的返回 imageMismatch；物理磁盘的镜像在同一块盘上时返回 outputOnSource。
+ * 开始后宿主把镜像记进做过的镜像列表，sourceLabel 是给人看的来源描述
  */
 export function startImage(
   jobId: string,
   target: JobTarget,
   imagePath: string,
   resume: boolean,
+  plan: ImagePlan,
+  sourceLabel: string,
 ): Promise<void> {
-  return invoke<void>('job_start_image', { jobId, target, imagePath, resume })
+  return invoke<void>('job_start_image', { jobId, target, imagePath, resume, plan, sourceLabel })
+}
+
+/** 一段里各状态的字节数（取自坏区图；还没有镜像时全部未读） */
+export interface RegionProgress {
+  readBytes: number
+  badBytes: number
+  untriedBytes: number
+  trimBytes: number
+  scrapeBytes: number
+}
+
+/** 抽查：从镜像里已读出的部分取几块与源比较；mismatched 不为 0 说明做镜像之后源上这一段被写过 */
+export interface RegionCheck {
+  checked: number
+  mismatched: number
+  unreadable: number
+}
+
+/** 源上的一段：分区（partition 是编号）或分区以外的空隙（partition 为 null） */
+export interface ImageRegion {
+  partition: number | null
+  offset: number
+  length: number
+  progress: RegionProgress
+  check: RegionCheck | null
+}
+
+export interface PartitionChange {
+  kind: 'added' | 'removed' | 'moved'
+  number: number
+  before: ByteRange | null
+  after: ByteRange | null
+}
+
+/** 这个位置已有的镜像；state 不是 ok 时不能续做 */
+export interface ExistingImage {
+  state: 'ok' | 'imageMissing' | 'mapMissing' | 'mapUnreadable' | 'otherSource' | 'lengthMismatch'
+  detail: string | null
+  sourceIdentity: string | null
+  /** 镜像是稀疏文件：可以只读一部分；旧版本建的或建在不支持稀疏文件的卷上的不是 */
+  sparse: boolean
+  /** 坏区图里记了上次开始读时的分区表（旧版本做的没有） */
+  partitionsRecorded: boolean
+  partitionChanges: PartitionChange[]
+  progress: RegionProgress
+}
+
+/** 做镜像之前看到的情况 */
+export interface ImageInspection {
+  size: number
+  sectorSize: number
+  scheme: 'mbr' | 'gpt' | 'none' | null
+  partitions: PartitionInfo[]
+  regions: ImageRegion[]
+  /** 只读一部分时总会一起读的分区表区域 */
+  tableAreas: ByteRange[]
+  output: { fileSystem: string; sparse: boolean; freeBytes: number } | null
+  outputError: string | null
+  existing: ExistingImage | null
+}
+
+/**
+ * 做镜像之前看一眼源与镜像（只读）：源上的分区与空隙各做到哪了、输出位置能不能只读一部分、
+ * 已有镜像能不能续做、做镜像之后源变没变。物理磁盘第一次需要时弹出 UAC；镜像在源盘上时返回 outputOnSource
+ */
+export function inspectImage(target: JobTarget, imagePath: string): Promise<ImageInspection> {
+  return invoke<ImageInspection>('image_inspect', { target, imagePath })
+}
+
+/** 做过的一个镜像的记录 */
+export interface ImageRecord {
+  imagePath: string
+  target: JobTarget
+  sourceIdentity: string
+  sourceLabel: string
+  size: number
+  usedAtMs: number
+}
+
+/** 以前做过的镜像现在的样子 */
+export interface ImageDescription {
+  imagePath: string
+  /** missing：镜像与坏区图都不在了（被删除或移走） */
+  state: 'ok' | 'missing' | 'imageMissing' | 'mapMissing' | 'mapUnreadable'
+  detail: string | null
+  sourceIdentity: string | null
+  size: number | null
+  progress: RegionProgress | null
+  savedAtMs: number | null
+}
+
+export interface ImageHistoryItem {
+  record: ImageRecord
+  status: ImageDescription
+}
+
+/** 做过的镜像，最近用的在前，各带现在的状态 */
+export function listImageHistory(): Promise<ImageHistoryItem[]> {
+  return invoke<ImageHistoryItem[]>('image_history_list')
+}
+
+/** 从做过的镜像列表移除（不删除文件） */
+export function removeImageHistory(imagePath: string): Promise<void> {
+  return invoke<void>('image_history_remove', { imagePath })
+}
+
+/**
+ * 镜像被移走后重新指定位置：新位置旁边要有同名的 .map 坏区图（否则 imageRelocateInvalid），
+ * 而且来源与容量与原来一致（否则 imageRelocateMismatch）
+ */
+export function relocateImageHistory(imagePath: string, newPath: string): Promise<ImageHistoryItem> {
+  return invoke<ImageHistoryItem>('image_history_relocate', { imagePath, newPath })
 }
 
 /**

@@ -43,6 +43,12 @@ export function usePartitionText() {
       : t('partition.sourceDisk', { number: source.diskNumber })
   }
 
+  /** 磁盘的名字：厂商加型号，都没有时是「未命名的磁盘」 */
+  function diskName(disk: { vendor: string; model: string }): string {
+    const name = [disk.vendor, disk.model].filter((part) => part !== '').join(' ')
+    return name === '' ? t('disk.unnamed') : name
+  }
+
   /** 不能浏览的原因；文件系统认得出、却打不开时按「参数不对」说 */
   function unbrowsableReason(filesystem: string): string {
     const key = `partition.picker.reason.${filesystem}`
@@ -71,6 +77,17 @@ export function usePartitionText() {
     })
   }
 
+  /** 源上的一段：分区按 partitionLine，分区以外的空隙说「未分区的空间」与大小（制作镜像选范围用） */
+  function regionLine(
+    region: { partition: number | null; length: number },
+    partitions: Parameters<typeof partitionLine>[0][],
+  ): string {
+    const partition = partitions.find((candidate) => candidate.number === region.partition)
+    return partition === undefined
+      ? t('partition.gap', { size: formatBytes(region.length) })
+      : partitionLine(partition)
+  }
+
   /** 引导扇区字段（规范里的名字）的显示名；修复打不开的分区比对主备、检查文件系统报参数问题共用 */
   function bootFieldName(field: string): string {
     const key = `bootField.${field}`
@@ -87,9 +104,11 @@ export function usePartitionText() {
     roleName,
     tableNote,
     sourceName,
+    diskName,
     unbrowsableReason,
     partitionLabel,
     partitionLine,
+    regionLine,
     bootFieldName,
     bootFieldValue,
   }

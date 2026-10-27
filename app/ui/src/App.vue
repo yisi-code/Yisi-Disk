@@ -5,6 +5,7 @@ import AboutPanel from './components/AboutPanel.vue'
 import BadSectorCheck from './components/BadSectorCheck.vue'
 import CarveWizard from './components/CarveWizard.vue'
 import DiskImage from './components/DiskImage.vue'
+import EngineStatus from './components/EngineStatus.vue'
 import FeatureCatalog from './components/FeatureCatalog.vue'
 import FindPartitionsWizard from './components/FindPartitionsWizard.vue'
 import FsCheckWizard from './components/FsCheckWizard.vue'
@@ -174,6 +175,7 @@ function closeFeature() {
     </div>
 
     <footer class="app-footer">
+      <EngineStatus />
       <span v-if="hostError" role="alert">{{ t('host.failed', { reason: hostError }) }}</span>
       <span v-else-if="appVersion">{{ t('host.version', { version: appVersion }) }}</span>
       <span v-else>{{ t('host.connecting') }}</span>
@@ -295,8 +297,10 @@ function closeFeature() {
   border-left-color: var(--color-accent);
 }
 
-/* 纵向排列，向导的结果页能铺满剩下的高度（wizard.css 的 .wizard--fill） */
+/* 纵向排列，向导的结果页能铺满剩下的高度（wizard.css 的 .wizard--fill）。
+   相对定位：里面绝对定位的元素（例如只给读屏软件读的文字）以内容区为参照、随内容区滚动，不会撑高整页 */
 .app-main {
+  position: relative;
   display: flex;
   flex: 1;
   flex-direction: column;
@@ -306,6 +310,10 @@ function closeFeature() {
 }
 
 .app-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
   padding: var(--space-sm) var(--space-lg);
   color: var(--color-text-muted);
   font-size: var(--font-size-small);

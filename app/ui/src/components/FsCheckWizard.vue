@@ -5,6 +5,7 @@ import PartitionPicker from './PartitionPicker.vue'
 import SourcePicker from './SourcePicker.vue'
 import WizardSteps from './WizardSteps.vue'
 import JobControls from './JobControls.vue'
+import ReadHealthHint from './ReadHealthHint.vue'
 import { useBrowse } from '../composables/useBrowse'
 import { useFsCheck } from '../composables/useFsCheck'
 import { useHostErrorText } from '../composables/useHostErrorText'
@@ -19,7 +20,7 @@ import {
   type JobTarget,
   type PartitionInfo,
 } from '../services/host'
-import { formatBytes, formatHex, formatSeconds } from '../utils/format'
+import { formatBytes, formatDateTime, formatHex, formatSeconds } from '../utils/format'
 
 const STEPS = ['source', 'partition', 'check', 'result'] as const
 type WizardStep = (typeof STEPS)[number]
@@ -335,10 +336,6 @@ function pad(value: number): string {
   return String(value).padStart(2, '0')
 }
 
-function formatTime(date: Date): string {
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
-}
-
 function defaultFileName(): string {
   const date = finishedAt.value ?? new Date()
   const stamp = `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`
@@ -398,7 +395,7 @@ function buildReportText(): string {
     '',
     field(t('common.source'), sourceName(fsCheck.target.value)),
     field(t('fsCheck.result.partition'), partitionLine(partition)),
-    field(t('fsCheck.result.finishedAt'), formatTime(finishedAt.value ?? new Date())),
+    field(t('fsCheck.result.finishedAt'), formatDateTime(finishedAt.value ?? new Date())),
     field(t('fsCheck.result.volume'), summaryText()),
     field(t('fsCheck.result.totals'), `${totalsText()} ${elapsed}`),
     field(t('fsCheck.result.checked'), checksText(current.checked)),
@@ -559,6 +556,11 @@ function buildReportText(): string {
             :max="fsCheck.total.value || 1"
           ></progress>
           <p class="wizard__status">{{ checkStatusText }}</p>
+          <ReadHealthHint
+            :health="fsCheck.readHealth.value"
+            :source-is-disk="fsCheck.target.value?.kind === 'disk'"
+            context="scan"
+          />
         </div>
         <p v-if="fsCheck.isPaused.value" class="wizard__hint">{{ t('fsCheck.run.pausedHint') }}</p>
         <p v-if="fsCheck.isUnresponsive.value" class="wizard__error" role="alert">

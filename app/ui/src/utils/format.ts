@@ -5,6 +5,12 @@ export function formatSeconds(milliseconds: number): string {
   return (milliseconds / 1000).toFixed(1)
 }
 
+/** 本地时间 yyyy-MM-dd HH:mm:ss */
+export function formatDateTime(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
 /** 十六进制，例如 0x0F；`digits` 是至少几位 */
 export function formatHex(value: number, digits = 0): string {
   return `0x${value.toString(16).toUpperCase().padStart(digits, '0')}`
