@@ -51,6 +51,10 @@ pub const CANCEL_SCAN: &str = "repair.cancelScan";
 /// 复制好的文件经 [`COPIED`] 通知分批送达，结果是 [`CopySummary`]。源为物理磁盘时，输出目录必须在另一块盘上，
 /// 否则答复 [`error_code::OUTPUT_ON_SOURCE`]。
 pub const COPY_FILES: &str = "repair.copyFiles";
+/// 诊断引导扇区：参数 [`DiagnoseBootParams`]，结果是 [`BootDiagnosis`]。读分区表，对每个分区读出主引导扇区与备份引导扇区，
+/// 逐项核对、比较主备，核对分区表里的类型与长度，给出结论。只读，读完即答复（不是任务）；分区表读不出时答复
+/// [`error_code::SOURCE_UNAVAILABLE`]。
+pub const DIAGNOSE_BOOT: &str = "repair.diagnoseBoot";
 /// 制作能识别坏区的镜像（任务）：参数 [`ImageParams`]，建好镜像文件与坏区图后答复 [`ImageStarted`]；
 /// 进展经 [`IMAGING`] 送达，结果是 [`ImageSummary`]。镜像文件或坏区图已经存在时答复 [`error_code::IMAGE_EXISTS`]；
 /// 源为物理磁盘时，镜像必须在另一块盘上，否则答复 [`error_code::OUTPUT_ON_SOURCE`]。取消时保存坏区图，之后可以续做。
@@ -350,6 +354,18 @@ pub struct ImagePreview {
 pub struct BrowseParams {
     pub job_id: String,
     pub source: Source,
+    /// 按哪一份引导扇区打开各分区；不给时用主引导扇区。
+    #[serde(default)]
+    pub boot: BootCopy,
+}
+
+/// 打开卷时用哪一份引导扇区：主引导扇区坏了、备份完好时，用备份浏览和复制（[`DIAGNOSE_BOOT`] 说备份可用的分区）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BootCopy {
+    #[default]
+    Primary,
+    Backup,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -496,6 +512,9 @@ pub struct CopyParams {
     pub items: Vec<CopyItem>,
     /// 在这个目录下新建 `restored-<任务 ID 前 8 位>` 子目录存放结果。
     pub output_dir: String,
+    /// 按哪一份引导扇区打开分区，与浏览时一致；不给时用主引导扇区。
+    #[serde(default)]
+    pub boot: BootCopy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -619,6 +638,92 @@ pub struct ByteRange {
     pub length: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnoseBootParams {
+    pub source: Source,
+}
+
+/// 引导扇区诊断的结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootDiagnosis {
+    pub size: u64,
+    pub sector_size: u32,
+    /// mbr、gpt、none 之一。
+    pub scheme: String,
+    /// 读分区表时发现的问题，同 [`BrowseOpened::notes`]。
+    pub notes: Vec<String>,
+    pub partitions: Vec<PartitionBoot>,
+}
+
+/// 一个分区的诊断结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionBoot {
+    /// 编号、位置与类型，含义同 [`PartitionInfo`] 的同名字段。
+    pub number: u32,
+    pub offset: u64,
+    pub length: u64,
+    pub type_id: String,
+    pub role: Option<String>,
+    pub name: String,
+    pub logical: bool,
+    /// fat12、fat16、fat32、exfat、ntfs、bitlocker、ext、unknown 之一：先按主引导扇区认，再按备份，最后按分区类型推测。
+    pub filesystem: String,
+    /// 结论：healthy（正常）、backupDamaged（主引导扇区正常、备份有问题）、primaryDamaged（主引导扇区坏了、备份可用）、
+    /// bothDamaged（主备都坏了，或没有备份）、unsupported（BitLocker、ext，不诊断）、unrecognized（认不出文件系统）之一。
+    pub verdict: String,
+    /// 能打开的那一份读出的卷标（先主后备）。
+    pub label: Option<String>,
+    pub primary: BootCopyReport,
+    /// 备份引导扇区；FAT12/16 没有备份，认不出文件系统时也不找。
+    pub backup: Option<BootCopyReport>,
+    /// 主备之间不一样的字段（两份都认得出是这种文件系统时才比较）。
+    pub differences: Vec<BootDifference>,
+    /// 分区表与引导扇区不符的地方：code 为 typeMismatch、volumeLarger、volumeSmaller；
+    /// 后两种 value 是引导扇区记的卷长度、expected 是分区长度（字节）。
+    pub table_issues: Vec<BootIssue>,
+}
+
+/// 一份引导扇区的核对结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootCopyReport {
+    /// 在源上的字节偏移。
+    pub offset: u64,
+    /// 发现的问题；为空表示这一份正常。
+    pub issues: Vec<BootIssue>,
+    pub volume_bytes: Option<u64>,
+    pub cluster_size: Option<u64>,
+    /// 引导扇区正常时按它打开了卷：能打开为 `true`；打不开时 `open_error` 是原因。引导扇区有问题时不试，两项都为空。
+    pub opened: bool,
+    pub open_error: Option<String>,
+}
+
+/// 一个问题。`code` 为 unreadable、blank、missingSignature、badJump、badOemId、badLegacyFields、badBytesPerSector、
+/// sectorSizeMismatch、badSectorsPerCluster、badReservedSectors、badFatCount、badFatSize、badMedia、badRootEntries、
+/// badTotalSectors、badLayout、badRootCluster、badRecordSize、badIndexSize、mftOutside、mirrorOutside、checksumMismatch
+/// 之一（分区表的问题见 [`PartitionBoot::table_issues`]）。`value` 是引导扇区里记的值，`expected` 是应有的值（有的话）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootIssue {
+    pub code: String,
+    #[serde(default)]
+    pub value: Option<u64>,
+    #[serde(default)]
+    pub expected: Option<u64>,
+}
+
+/// 主备之间不一样的一个字段：`field` 为 bytesPerSector、sectorsPerCluster、totalSectors、volumeSerial 这样的名字。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootDifference {
+    pub field: String,
+    pub primary: u64,
+    pub backup: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -638,5 +743,18 @@ mod tests {
             serde_json::to_value(&params).unwrap(),
             json!({"jobId": "j1", "source": {"type": "image", "path": "a.img", "sectorSize": 512}})
         );
+    }
+
+    #[test]
+    fn boot_copy_defaults_to_the_primary() {
+        let params: BrowseParams =
+            serde_json::from_value(json!({"jobId": "b1", "source": {"type": "disk", "handle": 4}}))
+                .unwrap();
+        assert_eq!(params.boot, BootCopy::Primary);
+        let params: BrowseParams = serde_json::from_value(
+            json!({"jobId": "b1", "source": {"type": "disk", "handle": 4}, "boot": "backup"}),
+        )
+        .unwrap();
+        assert_eq!(params.boot, BootCopy::Backup);
     }
 }

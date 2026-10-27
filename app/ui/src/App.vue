@@ -8,6 +8,7 @@ import DiskImage from './components/DiskImage.vue'
 import FeatureCatalog from './components/FeatureCatalog.vue'
 import ProblemGuide from './components/ProblemGuide.vue'
 import ProblemOverview from './components/ProblemOverview.vue'
+import RepairPartitionWizard from './components/RepairPartitionWizard.vue'
 import UndeleteWizard from './components/UndeleteWizard.vue'
 import { SUPPORTED_LOCALES } from './i18n'
 import {
@@ -146,6 +147,7 @@ function closeFeature() {
         <UndeleteWizard v-else-if="featureView === 'undelete'" @exit="closeFeature" />
         <BadSectorCheck v-else-if="featureView === 'badSectors'" @exit="closeFeature" />
         <DiskImage v-else-if="featureView === 'image'" @exit="closeFeature" />
+        <RepairPartitionWizard v-else-if="featureView === 'repairPartition'" @exit="closeFeature" />
         <ProblemOverview
           v-else-if="page === 'overview'"
           :focus-request="focusRequest"

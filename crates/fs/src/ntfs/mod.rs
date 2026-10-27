@@ -48,6 +48,7 @@ const MAX_EXTENSIONS: usize = 4096;
 /// 引导扇区里的几何参数。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Geometry {
+    pub bytes_per_sector: u64,
     pub cluster_size: u64,
     pub total_bytes: u64,
     pub mft_lcn: u64,
@@ -90,6 +91,7 @@ pub(crate) fn parse_boot(sector: &[u8]) -> Option<Geometry> {
         return None;
     }
     let geometry = Geometry {
+        bytes_per_sector,
         cluster_size,
         total_bytes: le64(sector, 0x28)?.checked_mul(bytes_per_sector)?,
         mft_lcn: le64(sector, 0x30)?,
@@ -160,10 +162,9 @@ pub(crate) struct Ntfs {
 }
 
 impl Ntfs {
-    pub fn open(region: Region) -> Result<Self, FsError> {
-        let mut sector = [0u8; 512];
-        region.read_exact(0, &mut sector)?;
-        let geometry = parse_boot(&sector).ok_or(FsError::Invalid("NTFS 引导扇区的参数不自洽"))?;
+    /// 按引导扇区 `boot`（主的或备份的）打开。
+    pub fn open(region: Region, boot: &[u8]) -> Result<Self, FsError> {
+        let geometry = parse_boot(boot).ok_or(FsError::Invalid("NTFS 引导扇区的参数不自洽"))?;
         let cluster_size = geometry.cluster_size;
         let cluster_count = geometry.total_bytes.min(region.length()) / cluster_size;
         let record_size = geometry.record_size;

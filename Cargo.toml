@@ -28,6 +28,7 @@ yisi-formats = { path = "crates/formats" }
 yisi-fs = { path = "crates/fs" }
 yisi-io = { path = "crates/io" }
 yisi-part = { path = "crates/part" }
+yisi-repair = { path = "crates/repair" }
 yisi-rpc = { path = "crates/rpc" }
 
 [workspace.lints.clippy]

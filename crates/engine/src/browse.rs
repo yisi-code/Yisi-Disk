@@ -10,7 +10,7 @@ use yisi_engine::protocol::{
     self, BrowseOpened, FileListPage, FilePreview, FsEntry, ListFilesParams, MAX_PAGE,
     PartitionInfo, ScanResult,
 };
-use yisi_fs::{FileRef, FsKind, State, Unsupported, Volume};
+use yisi_fs::{BootCopy, FileRef, FsKind, State, Unsupported, Volume};
 use yisi_io::BlockDevice;
 use yisi_part::{Note, Partition, PartitionKind, PartitionTable, Role, Scheme};
 use yisi_rpc::{ErrorObject, error_code};
@@ -29,6 +29,8 @@ pub const STAGE_SCAN_MFT: &str = "scanMft";
 pub struct Session {
     device: Arc<dyn BlockDevice>,
     table: PartitionTable,
+    /// 各分区按哪一份引导扇区打开（「修复打不开的分区」里用备份浏览）。
+    boot: BootCopy,
     volumes: Mutex<HashMap<u32, Arc<Volume>>>,
     listings: Mutex<HashMap<(u32, String), Arc<SortedDir>>>,
     progress: ProgressSender,
@@ -46,9 +48,11 @@ struct SortedDir {
 
 impl Session {
     /// 读分区表，识别每个分区的文件系统；能浏览的分区顺便打开，取出卷标。扫描的进度经 `progress` 发出。
+    /// 各分区按 `boot` 指定的那一份引导扇区识别和打开。
     pub fn open(
         device: Arc<dyn BlockDevice>,
         progress: ProgressSender,
+        boot: BootCopy,
     ) -> Result<(Self, BrowseOpened), ErrorObject> {
         let table = yisi_part::read_table(device.as_ref()).map_err(|error| {
             ErrorObject::new(
@@ -59,6 +63,7 @@ impl Session {
         let session = Self {
             device,
             table,
+            boot,
             volumes: Mutex::new(HashMap::new()),
             listings: Mutex::new(HashMap::new()),
             progress,
@@ -87,27 +92,17 @@ impl Session {
     }
 
     fn describe(&self, partition: &Partition) -> PartitionInfo {
-        let detected = yisi_fs::detect(self.device.as_ref(), partition.offset, partition.length);
+        let detected = yisi_fs::detect_with(
+            self.device.as_ref(),
+            partition.offset,
+            partition.length,
+            self.boot,
+        );
         let volume = match detected {
             Ok(kind) if kind.is_browsable() => self.volume(partition.number).ok(),
             _ => None,
         };
-        let (type_id, name, bootable, logical) = match &partition.kind {
-            PartitionKind::Mbr {
-                type_id,
-                bootable,
-                logical,
-            } => (
-                format!("0x{type_id:02X}"),
-                String::new(),
-                *bootable,
-                *logical,
-            ),
-            PartitionKind::Gpt {
-                type_guid, name, ..
-            } => (type_guid.to_string(), name.clone(), false, false),
-            PartitionKind::Whole => (String::new(), String::new(), false, false),
-        };
+        let (type_id, name, bootable, logical) = table_kind(partition);
         PartitionInfo {
             number: partition.number,
             offset: partition.offset,
@@ -204,8 +199,13 @@ impl Session {
             .iter()
             .find(|partition| partition.number == number)
             .ok_or_else(|| fs_error(format!("没有分区 {number}")))?;
-        let volume = Volume::open(Arc::clone(&self.device), partition.offset, partition.length)
-            .map_err(|error| fs_error(error_chain(&error)))?;
+        let volume = Volume::open_with(
+            Arc::clone(&self.device),
+            partition.offset,
+            partition.length,
+            self.boot,
+        )
+        .map_err(|error| fs_error(error_chain(&error)))?;
         let volume = Arc::new(volume);
         lock(&self.volumes).insert(number, Arc::clone(&volume));
         Ok(volume)
@@ -354,7 +354,27 @@ fn unsupported_key(reason: Unsupported) -> &'static str {
     }
 }
 
-fn fs_key(kind: FsKind) -> &'static str {
+/// 分区表里的类型（MBR 类型字节或 GPT 类型 GUID）、GPT 分区名、是否活动分区、是否逻辑分区。
+pub(crate) fn table_kind(partition: &Partition) -> (String, String, bool, bool) {
+    match &partition.kind {
+        PartitionKind::Mbr {
+            type_id,
+            bootable,
+            logical,
+        } => (
+            format!("0x{type_id:02X}"),
+            String::new(),
+            *bootable,
+            *logical,
+        ),
+        PartitionKind::Gpt {
+            type_guid, name, ..
+        } => (type_guid.to_string(), name.clone(), false, false),
+        PartitionKind::Whole => (String::new(), String::new(), false, false),
+    }
+}
+
+pub(crate) fn fs_key(kind: FsKind) -> &'static str {
     match kind {
         FsKind::Fat12 => "fat12",
         FsKind::Fat16 => "fat16",
@@ -367,7 +387,7 @@ fn fs_key(kind: FsKind) -> &'static str {
     }
 }
 
-fn note_key(note: &Note) -> String {
+pub(crate) fn note_key(note: &Note) -> String {
     match note {
         Note::PrimaryGptInvalid => "primaryGptInvalid",
         Note::GptUnreadable => "gptUnreadable",
@@ -379,7 +399,7 @@ fn note_key(note: &Note) -> String {
     .to_owned()
 }
 
-fn role_key(role: Role) -> &'static str {
+pub(crate) fn role_key(role: Role) -> &'static str {
     match role {
         Role::EfiSystem => "efiSystem",
         Role::MicrosoftReserved => "microsoftReserved",
