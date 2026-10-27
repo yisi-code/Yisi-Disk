@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import MftScanProgress from './MftScanProgress.vue'
 import PartitionFiles from './PartitionFiles.vue'
 import PartitionPicker from './PartitionPicker.vue'
 import SourcePicker from './SourcePicker.vue'
+import WizardSteps from './WizardSteps.vue'
 import { useBrowse } from '../composables/useBrowse'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { usePartitionText } from '../composables/usePartitionText'
@@ -75,20 +77,10 @@ const partitionRef = computed<PartitionRef | null>(() =>
       },
 )
 
-const scanStatusText = computed(() =>
-  browse.scanTotal.value > 0
-    ? t('undelete.scan.running', {
-        done: formatBytes(browse.scanDone.value),
-        total: formatBytes(browse.scanTotal.value),
-        percent: browse.scanPercent.value,
-      })
-    : t('undelete.scan.starting'),
-)
-
 const sourceText = computed(() => sourceName(browse.target.value))
 
 const openingText = computed(() =>
-  target.value?.kind === 'disk' ? t('undelete.openingDisk') : t('undelete.opening'),
+  target.value?.kind === 'disk' ? t('partition.openingDisk') : t('partition.opening'),
 )
 
 onMounted(() => {
@@ -176,21 +168,7 @@ async function openSource() {
 
     <form class="wizard__form" @submit.prevent="handleSubmit">
       <div class="wizard__stepbar">
-        <ol class="wizard__steps">
-          <li
-            v-for="(name, index) in STEPS"
-            :key="name"
-            class="wizard__step"
-            :class="{
-              'wizard__step--current': name === step,
-              'wizard__step--done': index < stepIndex,
-            }"
-            :aria-current="name === step ? 'step' : undefined"
-          >
-            <span class="wizard__step-number">{{ index + 1 }}</span>
-            {{ t(`undelete.steps.${name}`) }}
-          </li>
-        </ol>
+        <WizardSteps :steps="STEPS" :current="step" label-prefix="undelete.steps" />
         <div class="wizard__nav">
           <button
             v-if="stepIndex > 0"
@@ -199,10 +177,10 @@ async function openSource() {
             :disabled="isCopying || browse.isScanning.value"
             @click="goBack"
           >
-            {{ t('carve.previous') }}
+            {{ t('common.previous') }}
           </button>
           <button v-if="step !== 'browse'" class="wizard__button" type="submit" :disabled="!canGoNext">
-            {{ t('carve.next') }}
+            {{ t('common.next') }}
           </button>
         </div>
       </div>
@@ -225,80 +203,63 @@ async function openSource() {
       <div v-else-if="step === 'partition'" class="wizard__panel">
         <p class="wizard__note">
           {{
-            t('undelete.partition.summary', {
+            t('partition.picker.summary', {
               source: sourceText,
-              scheme: t(`undelete.partition.scheme.${browse.opened.value?.scheme ?? 'none'}`),
+              scheme: t(`partition.picker.scheme.${browse.opened.value?.scheme ?? 'none'}`),
               size: formatBytes(browse.opened.value?.size ?? 0),
             })
           }}
         </p>
-        <ul v-if="browse.opened.value?.notes.length" class="undelete-wizard__notes">
+        <ul v-if="browse.opened.value?.notes.length" class="wizard__list">
           <li v-for="note in browse.opened.value.notes" :key="note">{{ tableNote(note) }}</li>
         </ul>
         <PartitionPicker
           v-model="selectedPartition"
           :partitions="partitions"
-          :caption="t('undelete.partition.caption')"
+          :caption="t('partition.picker.caption')"
           :is-selectable="(partition) => partition.browsable"
           :note="(partition) => (partition.browsable ? '' : unbrowsableReason(partition.filesystem))"
           :disabled="browse.isScanning.value"
         />
         <p v-if="!partitions.some((partition) => partition.browsable)" class="wizard__note">
-          {{ t('undelete.partition.none') }}
+          {{ t('partition.picker.none') }}
         </p>
-        <p v-if="needsScanHint" class="wizard__hint">{{ t('undelete.partition.scanHint') }}</p>
-        <div v-if="browse.isScanning.value" class="wizard__job" aria-live="polite">
-          <progress
-            class="wizard__progress"
-            :value="browse.scanDone.value"
-            :max="browse.scanTotal.value || 1"
-          ></progress>
-          <p class="wizard__status">{{ scanStatusText }}</p>
-          <div>
-            <button
-              class="wizard__button wizard__button--secondary"
-              type="button"
-              :disabled="browse.isCancellingScan.value"
-              @click="browse.stopScan"
-            >
-              {{ browse.isCancellingScan.value ? t('undelete.scan.cancelling') : t('undelete.scan.cancel') }}
-            </button>
-          </div>
-        </div>
+        <p v-if="needsScanHint" class="wizard__hint">{{ t('partition.picker.scanHint') }}</p>
+        <MftScanProgress v-if="browse.isScanning.value" :browse="browse" aria-live="polite" />
         <p v-if="browse.scanFailure.value" class="wizard__error" role="alert">
-          {{ t('undelete.scan.failed', { reason: formatHostError(browse.scanFailure.value) }) }}
+          {{ t('partitionFiles.scan.failed', { reason: formatHostError(browse.scanFailure.value) }) }}
         </p>
       </div>
 
       <div v-else-if="currentPartition && browse.jobId.value" class="wizard__panel wizard__fill">
         <dl class="wizard__details">
-          <dt>{{ t('undelete.browse.source') }}</dt>
+          <dt>{{ t('common.source') }}</dt>
           <dd class="wizard__path-text">{{ sourceText }}</dd>
-          <dt>{{ t('undelete.browse.partition') }}</dt>
+          <dt>{{ t('partitionFiles.browse.partition') }}</dt>
           <dd>{{ partitionLine(currentPartition) }}</dd>
         </dl>
         <p v-if="currentScan" class="wizard__note">
           {{
-            t('undelete.scan.summary', {
+            t('partitionFiles.scan.summary', {
               records: currentScan.records.toLocaleString(locale),
               deleted: currentScan.deleted.toLocaleString(locale),
             })
           }}
           <template v-if="currentScan.orphans > 0">
-            {{ t('undelete.scan.orphans', { count: currentScan.orphans.toLocaleString(locale) }, currentScan.orphans) }}
+            {{ t('partitionFiles.scan.orphans', { count: currentScan.orphans.toLocaleString(locale) }, currentScan.orphans) }}
           </template>
           <template v-if="currentScan.unreadable > 0">
-            {{ t('undelete.scan.unreadable', { count: currentScan.unreadable.toLocaleString(locale) }, currentScan.unreadable) }}
+            {{ t('partitionFiles.scan.unreadable', { count: currentScan.unreadable.toLocaleString(locale) }, currentScan.unreadable) }}
           </template>
         </p>
-        <p v-if="isSourceDisk" class="wizard__hint">{{ t('undelete.browse.liveHint') }}</p>
+        <p v-if="isSourceDisk" class="wizard__hint">{{ t('partitionFiles.browse.liveHint') }}</p>
         <p v-if="browse.isUnresponsive.value" class="wizard__error" role="alert">
-          {{ t('carve.run.unresponsive') }}
+          {{ t('common.unresponsive') }}
         </p>
         <p v-if="!browse.isOpen.value && browse.failure.value" class="wizard__error" role="alert">
           {{ formatHostError(browse.failure.value) }}
         </p>
-        <div class="undelete-wizard__files wizard__fill">
+        <div class="wizard__files wizard__fill">
           <PartitionFiles
             v-if="browse.target.value && partitionRef"
             v-model:busy="isCopying"
@@ -316,17 +277,5 @@ async function openSource() {
 </template>
 
 <style scoped>
-.undelete-wizard__notes {
-  margin: 0;
-  padding-left: var(--space-lg);
-  font-size: var(--font-size-small);
-}
 
-/* 列表与详情两栏都分标题、框体、底部三行，三行上下边对齐；列表要放名字、状态与时间，占得宽一些 */
-.undelete-wizard__files {
-  display: grid;
-  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
-  grid-template-rows: auto 1fr auto;
-  gap: var(--space-sm) var(--space-lg);
-}
 </style>

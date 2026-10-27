@@ -2,7 +2,7 @@
 import { computed, ref, shallowRef, useId, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useHostErrorText } from '../composables/useHostErrorText'
-import { useVisibleRows } from '../composables/useVisibleRows'
+import { useTreeNavigation } from '../composables/useTreeNavigation'
 import { listFiles, toHostError, type FsEntry, type HostError } from '../services/host'
 import { formatBytes } from '../utils/format'
 
@@ -73,10 +73,6 @@ const dirs = shallowRef(new Map<string, DirState>())
 const dirTokens = new Map<string, string | null>()
 const dirPaths = new Map<string, string[]>()
 const expandedIds = ref(new Set<string>())
-const activeId = ref<string | null>(null)
-const scrollTop = ref(0)
-const viewport = ref<HTMLElement | null>(null)
-const rowsInView = useVisibleRows(viewport, ROW_HEIGHT, MIN_ROWS)
 /** 换分区或重新打开时作废旧请求 */
 let generation = 0
 
@@ -86,17 +82,28 @@ const rows = computed<TreeRow[]>(() => {
   return result
 })
 
-const activeIndex = computed(() => rows.value.findIndex((row) => row.id === activeId.value))
-
-const visibleRows = computed(() => {
-  const first = Math.max(0, Math.floor(scrollTop.value / ROW_HEIGHT) - OVERSCAN)
-  const last = Math.min(rows.value.length, first + rowsInView.value + OVERSCAN * 2)
-  return rows.value.slice(first, last).map((row, offset) => ({ row, index: first + offset }))
+const {
+  activeId,
+  activeIndex,
+  visibleRows,
+  activeDomId,
+  domId,
+  handleScroll,
+  resetScroll,
+  moveTo,
+  handleNavigationKey,
+} = useTreeNavigation(rows, {
+  viewportRef: 'viewport',
+  rowHeight: ROW_HEIGHT,
+  minRows: MIN_ROWS,
+  overscan: OVERSCAN,
+  domPrefix,
+  onMove: (row) => {
+    if (row.kind === 'entry') {
+      selected.value = toItem(row)
+    }
+  },
 })
-
-const activeDomId = computed(() =>
-  activeIndex.value >= 0 && activeId.value !== null ? domId(activeId.value) : undefined,
-)
 
 watch(
   () => [props.jobId, props.partition] as const,
@@ -109,10 +116,7 @@ watch(
     dirPaths.set(ROOT_ID, [])
     expandedIds.value = new Set()
     activeId.value = null
-    scrollTop.value = 0
-    if (viewport.value !== null) {
-      viewport.value.scrollTop = 0
-    }
+    resetScroll()
     void loadMore(ROOT_ID)
   },
   { immediate: true },
@@ -242,10 +246,6 @@ function toItem(row: EntryRow): TreeItem {
   return { id: row.id, entry: row.entry, path: itemPath(row) }
 }
 
-function handleScroll(event: Event) {
-  scrollTop.value = (event.target as HTMLElement).scrollTop
-}
-
 function handleRowClick(row: TreeRow) {
   activeId.value = row.id
   if (row.kind === 'status') {
@@ -300,25 +300,11 @@ function toggleChecked(row: EntryRow) {
 
 function handleKeydown(event: KeyboardEvent) {
   const current = rows.value[activeIndex.value]
+  if (handleNavigationKey(event.key)) {
+    event.preventDefault()
+    return
+  }
   switch (event.key) {
-    case 'ArrowDown':
-      moveTo(activeIndex.value + 1)
-      break
-    case 'ArrowUp':
-      moveTo(activeIndex.value < 0 ? 0 : activeIndex.value - 1)
-      break
-    case 'PageDown':
-      moveTo(activeIndex.value + rowsInView.value)
-      break
-    case 'PageUp':
-      moveTo(Math.max(0, activeIndex.value - rowsInView.value))
-      break
-    case 'Home':
-      moveTo(0)
-      break
-    case 'End':
-      moveTo(rows.value.length - 1)
-      break
     case 'ArrowRight':
       if (current?.kind === 'entry' && current.entry.isDir) {
         if (current.isExpanded) {
@@ -358,72 +344,38 @@ function handleKeydown(event: KeyboardEvent) {
   event.preventDefault()
 }
 
-/** 移到第 `index` 行（越界时取首尾），选中它，并滚到看得见 */
-function moveTo(index: number) {
-  if (rows.value.length === 0 || index < 0) {
-    return
-  }
-  const clamped = Math.min(index, rows.value.length - 1)
-  const row = rows.value[clamped]
-  if (row === undefined) {
-    return
-  }
-  activeId.value = row.id
-  if (row.kind === 'entry') {
-    selected.value = toItem(row)
-  }
-  scrollIntoView(clamped)
-}
-
-function scrollIntoView(index: number) {
-  const element = viewport.value
-  if (element === null) {
-    return
-  }
-  const top = index * ROW_HEIGHT
-  if (top < element.scrollTop) {
-    element.scrollTop = top
-  } else if (top + ROW_HEIGHT > element.scrollTop + element.clientHeight) {
-    element.scrollTop = top + ROW_HEIGHT - element.clientHeight
-  }
-}
-
-function domId(rowId: string): string {
-  return `${domPrefix}-${rowId.replace(/[^\w-]/g, '_')}`
-}
-
 function statusText(row: StatusRow): string {
   const state = dirs.value.get(row.dirId)
   if (row.status === 'error' && state?.error) {
-    return t('undelete.browser.status.error', { reason: formatHostError(state.error) })
+    return t('partitionFiles.browser.status.error', { reason: formatHostError(state.error) })
   }
   if (row.status === 'more' && state !== undefined) {
-    return t('undelete.browser.status.more', { count: state.total - state.entries.length })
+    return t('partitionFiles.browser.status.more', { count: state.total - state.entries.length })
   }
-  return t(`undelete.browser.status.${row.status}`)
+  return t(`partitionFiles.browser.status.${row.status}`)
 }
 
 function entryBadge(entry: FsEntry): string | null {
-  return entry.deleted ? t(`undelete.state.${entry.state}`) : null
+  return entry.deleted ? t(`partitionFiles.state.${entry.state}`) : null
 }
 
 /** 虚拟目录的名字由界面给出；复制时它也是输出目录里的文件夹名 */
 function withShownName(entry: FsEntry): FsEntry {
-  return entry.virtualDir === 'orphans' ? { ...entry, name: t('undelete.browser.orphans') } : entry
+  return entry.virtualDir === 'orphans' ? { ...entry, name: t('partitionFiles.browser.orphans') } : entry
 }
 </script>
 
 <template>
-  <div class="fs-browser">
-    <div class="fs-browser__toolbar">
-      <h3 :id="`${domPrefix}-title`" class="fs-browser__title">
-        {{ t('undelete.browser.title') }}
+  <div class="tree-list">
+    <div class="tree-list__toolbar">
+      <h3 :id="`${domPrefix}-title`" class="tree-list__title">
+        {{ t('partitionFiles.browser.title') }}
       </h3>
       <slot name="tools"></slot>
     </div>
     <div
       ref="viewport"
-      class="fs-browser__viewport"
+      class="tree-list__viewport"
       role="tree"
       tabindex="0"
       :aria-labelledby="`${domPrefix}-title`"
@@ -462,13 +414,13 @@ function withShownName(entry: FsEntry): FsEntry {
         >
           <template v-if="row.kind === 'entry'">
             <input
-              class="fs-browser__check"
+              class="tree-list__check"
               type="checkbox"
               tabindex="-1"
               :checked="checked.has(row.id) || isCoveredByParent(row.id)"
               :aria-disabled="isCoveredByParent(row.id) || undefined"
-              :title="isCoveredByParent(row.id) ? t('undelete.browser.checkInherited') : undefined"
-              :aria-label="t('undelete.browser.check', { name: row.entry.name })"
+              :title="isCoveredByParent(row.id) ? t('partitionFiles.browser.checkInherited') : undefined"
+              :aria-label="t('partitionFiles.browser.check', { name: row.entry.name })"
               @click.stop="handleCheckClick($event, row)"
             />
             <span class="fs-browser__chevron" aria-hidden="true">
@@ -480,7 +432,7 @@ function withShownName(entry: FsEntry): FsEntry {
                 'fs-browser__name--dir': row.entry.isDir,
                 'fs-browser__name--virtual': row.entry.virtualDir !== null,
               }"
-              :title="row.entry.nameUncertain ? t('undelete.browser.nameUncertain') : undefined"
+              :title="row.entry.nameUncertain ? t('partitionFiles.browser.nameUncertain') : undefined"
             >
               {{ row.entry.name }}
             </span>
@@ -495,7 +447,7 @@ function withShownName(entry: FsEntry): FsEntry {
               v-if="row.entry.unsupported"
               class="fs-browser__badge fs-browser__badge--unsupported"
             >
-              {{ t(`undelete.unsupported.${row.entry.unsupported}`) }}
+              {{ t(`partitionFiles.unsupported.${row.entry.unsupported}`) }}
             </span>
             <span class="fs-browser__size">
               {{ row.entry.isDir ? '' : formatBytes(row.entry.size) }}
@@ -507,34 +459,13 @@ function withShownName(entry: FsEntry): FsEntry {
       </div>
     </div>
     <div class="fs-browser__footer">
-      <p class="fs-browser__hint">{{ t('undelete.browser.hint') }}</p>
+      <p class="tree-list__hint">{{ t('partitionFiles.browser.hint') }}</p>
       <slot name="actions"></slot>
     </div>
   </div>
 </template>
 
 <style scoped>
-.fs-browser {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-sm);
-  width: 100%;
-  min-width: 0;
-}
-
-/* 高度不按内容撑开（内容可能有十万行）：至少 MIN_ROWS 行，其余由所在布局拉伸 */
-.fs-browser__viewport {
-  position: relative;
-  overflow-y: auto;
-  contain: size;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-card);
-}
-
-.fs-browser__viewport:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 1px;
-}
 
 .fs-browser__spacer {
   position: relative;
@@ -559,18 +490,12 @@ function withShownName(entry: FsEntry): FsEntry {
 }
 
 /* 键盘焦点所在的行；只在列表有焦点时画出来 */
-.fs-browser__viewport:focus-visible .fs-browser__row--active {
+.tree-list__viewport:focus-visible .fs-browser__row--active {
   box-shadow: inset 0 0 0 1px var(--color-accent);
 }
 
-.fs-browser__check {
-  flex: none;
-  margin: 0;
-  accent-color: var(--color-accent);
-}
-
 /* 随上级文件夹一起复制：仍是已勾选的样子，只是淡一些、点了不变 */
-.fs-browser__check[aria-disabled='true'] {
+.tree-list__check[aria-disabled='true'] {
   opacity: 0.6;
   cursor: not-allowed;
 }
@@ -610,7 +535,7 @@ function withShownName(entry: FsEntry): FsEntry {
   padding: 0 var(--space-xs);
   font-size: var(--font-size-small);
   border: 1px solid var(--color-border);
-  border-radius: var(--space-xs);
+  border-radius: var(--radius-control);
 }
 
 .fs-browser__badge--intact {
@@ -653,31 +578,10 @@ function withShownName(entry: FsEntry): FsEntry {
   padding-left: calc(var(--space-md) + var(--space-md));
 }
 
-.fs-browser__toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-sm);
-}
-
-.fs-browser__title {
-  margin: 0;
-  font-size: var(--font-size-body);
-  font-weight: 600;
-}
-
 .fs-browser__footer {
   display: flex;
   align-items: flex-start;
   gap: var(--space-md);
 }
 
-.fs-browser__hint {
-  flex: 1;
-  min-width: 0;
-  margin: 0;
-  color: var(--color-text-muted);
-  font-size: var(--font-size-small);
-}
 </style>

@@ -3,6 +3,8 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import PartitionPicker from './PartitionPicker.vue'
 import SourcePicker from './SourcePicker.vue'
+import WizardSteps from './WizardSteps.vue'
+import JobControls from './JobControls.vue'
 import { useBrowse } from '../composables/useBrowse'
 import { useFsCheck } from '../composables/useFsCheck'
 import { useHostErrorText } from '../composables/useHostErrorText'
@@ -17,7 +19,7 @@ import {
   type JobTarget,
   type PartitionInfo,
 } from '../services/host'
-import { formatBytes, formatHex } from '../utils/format'
+import { formatBytes, formatHex, formatSeconds } from '../utils/format'
 
 const STEPS = ['source', 'partition', 'check', 'result'] as const
 type WizardStep = (typeof STEPS)[number]
@@ -390,11 +392,11 @@ function buildReportText(): string {
     return ''
   }
   const field = (label: string, value: string) => t('fsCheck.labelValue', { label, value })
-  const elapsed = t('fsCheck.result.elapsed', { seconds: (current.elapsedMs / 1000).toFixed(1) })
+  const elapsed = t('fsCheck.result.elapsed', { seconds: formatSeconds(current.elapsedMs) })
   const lines = [
     t('fsCheck.export.heading'),
     '',
-    field(t('fsCheck.result.source'), sourceName(fsCheck.target.value)),
+    field(t('common.source'), sourceName(fsCheck.target.value)),
     field(t('fsCheck.result.partition'), partitionLine(partition)),
     field(t('fsCheck.result.finishedAt'), formatTime(finishedAt.value ?? new Date())),
     field(t('fsCheck.result.volume'), summaryText()),
@@ -454,21 +456,7 @@ function buildReportText(): string {
 
     <form class="wizard__form" @submit.prevent="handleSubmit">
       <div class="wizard__stepbar">
-        <ol class="wizard__steps">
-          <li
-            v-for="(name, index) in STEPS"
-            :key="name"
-            class="wizard__step"
-            :class="{
-              'wizard__step--current': name === step,
-              'wizard__step--done': index < stepIndex,
-            }"
-            :aria-current="name === step ? 'step' : undefined"
-          >
-            <span class="wizard__step-number">{{ index + 1 }}</span>
-            {{ t(`fsCheck.steps.${name}`) }}
-          </li>
-        </ol>
+        <WizardSteps :steps="STEPS" :current="step" label-prefix="fsCheck.steps" />
         <div class="wizard__nav">
           <button
             v-if="stepIndex > 0 && !fsCheck.isBusy.value"
@@ -477,33 +465,22 @@ function buildReportText(): string {
             :disabled="!canGoBack"
             @click="goBack"
           >
-            {{ t('carve.previous') }}
+            {{ t('common.previous') }}
           </button>
           <button v-if="step === 'source'" class="wizard__button" type="submit" :disabled="!canGoNext">
-            {{ t('carve.next') }}
+            {{ t('common.next') }}
           </button>
           <button v-else-if="step === 'partition'" class="wizard__button" type="submit" :disabled="!canGoNext">
             {{ t('fsCheck.partition.start') }}
           </button>
-          <template v-else-if="fsCheck.isBusy.value">
-            <button
-              v-if="fsCheck.status.value === 'running'"
-              class="wizard__button wizard__button--secondary"
-              type="button"
-              :disabled="fsCheck.isTogglingPause.value"
-              @click="fsCheck.isPaused.value ? fsCheck.resume() : fsCheck.pause()"
-            >
-              {{ fsCheck.isPaused.value ? t('carve.run.resume') : t('carve.run.pause') }}
-            </button>
-            <button
-              class="wizard__button wizard__button--secondary"
-              type="button"
-              :disabled="fsCheck.status.value !== 'running'"
-              @click="fsCheck.cancel"
-            >
-              {{ fsCheck.status.value === 'cancelling' ? t('carve.run.cancelling') : t('carve.run.cancel') }}
-            </button>
-          </template>
+          <JobControls
+            v-else-if="fsCheck.isBusy.value"
+            :status="fsCheck.status.value"
+            :pause="{ isPaused: fsCheck.isPaused.value, isToggling: fsCheck.isTogglingPause.value }"
+            @pause="fsCheck.pause"
+            @resume="fsCheck.resume"
+            @cancel="fsCheck.cancel"
+          />
           <template v-else>
             <button
               v-if="step === 'result'"
@@ -537,7 +514,7 @@ function buildReportText(): string {
         <p class="wizard__hint wizard__hint--warning">{{ t('fsCheck.notes.imageFirst') }}</p>
         <p class="wizard__hint">{{ t('fsCheck.notes.readOnly') }}</p>
         <p v-if="browse.status.value === 'starting'" class="wizard__note" aria-live="polite">
-          {{ target?.kind === 'disk' ? t('undelete.openingDisk') : t('undelete.opening') }}
+          {{ target?.kind === 'disk' ? t('partition.openingDisk') : t('partition.opening') }}
         </p>
         <p v-if="browse.failure.value" class="wizard__error" role="alert">
           {{ formatHostError(browse.failure.value) }}
@@ -547,9 +524,9 @@ function buildReportText(): string {
       <div v-else-if="step === 'partition'" class="wizard__panel">
         <p class="wizard__note">
           {{
-            t('undelete.partition.summary', {
+            t('partition.picker.summary', {
               source: sourceText,
-              scheme: t(`undelete.partition.scheme.${browse.opened.value?.scheme ?? 'none'}`),
+              scheme: t(`partition.picker.scheme.${browse.opened.value?.scheme ?? 'none'}`),
               size: formatBytes(browse.opened.value?.size ?? 0),
             })
           }}
@@ -570,7 +547,7 @@ function buildReportText(): string {
 
       <div v-else-if="step === 'check'" class="wizard__panel">
         <dl v-if="checkedPartition" class="wizard__details">
-          <dt>{{ t('fsCheck.result.source') }}</dt>
+          <dt>{{ t('common.source') }}</dt>
           <dd class="wizard__path-text">{{ sourceName(fsCheck.target.value) }}</dd>
           <dt>{{ t('fsCheck.result.partition') }}</dt>
           <dd>{{ partitionLine(checkedPartition) }}</dd>
@@ -585,7 +562,7 @@ function buildReportText(): string {
         </div>
         <p v-if="fsCheck.isPaused.value" class="wizard__hint">{{ t('fsCheck.run.pausedHint') }}</p>
         <p v-if="fsCheck.isUnresponsive.value" class="wizard__error" role="alert">
-          {{ t('carve.run.unresponsive') }}
+          {{ t('common.unresponsive') }}
         </p>
         <p v-if="fsCheck.failure.value" class="wizard__error" role="alert">
           {{ formatHostError(fsCheck.failure.value) }}
@@ -595,7 +572,7 @@ function buildReportText(): string {
 
       <div v-else-if="report && checkedPartition" class="wizard__panel wizard__fill fs-check__result">
         <dl class="wizard__details">
-          <dt>{{ t('fsCheck.result.source') }}</dt>
+          <dt>{{ t('common.source') }}</dt>
           <dd class="wizard__path-text">{{ sourceName(fsCheck.target.value) }}</dd>
           <dt>{{ t('fsCheck.result.partition') }}</dt>
           <dd>{{ partitionLine(checkedPartition) }}</dd>
@@ -604,7 +581,7 @@ function buildReportText(): string {
           <dt>{{ t('fsCheck.result.totals') }}</dt>
           <dd>
             {{ totalsText() }}
-            {{ t('fsCheck.result.elapsed', { seconds: (report.elapsedMs / 1000).toFixed(1) }) }}
+            {{ t('fsCheck.result.elapsed', { seconds: formatSeconds(report.elapsedMs) }) }}
           </dd>
           <dt>{{ t('fsCheck.result.checked') }}</dt>
           <dd>{{ checksText(report.checked) }}</dd>
@@ -672,11 +649,11 @@ function buildReportText(): string {
   display: flex;
   flex-direction: column;
   gap: var(--space-md);
-  min-height: 280px;
+  min-height: var(--box-min-height);
   overflow-y: auto;
   padding: var(--space-sm) var(--space-md);
   border: 1px solid var(--color-border);
-  border-radius: var(--space-xs);
+  border-radius: var(--radius-control);
   contain: size;
 }
 

@@ -121,7 +121,7 @@
   color: var(--color-text);
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: var(--space-xs);
+  border-radius: var(--radius-control);
   font: inherit;
 }
 
@@ -240,7 +240,7 @@
   color: var(--color-on-accent);
   background: var(--color-accent);
   border: 1px solid var(--color-accent);
-  border-radius: var(--space-xs);
+  border-radius: var(--radius-control);
   font: inherit;
   cursor: pointer;
 }
@@ -254,4 +254,204 @@
 .wizard__button:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* 单页工具（坏道检测、制作镜像）：说明、可展开的指引、结果区、下一步建议 */
+
+.tool__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  margin-top: var(--space-md);
+}
+
+.tool__intro {
+  margin: 0;
+}
+
+.tool__guide {
+  padding: var(--space-sm) var(--space-md);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+}
+
+.tool__guide-summary {
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tool__guide-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  margin: var(--space-sm) 0 0;
+  padding-left: var(--space-lg);
+}
+
+.tool__report {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.tool__report-title {
+  margin: 0;
+  font-size: var(--font-size-section-title);
+  font-weight: 600;
+}
+
+.tool__next {
+  margin: 0;
+  padding: var(--space-sm) var(--space-md);
+  border-left: 4px solid var(--color-warning);
+  background: var(--color-bg);
+  border-radius: var(--radius-control);
+}
+
+/* 树列表（分区文件的目录树、深度恢复的结果树）共用的外观；行的样式各组件自己写 */
+
+.tree-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  width: 100%;
+  min-width: 0;
+}
+
+.tree-list__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.tree-list__title {
+  margin: 0;
+  font-size: var(--font-size-body);
+  font-weight: 600;
+}
+
+/* 高度不按内容撑开（内容可能有十万行）：至少 MIN_ROWS 行，其余由所在布局拉伸 */
+.tree-list__viewport {
+  position: relative;
+  overflow-y: auto;
+  contain: size;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+}
+
+.tree-list__viewport:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.tree-list__check {
+  flex: none;
+  margin: 0;
+  accent-color: var(--color-accent);
+}
+
+.tree-list__hint {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-small);
+}
+
+/* 详情卡片（分区文件的详情、深度恢复的预览）共用的外观 */
+
+.detail-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  width: 100%;
+  min-width: 0;
+}
+
+.detail-card__title {
+  align-self: center;
+  margin: 0;
+  font-size: var(--font-size-body);
+  font-weight: 600;
+}
+
+/* 高度跟随所在布局（与左边的文件列表框等高），不按内容撑开；内容超出时在框里滚动 */
+.detail-card__card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  min-height: var(--box-min-height);
+  padding: var(--space-sm);
+  overflow-y: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  contain: size;
+}
+
+.detail-card__list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-xs) var(--space-md);
+  margin: 0;
+}
+
+.detail-card__list dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.detail-card__list dt {
+  color: var(--color-text-muted);
+}
+
+.detail-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+/* 向导里的列表与选项 */
+
+.wizard__failures {
+  max-height: 160px;
+  margin: 0;
+  padding-left: var(--space-lg);
+  overflow-y: auto;
+  font-size: var(--font-size-small);
+  overflow-wrap: anywhere;
+}
+
+/* 列表与详情两栏都分标题、框体、底部三行，三行上下边对齐；列表要放名字、状态与时间，占得宽一些 */
+.wizard__files {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  grid-template-rows: auto 1fr auto;
+  gap: var(--space-sm) var(--space-lg);
+}
+
+.wizard__list {
+  margin: 0;
+  padding-left: var(--space-lg);
+  font-size: var(--font-size-small);
+}
+
+.wizard__choices {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+}
+
+.wizard__choice {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-sm);
+  padding: var(--space-xs) 0;
+  cursor: pointer;
 }

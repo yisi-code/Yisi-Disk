@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, useId, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import MftScanProgress from './MftScanProgress.vue'
 import PartitionFiles from './PartitionFiles.vue'
 import SourcePicker from './SourcePicker.vue'
+import WizardSteps from './WizardSteps.vue'
+import JobControls from './JobControls.vue'
 import { useBrowse } from '../composables/useBrowse'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { usePartitionText } from '../composables/usePartitionText'
@@ -15,7 +18,7 @@ import {
   type PartitionInfo,
   type PartitionRef,
 } from '../services/host'
-import { formatBytes } from '../utils/format'
+import { formatBytes, formatSeconds } from '../utils/format'
 
 const STEPS = ['source', 'search', 'results'] as const
 type WizardStep = (typeof STEPS)[number]
@@ -85,7 +88,7 @@ const statusText = computed(() => {
   switch (search.status.value) {
     case 'starting':
       return search.target.value?.kind === 'disk'
-        ? t('findPartitions.status.startingDisk')
+        ? t('common.startingDisk')
         : t('findPartitions.status.starting')
     case 'running':
     case 'cancelling':
@@ -122,7 +125,7 @@ const summaryText = computed(() => {
     t('findPartitions.results.table', {
       scheme: t(`findPartitions.results.scheme.${summary.scheme}`),
     }),
-    t('findPartitions.results.elapsed', { seconds: (summary.elapsedMs / 1000).toFixed(1) }),
+    t('findPartitions.results.elapsed', { seconds: formatSeconds(summary.elapsedMs) }),
   ]
   if (summary.unreadableBytes > 0) {
     parts.push(t('findPartitions.results.unreadable', { size: formatBytes(summary.unreadableBytes) }))
@@ -132,16 +135,6 @@ const summaryText = computed(() => {
   }
   return parts.join(t('findPartitions.results.separator'))
 })
-
-const scanStatusText = computed(() =>
-  browse.scanTotal.value > 0
-    ? t('undelete.scan.running', {
-        done: formatBytes(browse.scanDone.value),
-        total: formatBytes(browse.scanTotal.value),
-        percent: browse.scanPercent.value,
-      })
-    : t('undelete.scan.starting'),
-)
 
 watch(search.status, (status) => {
   if (status === 'completed' && step.value === 'search') {
@@ -293,21 +286,7 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
 
     <form class="wizard__form" @submit.prevent="handleSubmit">
       <div class="wizard__stepbar">
-        <ol class="wizard__steps">
-          <li
-            v-for="(name, index) in STEPS"
-            :key="name"
-            class="wizard__step"
-            :class="{
-              'wizard__step--current': name === step,
-              'wizard__step--done': index < stepIndex,
-            }"
-            :aria-current="name === step ? 'step' : undefined"
-          >
-            <span class="wizard__step-number">{{ index + 1 }}</span>
-            {{ t(`findPartitions.steps.${name}`) }}
-          </li>
-        </ol>
+        <WizardSteps :steps="STEPS" :current="step" label-prefix="findPartitions.steps" />
         <div class="wizard__nav">
           <button
             v-if="stepIndex > 0"
@@ -316,30 +295,19 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
             :disabled="search.isBusy.value || isPartitionBusy"
             @click="goBack"
           >
-            {{ t('carve.previous') }}
+            {{ t('common.previous') }}
           </button>
           <button v-if="step === 'source'" class="wizard__button" type="submit" :disabled="target === null">
             {{ t('findPartitions.start') }}
           </button>
-          <template v-else-if="search.isBusy.value">
-            <button
-              v-if="search.status.value === 'running'"
-              class="wizard__button wizard__button--secondary"
-              type="button"
-              :disabled="search.isTogglingPause.value"
-              @click="search.isPaused.value ? search.resume() : search.pause()"
-            >
-              {{ search.isPaused.value ? t('carve.run.resume') : t('carve.run.pause') }}
-            </button>
-            <button
-              class="wizard__button wizard__button--secondary"
-              type="button"
-              :disabled="search.status.value !== 'running'"
-              @click="search.cancel"
-            >
-              {{ search.status.value === 'cancelling' ? t('carve.run.cancelling') : t('carve.run.cancel') }}
-            </button>
-          </template>
+          <JobControls
+            v-else-if="search.isBusy.value"
+            :status="search.status.value"
+            :pause="{ isPaused: search.isPaused.value, isToggling: search.isTogglingPause.value }"
+            @pause="search.pause"
+            @resume="search.resume"
+            @cancel="search.cancel"
+          />
           <button
             v-else
             class="wizard__button"
@@ -364,7 +332,7 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
 
       <div v-else-if="step === 'search'" class="wizard__panel">
         <dl class="wizard__details">
-          <dt>{{ t('carve.run.source') }}</dt>
+          <dt>{{ t('common.source') }}</dt>
           <dd class="wizard__path-text">{{ sourceText }}</dd>
         </dl>
         <div class="wizard__job" aria-live="polite">
@@ -375,7 +343,7 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
           ></progress>
           <p class="wizard__status">{{ statusText }}</p>
           <p v-if="search.isUnresponsive.value" class="wizard__error" role="alert">
-            {{ t('carve.run.unresponsive') }}
+            {{ t('common.unresponsive') }}
           </p>
           <p v-if="search.failure.value" class="wizard__error" role="alert">
             {{ formatHostError(search.failure.value) }}
@@ -385,7 +353,7 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
 
       <div v-else class="wizard__panel wizard__fill">
         <dl class="wizard__details">
-          <dt>{{ t('carve.run.source') }}</dt>
+          <dt>{{ t('common.source') }}</dt>
           <dd class="wizard__path-text">{{ sourceText }}</dd>
         </dl>
         <p class="wizard__note">{{ summaryText }}</p>
@@ -393,12 +361,12 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
         <p v-if="browse.status.value === 'starting'" class="wizard__note" aria-live="polite">
           {{
             search.target.value?.kind === 'disk'
-              ? t('findPartitions.results.openingDisk')
+              ? t('common.startingDisk')
               : t('findPartitions.results.opening')
           }}
         </p>
         <p v-if="browse.isUnresponsive.value" class="wizard__error" role="alert">
-          {{ t('carve.run.unresponsive') }}
+          {{ t('common.unresponsive') }}
         </p>
         <p v-if="!browse.isOpen.value && browse.failure.value" class="wizard__error" role="alert">
           {{ formatHostError(browse.failure.value) }}
@@ -479,24 +447,7 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
               <p v-else-if="isOpeningPartition" class="wizard__note">
                 {{ t('findPartitions.files.opening') }}
               </p>
-              <div v-else-if="browse.isScanning.value" class="wizard__job">
-                <progress
-                  class="wizard__progress"
-                  :value="browse.scanDone.value"
-                  :max="browse.scanTotal.value || 1"
-                ></progress>
-                <p class="wizard__status">{{ scanStatusText }}</p>
-                <div>
-                  <button
-                    class="wizard__button wizard__button--secondary"
-                    type="button"
-                    :disabled="browse.isCancellingScan.value"
-                    @click="browse.stopScan"
-                  >
-                    {{ browse.isCancellingScan.value ? t('undelete.scan.cancelling') : t('undelete.scan.cancel') }}
-                  </button>
-                </div>
-              </div>
+              <MftScanProgress v-else-if="browse.isScanning.value" :browse="browse" />
               <template v-else>
                 <p v-if="openError" class="wizard__error" role="alert">
                   {{ t('findPartitions.files.openFailed', { reason: formatHostError(openError) }) }}
@@ -505,7 +456,7 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
                   {{ t('findPartitions.files.unbrowsable', { reason: unbrowsableReason(openedPartition.filesystem) }) }}
                 </p>
                 <p v-else-if="browse.scanFailure.value" class="wizard__error" role="alert">
-                  {{ t('undelete.scan.failed', { reason: formatHostError(browse.scanFailure.value) }) }}
+                  {{ t('partitionFiles.scan.failed', { reason: formatHostError(browse.scanFailure.value) }) }}
                 </p>
                 <p v-else class="wizard__note">{{ t('findPartitions.files.scanCancelled') }}</p>
                 <div v-if="!openedPartition">
@@ -562,7 +513,7 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
 /* 列表框与占位框都不按内容撑高，与右边的文件列表框等高，内容超出时在框里滚动 */
 .find-partitions__list,
 .find-partitions__box {
-  min-height: 280px;
+  min-height: var(--box-min-height);
   margin: 0;
   overflow-y: auto;
   border: 1px solid var(--color-border);
@@ -627,7 +578,7 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
   padding: 0 var(--space-xs);
   font-size: var(--font-size-small);
   border: 1px solid var(--color-border);
-  border-radius: var(--space-xs);
+  border-radius: var(--radius-control);
 }
 
 .find-partitions__tag--lost {

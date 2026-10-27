@@ -29,7 +29,7 @@ export function usePartitionText() {
 
   /** 读分区表时发现的问题 */
   function tableNote(note: string): string {
-    const key = `undelete.notes.${note}`
+    const key = `partition.notes.${note}`
     return te(key) ? t(key) : note
   }
 
@@ -39,14 +39,14 @@ export function usePartitionText() {
       return ''
     }
     return source.kind === 'image'
-      ? t('undelete.sourceImage', { path: source.path })
-      : t('undelete.sourceDisk', { number: source.diskNumber })
+      ? t('partition.sourceImage', { path: source.path })
+      : t('partition.sourceDisk', { number: source.diskNumber })
   }
 
   /** 不能浏览的原因；文件系统认得出、却打不开时按「参数不对」说 */
   function unbrowsableReason(filesystem: string): string {
-    const key = `undelete.partition.reason.${filesystem}`
-    return te(key) ? t(key) : t('undelete.partition.reason.invalid')
+    const key = `partition.picker.reason.${filesystem}`
+    return te(key) ? t(key) : t('partition.picker.reason.invalid')
   }
 
   /** 分区的名字：卷标，没有时用 GPT 分区名；都没有时为空串 */

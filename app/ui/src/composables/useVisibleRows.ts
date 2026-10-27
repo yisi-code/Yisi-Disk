@@ -5,7 +5,7 @@ import { onBeforeUnmount, ref, watch, type Ref } from 'vue'
  * 虚拟列表据此决定渲染哪些行、PageUp / PageDown 翻多少行；框还没渲染出来时用 `fallbackRows`
  */
 export function useVisibleRows(
-  viewport: Ref<HTMLElement | null>,
+  viewport: Readonly<Ref<HTMLElement | null>>,
   rowHeight: number,
   fallbackRows: number,
 ) {

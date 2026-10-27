@@ -45,7 +45,7 @@ function busLabel(disk: DiskSummary): string {
 </script>
 
 <template>
-  <fieldset class="disk-picker" :disabled="disabled">
+  <fieldset class="wizard__choices" :disabled="disabled">
     <legend class="disk-picker__legend">{{ t('disk.legend') }}</legend>
 
     <p v-if="loadError" class="disk-picker__error" role="alert">
@@ -58,12 +58,12 @@ function busLabel(disk: DiskSummary): string {
 
     <ul v-if="disks.length > 0" class="disk-picker__list">
       <li v-for="disk in disks" :key="disk.number">
-        <label class="disk-picker__option">
+        <label class="wizard__choice">
           <input
             v-model="selectedDisk"
             class="disk-picker__radio"
             type="radio"
-            name="disk-picker"
+            name="wizard__choices"
             :value="disk.number"
           />
           <span class="disk-picker__name">
@@ -95,14 +95,6 @@ function busLabel(disk: DiskSummary): string {
 </template>
 
 <style scoped>
-.disk-picker {
-  display: block;
-  width: 100%;
-  margin: 0;
-  padding: var(--space-sm) var(--space-md);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-card);
-}
 
 .disk-picker__legend {
   padding: 0 var(--space-xs);
@@ -125,14 +117,6 @@ function busLabel(disk: DiskSummary): string {
   list-style: none;
 }
 
-.disk-picker__option {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-sm);
-  padding: var(--space-xs) 0;
-  cursor: pointer;
-}
-
 .disk-picker__radio {
   align-self: center;
   accent-color: var(--color-accent);
@@ -152,7 +136,7 @@ function busLabel(disk: DiskSummary): string {
   color: var(--color-text);
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: var(--space-xs);
+  border-radius: var(--radius-control);
   font: inherit;
   cursor: pointer;
 }

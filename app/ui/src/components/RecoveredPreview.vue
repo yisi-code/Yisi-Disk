@@ -67,33 +67,33 @@ function locate(offset: number) {
 </script>
 
 <template>
-  <section class="recovered-preview" :aria-labelledby="titleId">
-    <h3 :id="titleId" class="recovered-preview__title">
+  <section class="detail-card" :aria-labelledby="titleId">
+    <h3 :id="titleId" class="detail-card__title">
       {{ t('carve.preview.title') }}
     </h3>
-    <div class="recovered-preview__card">
+    <div class="detail-card__card">
       <p v-if="file === null" class="recovered-preview__placeholder">
         {{ t('carve.preview.placeholder') }}
       </p>
       <template v-else>
-        <dl class="recovered-preview__details">
+        <dl class="detail-card__list">
           <dt>{{ t('carve.preview.name') }}</dt>
           <dd class="recovered-preview__selectable">{{ file.name }}</dd>
           <dt>{{ t('carve.preview.format') }}</dt>
           <dd>{{ typeName }}</dd>
           <dt>{{ t('carve.preview.size') }}</dt>
           <dd>
-            {{ t('carve.preview.sizeValue', { size: formatBytes(file.length), bytes: file.length }) }}
+            {{ t('common.sizeValue', { size: formatBytes(file.length), bytes: file.length }) }}
           </dd>
           <template v-if="extent">
             <dt>{{ t('carve.preview.start') }}</dt>
-            <dd>{{ t('carve.preview.positionValue', extent.start) }}</dd>
+            <dd>{{ t('common.positionValue', extent.start) }}</dd>
             <dt>{{ t('carve.preview.end') }}</dt>
-            <dd>{{ t('carve.preview.positionValue', extent.end) }}</dd>
+            <dd>{{ t('common.positionValue', extent.end) }}</dd>
           </template>
         </dl>
 
-        <div class="recovered-preview__actions">
+        <div class="detail-card__actions">
           <button
             class="recovered-preview__button"
             type="button"
@@ -116,7 +116,7 @@ function locate(offset: number) {
             :disabled="jobId === null || !isSaved"
             @click="emit('reveal', file)"
           >
-            {{ t('carve.preview.reveal') }}
+            {{ t('common.reveal') }}
           </button>
         </div>
         <p v-if="actionError" class="recovered-preview__error" role="alert">
@@ -138,33 +138,6 @@ function locate(offset: number) {
 </template>
 
 <style scoped>
-.recovered-preview {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-sm);
-  width: 100%;
-  min-width: 0;
-}
-
-.recovered-preview__title {
-  align-self: center;
-  margin: 0;
-  font-size: var(--font-size-body);
-  font-weight: 600;
-}
-
-/* 高度跟随所在布局（深度恢复里与左边的文件列表框等高），不按内容撑开；内容超出时在框里滚动 */
-.recovered-preview__card {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-sm);
-  min-height: 240px;
-  padding: var(--space-sm);
-  overflow-y: auto;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-card);
-  contain: size;
-}
 
 .recovered-preview__placeholder,
 .recovered-preview__note {
@@ -173,31 +146,8 @@ function locate(offset: number) {
   font-size: var(--font-size-small);
 }
 
-.recovered-preview__details {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: var(--space-xs) var(--space-md);
-  margin: 0;
-}
-
-.recovered-preview__details dt {
-  color: var(--color-text-muted);
-}
-
-.recovered-preview__details dd {
-  margin: 0;
-  font-variant-numeric: tabular-nums;
-  overflow-wrap: anywhere;
-}
-
 .recovered-preview__selectable {
   user-select: text;
-}
-
-.recovered-preview__actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-sm);
 }
 
 .recovered-preview__button {
@@ -205,7 +155,7 @@ function locate(offset: number) {
   color: var(--color-on-accent);
   background: var(--color-accent);
   border: 1px solid var(--color-accent);
-  border-radius: var(--space-xs);
+  border-radius: var(--radius-control);
   font: inherit;
   cursor: pointer;
 }

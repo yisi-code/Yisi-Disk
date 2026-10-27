@@ -115,7 +115,7 @@ function formatHex(bytes: Uint8Array): string[] {
   max-width: 100%;
   max-height: 320px;
   border: 1px solid var(--color-border);
-  border-radius: var(--space-xs);
+  border-radius: var(--radius-control);
 }
 
 .file-preview-view__hex {
@@ -128,7 +128,7 @@ function formatHex(bytes: Uint8Array): string[] {
   line-height: 1.5;
   background: var(--color-bg);
   border: 1px solid var(--color-border);
-  border-radius: var(--space-xs);
+  border-radius: var(--radius-control);
   user-select: text;
 }
 </style>

@@ -1,5 +1,10 @@
 const BYTE_UNITS = ['B', 'KiB', 'MiB', 'GiB', 'TiB'] as const
 
+/** 用时的秒数，保留一位小数（文案是 `common.seconds`） */
+export function formatSeconds(milliseconds: number): string {
+  return (milliseconds / 1000).toFixed(1)
+}
+
 /** 十六进制，例如 0x0F；`digits` 是至少几位 */
 export function formatHex(value: number, digits = 0): string {
   return `0x${value.toString(16).toUpperCase().padStart(digits, '0')}`

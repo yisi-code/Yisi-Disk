@@ -28,7 +28,7 @@ onMounted(() => {
 
     <ul class="guide-page__cards guide-page__cards--grid">
       <li v-for="problem in PROBLEMS" :key="problem.key">
-        <button class="problem-card" type="button" @click="emit('navigate', problem.key)">
+        <button class="nav-card problem-card" type="button" @click="emit('navigate', problem.key)">
           <span class="problem-card__name">{{ t(`problems.${problem.key}.name`) }}</span>
           <span class="problem-card__summary">{{ t(`problems.${problem.key}.summary`) }}</span>
         </button>
@@ -47,25 +47,6 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.problem-card {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
-  width: 100%;
-  padding: var(--space-md);
-  color: var(--color-text);
-  font: inherit;
-  text-align: left;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-card);
-  cursor: pointer;
-}
-
-.problem-card:hover {
-  border-color: var(--color-accent);
-}
-
 .problem-card__name {
   font-size: var(--font-size-section-title);
   font-weight: 600;
