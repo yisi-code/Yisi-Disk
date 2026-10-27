@@ -73,8 +73,8 @@ function handleClick() {
       {{ t(`features.${feature}.suits`) }}
     </span>
     <span class="feature-card__fit">
-      <span class="feature-card__fit-label">{{ t('features.notSuits') }}</span>
-      {{ t(`features.${feature}.notSuits`) }}
+      <span class="feature-card__fit-label">{{ t('features.limits') }}</span>
+      {{ t(`features.${feature}.limits`) }}
     </span>
     <span v-if="view === null" :id="`${id}-reason`" class="feature-card__pending-reason">
       {{ t('features.pendingReason') }}
