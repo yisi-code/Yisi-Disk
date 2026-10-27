@@ -3,18 +3,9 @@
 use std::time::Instant;
 
 use yisi_engine::protocol::{ByteRange, MAX_UNREADABLE_RANGES, ReadScanReport};
-use yisi_io::BlockDevice;
+use yisi_io::{BlockDevice, ScanControl, scan_device};
 
 use crate::job::{JobContext, JobOutcome};
-
-/// 每次读 1 MiB：大块顺序读，同一块盘只有一条读流。
-const BLOCK_SIZE: usize = 1 << 20;
-
-/// 扫描过程中查询取消、报告进度。
-pub trait ScanControl {
-    fn is_cancelled(&self) -> bool;
-    fn progress(&self, done: u64, total: u64);
-}
 
 impl ScanControl for JobContext {
     fn is_cancelled(&self) -> bool {
@@ -38,36 +29,24 @@ pub fn run(device: &dyn BlockDevice, control: &dyn ScanControl) -> Result<JobOut
 /// 扫描整个设备；被取消时返回 `None`。
 pub fn scan(device: &dyn BlockDevice, control: &dyn ScanControl) -> Option<ReadScanReport> {
     let started = Instant::now();
-    let size = device.size();
-    let mut buffer = vec![0u8; BLOCK_SIZE];
     let mut report = ReadScanReport {
-        size,
+        size: device.size(),
         bytes_read: 0,
         unreadable: Vec::new(),
         unreadable_bytes: 0,
         unreadable_ranges_truncated: false,
         elapsed_ms: 0,
     };
-
-    let mut offset = 0u64;
-    control.progress(0, size);
-    while offset < size {
-        if control.is_cancelled() {
-            return None;
+    let finished = scan_device(device, control, |offset, block| match block {
+        Ok(bytes) => report.bytes_read += bytes.len() as u64,
+        Err((length, error)) => {
+            tracing::warn!(offset, length, %error, "读不出，跳过");
+            record_unreadable(&mut report, offset, length);
         }
-        let length = (size - offset).min(BLOCK_SIZE as u64);
-        let block = &mut buffer[..length as usize];
-        match device.read_exact_at(offset, block) {
-            Ok(()) => report.bytes_read += length,
-            Err(error) => {
-                tracing::warn!(offset, length, %error, "读不出，跳过");
-                record_unreadable(&mut report, offset, length);
-            }
-        }
-        offset += length;
-        control.progress(offset, size);
+    });
+    if !finished {
+        return None;
     }
-
     report.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     Some(report)
 }

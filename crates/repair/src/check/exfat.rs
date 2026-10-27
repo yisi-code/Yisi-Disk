@@ -20,8 +20,7 @@ use crate::check::{CheckItem, Ctx, Stage, Summary, check_backup};
 const ENTRY: usize = 32;
 const TYPE_UPCASE: u8 = 0x82;
 const ATTR_DIRECTORY: u16 = 0x10;
-/// VolumeFlags：第 0 位用第二份 FAT，第 1 位未正常卸下，第 2 位出过介质故障。
-const FLAG_ACTIVE_FAT: u16 = 0x01;
+/// VolumeFlags：第 1 位未正常卸下，第 2 位出过介质故障（第 0 位用哪份 FAT 见 `ExfatBpb::use_second_fat`）。
 const FLAG_DIRTY: u16 = 0x02;
 const FLAG_MEDIA_FAILURE: u16 = 0x04;
 /// 大写表最多读这么多（规范里的完整大写表不到 6 KiB）。
@@ -80,7 +79,7 @@ pub(crate) fn check(ctx: &mut Ctx, region: &[u8], from_backup: bool) -> Option<S
         }
     }
 
-    let volume_bytes = geometry.volume_length.saturating_mul(bps);
+    let volume_bytes = geometry.volume_bytes();
     if volume_bytes > length {
         ctx.issues.push(
             Issue::new(IssueKind::VolumeTruncated)
@@ -89,8 +88,6 @@ pub(crate) fn check(ctx: &mut Ctx, region: &[u8], from_backup: bool) -> Option<S
                 .actual(length),
         );
     }
-    let heap_offset = geometry.heap_offset.saturating_mul(bps);
-    let fat_entries = geometry.fat_length.saturating_mul(bps) / 4;
     if geometry.flags & FLAG_DIRTY != 0 {
         ctx.issues
             .push(Issue::new(IssueKind::VolumeDirty).area(area));
@@ -100,24 +97,18 @@ pub(crate) fn check(ctx: &mut Ctx, region: &[u8], from_backup: bool) -> Option<S
             .push(Issue::new(IssueKind::MediaFailure).area(area));
     }
 
-    let fits = length.saturating_sub(heap_offset) / cluster_size;
-    let count = geometry
-        .cluster_count
-        .min(fat_entries.saturating_sub(2))
-        .min(fits);
-    let count = u32::try_from(count).unwrap_or(u32::MAX);
-    let active = u64::from(geometry.fats == 2 && geometry.flags & FLAG_ACTIVE_FAT != 0);
-    let fat_start = (geometry.fat_offset + active * geometry.fat_length).saturating_mul(bps);
+    // 簇数、要用的那份 FAT、簇区位置与打开卷时算的相同（`ExfatBpb` 的方法）
+    let count = u32::try_from(geometry.usable_clusters(length)).unwrap_or(u32::MAX);
     let volume = Volume {
         fat: FatTable::new(
-            fat_start,
-            geometry.fat_length.saturating_mul(bps),
+            geometry.active_fat_offset(),
+            geometry.fat_bytes(),
             Width::Exfat,
             count,
         ),
         owners: Owners::new(u64::from(count) + 2),
         cluster_size,
-        heap_offset,
+        heap_offset: geometry.heap_offset_bytes(),
         claimed: 0,
         used: 0,
         files: 0,
