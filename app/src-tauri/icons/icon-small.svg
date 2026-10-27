@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Yisi-Disk 小尺寸图标（48 px 及以下：标题栏、任务栏）的源文件：去掉外圈箭头，盘片铺满，字母尽量大 -->
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3d7cf0"/>
+      <stop offset="1" stop-color="#1d4fbf"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="200" fill="url(#background)"/>
+  <circle cx="512" cy="512" r="440" fill="#ffffff"/>
+  <g transform="translate(512 512) scale(1.54) translate(-538 -512)" fill="none" stroke="#1d4fbf" stroke-width="40" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 318 428 L 362 508 L 406 428 M 362 508 L 362 596"/>
+    <path d="M 522 488 C 512 472 494 464 474 464 C 450 464 434 478 434 498 C 434 518 452 526 478 532 C 506 538 526 548 526 570 C 526 590 508 600 480 600 C 458 600 438 592 428 576"/>
+    <path d="M 566 532 L 590 532"/>
+    <path d="M 640 428 L 640 596 L 676 596 C 726 596 758 560 758 512 C 758 464 726 428 676 428 Z"/>
+  </g>
+</svg>

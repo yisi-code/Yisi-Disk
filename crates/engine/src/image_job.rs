@@ -385,7 +385,7 @@ fn record(partitions: &[Partition]) -> Vec<RecordedPartition> {
 fn sparse_volume(image_path: &Path) -> bool {
     #[cfg(windows)]
     {
-        yisi_io::output_volume(image_path).is_ok_and(|volume| volume.sparse)
+        yisi_io::volume_info(image_path).is_ok_and(|volume| volume.sparse)
     }
     #[cfg(not(windows))]
     {
@@ -422,7 +422,7 @@ fn ensure_space(image_path: &Path, sparse: bool, needed: u64) -> Result<(), Erro
         return Ok(());
     }
     #[cfg(windows)]
-    match yisi_io::output_volume(image_path) {
+    match yisi_io::volume_info(image_path) {
         Ok(volume) if volume.free_bytes < needed => {
             return Err(output_unavailable(format!(
                 "输出盘剩余 {} 字节，这一次最多还要写入 {needed} 字节",

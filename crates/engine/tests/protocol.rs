@@ -194,6 +194,16 @@ fn disk_list_reports_sizes_without_privilege() {
             "{disk}"
         );
     }
+    // 系统盘的盘符挂在某一块盘上，带着容量
+    let system = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_owned());
+    let letter = system[..1].to_ascii_uppercase();
+    let system_volume = disks
+        .iter()
+        .flat_map(|disk| disk["volumes"].as_array().unwrap())
+        .find(|volume| volume["letter"] == letter.as_str())
+        .unwrap_or_else(|| panic!("没有列出系统盘 {letter}"));
+    assert!(system_volume["totalBytes"].as_u64().unwrap() > 0);
+    assert!(!system_volume["fileSystem"].as_str().unwrap().is_empty());
     engine.close_input();
     assert!(engine.wait_exit().success());
 }

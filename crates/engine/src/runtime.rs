@@ -21,7 +21,7 @@ use yisi_engine::protocol::{
 };
 use yisi_engine::protocol::{DIAGNOSE_BOOT, DiagnoseBootParams};
 #[cfg(windows)]
-use yisi_engine::protocol::{DiskList, DiskSummary};
+use yisi_engine::protocol::{DiskList, DiskSummary, DiskVolume};
 use yisi_engine::protocol::{OPEN_RANGE, OpenRangeParams, SEARCH_PARTITIONS, SearchParams};
 use yisi_formats::Registry;
 use yisi_io::{BlockDevice, RawImage};
@@ -708,10 +708,31 @@ fn ensure_output_elsewhere(
 #[cfg(windows)]
 fn disk_list() -> DiskList {
     use yisi_io::BusType;
+    let volumes = yisi_io::mounted_volumes();
     let disks = yisi_io::list_disks()
         .into_iter()
         .map(|disk| DiskSummary {
             identity: identity_of(Some(&disk)),
+            solid_state: disk.solid_state,
+            partition_style: disk.partition_style.map(|style| {
+                match style {
+                    yisi_io::PartitionStyle::Mbr => "mbr",
+                    yisi_io::PartitionStyle::Gpt => "gpt",
+                    yisi_io::PartitionStyle::Raw => "raw",
+                }
+                .to_owned()
+            }),
+            volumes: volumes
+                .iter()
+                .filter(|volume| volume.disks.contains(&disk.number))
+                .map(|volume| DiskVolume {
+                    letter: volume.letter.to_string(),
+                    label: volume.info.label.clone(),
+                    file_system: volume.info.file_system.clone(),
+                    total_bytes: volume.info.total_bytes,
+                    free_bytes: volume.info.free_bytes,
+                })
+                .collect(),
             number: disk.number,
             path: disk.path,
             size: disk.size,

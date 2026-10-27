@@ -42,6 +42,21 @@ export interface DiskSummary {
   removable: boolean
   /** 认盘用的标识（厂商、型号、序列号），重新插拔、盘号变了也不变；与做镜像时记下的来源相同 */
   identity: string
+  /** 固态盘；设备不回答时（常见于 USB 转接）为 null */
+  solidState: boolean | null
+  /** 系统认出的分区表格式；查不到时为 null */
+  partitionStyle: 'mbr' | 'gpt' | 'raw' | null
+  /** 这块盘上挂载在盘符上的卷，按盘符排序 */
+  volumes: DiskVolume[]
+}
+
+/** 挂载在盘符上的卷（向系统查询，不读盘） */
+export interface DiskVolume {
+  letter: string
+  label: string
+  fileSystem: string
+  totalBytes: number
+  freeBytes: number
 }
 
 /** 任务的源：镜像文件，或按编号指定的物理磁盘 */

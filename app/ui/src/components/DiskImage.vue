@@ -34,7 +34,7 @@ const emit = defineEmits<{ exit: [] }>()
 
 const { t } = useI18n()
 const { formatHostError } = useHostErrorText()
-const { diskName, sourceName, regionLine } = usePartitionText()
+const { diskName, sourceName, regionLine, filesystemName } = usePartitionText()
 const {
   status,
   imaging,
@@ -126,7 +126,7 @@ const partialBlockedReason = computed(() => {
   }
   return inspected.output === null
     ? t('diskImage.scope.outputUnknown')
-    : t('diskImage.scope.notSparse', { fileSystem: inspected.output.fileSystem })
+    : t('diskImage.scope.notSparse', { fileSystem: filesystemName(inspected.output.fileSystem) })
 })
 const isSelecting = computed(() => scopeMode.value === 'select' && partialAllowed.value)
 

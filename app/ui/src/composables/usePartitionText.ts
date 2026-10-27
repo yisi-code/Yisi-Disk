@@ -12,9 +12,9 @@ const HEX_BOOT_FIELDS = ['volumeSerial', 'volumeSerialHigh', 'mediaDescriptor', 
 export function usePartitionText() {
   const { t, te, locale } = useI18n()
 
-  /** 文件系统的显示名；没有文案的原样显示 */
+  /** 文件系统的显示名（中文界面带全称）：引擎给的键（ntfs）与系统报告的名字（NTFS、exFAT、FAT32）都认；没有文案的原样显示 */
   function filesystemName(filesystem: string): string {
-    const key = `partition.fs.${filesystem}`
+    const key = `partition.fs.${filesystem.toLowerCase()}`
     return te(key) ? t(key) : filesystem
   }
 

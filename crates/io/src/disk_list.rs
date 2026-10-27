@@ -10,9 +10,11 @@ use windows_sys::Win32::Storage::FileSystem::{
     BusTypeScsi, BusTypeSd, BusTypeUsb, BusTypeVirtual, FILE_SHARE_READ, FILE_SHARE_WRITE,
 };
 use windows_sys::Win32::System::Ioctl::{
-    DISK_GEOMETRY, DISK_GEOMETRY_EX, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
-    IOCTL_STORAGE_QUERY_PROPERTY, PropertyStandardQuery, STORAGE_DEVICE_DESCRIPTOR,
-    STORAGE_PROPERTY_QUERY, StorageDeviceProperty,
+    DEVICE_SEEK_PENALTY_DESCRIPTOR, DISK_GEOMETRY, DISK_GEOMETRY_EX, DRIVE_LAYOUT_INFORMATION_EX,
+    IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, IOCTL_DISK_GET_DRIVE_LAYOUT_EX, IOCTL_STORAGE_QUERY_PROPERTY,
+    PARTITION_STYLE_GPT, PARTITION_STYLE_MBR, PARTITION_STYLE_RAW, PropertyStandardQuery,
+    STORAGE_DEVICE_DESCRIPTOR, STORAGE_PROPERTY_QUERY, StorageDeviceProperty,
+    StorageDeviceSeekPenaltyProperty,
 };
 
 use crate::ioctl::{field, ioctl};
@@ -21,6 +23,8 @@ use crate::ioctl::{field, ioctl};
 const MAX_DISKS: u32 = 64;
 /// 查询结果的缓冲区：几何信息之后可能附带分区与检测信息，设备描述符之后是若干字符串。
 const QUERY_BUFFER_SIZE: usize = 1024;
+/// 分区布局的缓冲区：头部之后每个分区 144 字节，GPT 最多 128 项。
+const LAYOUT_BUFFER_SIZE: usize = 32 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BusType {
@@ -34,6 +38,15 @@ pub enum BusType {
     Mmc,
     Virtual,
     Other,
+}
+
+/// 分区表的格式（系统认出的）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartitionStyle {
+    Mbr,
+    Gpt,
+    /// 没有分区表（未初始化，或分区表坏了系统认不出）。
+    Raw,
 }
 
 /// 一块物理磁盘的基本信息。
@@ -50,6 +63,10 @@ pub struct DiskInfo {
     pub serial: String,
     pub bus: BusType,
     pub removable: bool,
+    /// 固态盘（读取没有寻道开销）；设备不回答这项查询时（常见于 USB 转接）为空。
+    pub solid_state: Option<bool>,
+    /// 系统认出的分区表格式；查不到时为空。
+    pub partition_style: Option<PartitionStyle>,
 }
 
 /// 列出能查到容量的物理磁盘，按编号排序。打不开、或查不到容量的设备（例如没插卡的读卡器）跳过。
@@ -78,17 +95,7 @@ fn query_disk(number: u32) -> Option<DiskInfo> {
         .ok()?,
     );
 
-    let mut query = [0u8; size_of::<STORAGE_PROPERTY_QUERY>()];
-    write_i32(
-        &mut query,
-        offset_of!(STORAGE_PROPERTY_QUERY, PropertyId),
-        StorageDeviceProperty,
-    );
-    write_i32(
-        &mut query,
-        offset_of!(STORAGE_PROPERTY_QUERY, QueryType),
-        PropertyStandardQuery,
-    );
+    let query = property_query(StorageDeviceProperty);
     let mut descriptor = [0u8; QUERY_BUFFER_SIZE];
     // 有的设备不支持这项查询，此时型号等留空，仍列出这块盘
     let described = ioctl(
@@ -101,6 +108,16 @@ fn query_disk(number: u32) -> Option<DiskInfo> {
     .and_then(|returned| parse_device_descriptor(descriptor.get(..returned)?));
     let described = described.unwrap_or_default();
 
+    let mut penalty = [0u8; size_of::<DEVICE_SEEK_PENALTY_DESCRIPTOR>()];
+    let solid_state = ioctl(
+        handle,
+        IOCTL_STORAGE_QUERY_PROPERTY,
+        &property_query(StorageDeviceSeekPenaltyProperty),
+        &mut penalty,
+    )
+    .ok()
+    .and_then(|returned| parse_seek_penalty(penalty.get(..returned)?));
+
     Some(DiskInfo {
         number,
         path,
@@ -111,7 +128,57 @@ fn query_disk(number: u32) -> Option<DiskInfo> {
         serial: described.serial,
         bus: described.bus,
         removable: described.removable,
+        solid_state,
+        partition_style: query_partition_style(handle),
     })
+}
+
+/// 向系统查分区布局，只取分区表格式。
+fn query_partition_style(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<PartitionStyle> {
+    let mut layout = vec![0u8; LAYOUT_BUFFER_SIZE];
+    let returned = ioctl(handle, IOCTL_DISK_GET_DRIVE_LAYOUT_EX, &[], &mut layout).ok()?;
+    parse_partition_style(layout.get(..returned)?)
+}
+
+fn parse_partition_style(bytes: &[u8]) -> Option<PartitionStyle> {
+    let style = i32::from_ne_bytes(
+        field(
+            bytes,
+            offset_of!(DRIVE_LAYOUT_INFORMATION_EX, PartitionStyle),
+        )
+        .ok()?,
+    );
+    match style {
+        PARTITION_STYLE_MBR => Some(PartitionStyle::Mbr),
+        PARTITION_STYLE_GPT => Some(PartitionStyle::Gpt),
+        PARTITION_STYLE_RAW => Some(PartitionStyle::Raw),
+        _ => None,
+    }
+}
+
+/// 按标准方式查询存储设备的一项属性。
+fn property_query(property: i32) -> [u8; size_of::<STORAGE_PROPERTY_QUERY>()] {
+    let mut query = [0u8; size_of::<STORAGE_PROPERTY_QUERY>()];
+    write_i32(
+        &mut query,
+        offset_of!(STORAGE_PROPERTY_QUERY, PropertyId),
+        property,
+    );
+    write_i32(
+        &mut query,
+        offset_of!(STORAGE_PROPERTY_QUERY, QueryType),
+        PropertyStandardQuery,
+    );
+    query
+}
+
+/// 有寻道开销的是机械盘，没有的是固态盘。
+fn parse_seek_penalty(bytes: &[u8]) -> Option<bool> {
+    let penalty = bytes.get(offset_of!(
+        DEVICE_SEEK_PENALTY_DESCRIPTOR,
+        IncursSeekPenalty
+    ))?;
+    Some(*penalty == 0)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -279,5 +346,32 @@ mod tests {
     fn truncated_descriptor_is_rejected() {
         let bytes = descriptor("V", "M", "S", BusTypeSata, false);
         assert!(parse_device_descriptor(&bytes[..8]).is_none());
+    }
+
+    #[test]
+    fn seek_penalty_tells_solid_state_from_spinning() {
+        // 版本、大小各 4 字节，之后一个字节表示有没有寻道开销
+        let mut bytes = [0u8; 12];
+        bytes[8] = 1;
+        assert_eq!(parse_seek_penalty(&bytes), Some(false));
+        bytes[8] = 0;
+        assert_eq!(parse_seek_penalty(&bytes), Some(true));
+        assert_eq!(parse_seek_penalty(&bytes[..8]), None);
+    }
+
+    #[test]
+    fn partition_style_is_the_first_field_of_the_layout() {
+        let layout = |style: i32| {
+            style
+                .to_ne_bytes()
+                .into_iter()
+                .chain([0u8; 44])
+                .collect::<Vec<u8>>()
+        };
+        assert_eq!(parse_partition_style(&layout(0)), Some(PartitionStyle::Mbr));
+        assert_eq!(parse_partition_style(&layout(1)), Some(PartitionStyle::Gpt));
+        assert_eq!(parse_partition_style(&layout(2)), Some(PartitionStyle::Raw));
+        assert_eq!(parse_partition_style(&layout(9)), None);
+        assert_eq!(parse_partition_style(&[0u8; 2]), None);
     }
 }
