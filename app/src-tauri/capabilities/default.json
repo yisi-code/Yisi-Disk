@@ -14,6 +14,8 @@
     "allow-job-cancel",
     "allow-recovered-preview",
     "allow-recovered-open",
+    "allow-recovered-open-with",
+    "allow-recovered-copy",
     "allow-recovered-reveal",
     "allow-carve-preview-range",
     "allow-job-start-extract",
@@ -27,6 +29,7 @@
     "allow-copied-reveal",
     "allow-job-start-image",
     "dialog:allow-open",
+    "dialog:allow-save",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

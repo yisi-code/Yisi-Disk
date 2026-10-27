@@ -221,9 +221,18 @@ impl Engines {
         job_id: String,
         scan_job_id: &str,
         items: Vec<ExtractItem>,
-        output_dir: String,
+        output_dir: Option<String>,
     ) -> Result<(), HostError> {
         let target = self.carve_target(scan_job_id)?;
+        validate_job_id(&job_id)?;
+        let output_dir = match output_dir {
+            Some(dir) => dir,
+            None => {
+                let dir = open_cache_root()?.join(&job_id);
+                self.clean_open_cache(&job_id);
+                dir.display().to_string()
+            }
+        };
         let params_job_id = job_id.clone();
         let started = self.start_job(app, job_id.clone(), CARVE_EXTRACT, |engine_pid| {
             to_params(&ExtractParams {
@@ -238,6 +247,36 @@ impl Engines {
         Ok(())
     }
 
+    /// 在后台删掉以前为打开、复制而保存的副本，不拖慢这一次保存。跳过 `current` 和还在运行的任务的目录；
+    /// 删不掉的（例如还开着）留到下一次。
+    fn clean_open_cache(&self, current: &str) {
+        let Ok(root) = open_cache_root() else {
+            return;
+        };
+        let jobs = Arc::clone(&self.jobs);
+        let current = current.to_owned();
+        thread::spawn(move || {
+            let Ok(entries) = std::fs::read_dir(&root) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name == current || lock(&jobs).contains_key(&name) {
+                    continue;
+                }
+                let path = entry.path();
+                let removed = if path.is_dir() {
+                    std::fs::remove_dir_all(&path)
+                } else {
+                    std::fs::remove_file(&path)
+                };
+                if let Err(error) = removed {
+                    tracing::debug!(path = %path.display(), %error, "打开用的旧副本这次没删掉");
+                }
+            }
+        });
+    }
+
     fn carve_target(&self, scan_job_id: &str) -> Result<Target, HostError> {
         lock(&self.carve_targets)
             .get(scan_job_id)
@@ -245,22 +284,25 @@ impl Engines {
             .ok_or_else(|| HostError::new("jobNotFound", scan_job_id))
     }
 
-    /// 深度恢复任务输出目录里的一个文件。只接受恢复时起的文件名，不接受其他路径。
+    /// 深度恢复任务输出目录里的一个文件。只接受一级普通文件名（恢复时起的、另存为时起的或加了序号的），
+    /// 不接受路径；解析（含联接与符号链接）后必须仍在该任务的输出目录之内。
     pub fn recovered_file(&self, job_id: &str, name: &str) -> Result<PathBuf, HostError> {
-        if !is_recovered_name(name) {
+        if !is_plain_file_name(name) {
             return Err(HostError::new("invalidRecoveredName", name));
         }
-        let path = lock(&self.recovered_dirs)
+        let dir = lock(&self.recovered_dirs)
             .get(job_id)
-            .map(|dir| dir.join(name))
+            .cloned()
             .ok_or_else(|| HostError::new("recoveredNotFound", job_id))?;
-        if path.is_file() {
+        let path = dir.join(name);
+        let not_found = || HostError::new("recoveredNotFound", path.display().to_string());
+        let (Ok(real_dir), Ok(real_file)) = (dir.canonicalize(), path.canonicalize()) else {
+            return Err(not_found());
+        };
+        if real_file.parent() == Some(real_dir.as_path()) && real_file.is_file() {
             Ok(path)
         } else {
-            Err(HostError::new(
-                "recoveredNotFound",
-                path.display().to_string(),
-            ))
+            Err(not_found())
         }
     }
 
@@ -889,20 +931,26 @@ fn validate_job_id(job_id: &str) -> Result<(), HostError> {
     }
 }
 
-/// 恢复时起的文件名：`f`、十位起始扇区号、`.`、1 到 8 位小写字母或数字的扩展名，例如 `f0000012345.jpg`。
-fn is_recovered_name(name: &str) -> bool {
-    let Some((stem, extension)) = name.split_once('.') else {
-        return false;
-    };
-    let Some(sector) = stem.strip_prefix('f') else {
-        return false;
-    };
-    sector.len() == 10
-        && sector.bytes().all(|byte| byte.is_ascii_digit())
-        && (1..=8).contains(&extension.len())
-        && extension
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+/// 一级普通文件名：不含路径分隔符与 `:`（Windows 上 `a.jpg:x` 指向文件的备用数据流），不是 `.`、`..`，
+/// 不是写入中途的 `.part`。
+fn is_plain_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 1024
+        && !name.contains(['/', '\\', ':', '\0'])
+        && !name.ends_with(".part")
+        && matches!(
+            Path::new(name).components().collect::<Vec<_>>().as_slice(),
+            [Component::Normal(_)]
+        )
+}
+
+/// 为打开、复制而保存的副本放在程序目录下的 `open-cache` 里，每次一个以任务 ID 命名的子目录。
+pub(crate) fn open_cache_root() -> Result<PathBuf, HostError> {
+    let host = std::env::current_exe()
+        .map_err(|error| HostError::new("outputUnavailable", error.to_string()))?;
+    host.parent()
+        .map(|dir| dir.join("open-cache"))
+        .ok_or_else(|| HostError::new("outputUnavailable", host.display().to_string()))
 }
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -952,22 +1000,29 @@ mod tests {
     }
 
     #[test]
-    fn only_names_given_by_the_recovery_are_accepted() {
-        for good in ["f0000012345.jpg", "f0000000000.mp4", "f9999999999.mp4v2"] {
-            assert!(is_recovered_name(good), "{good}");
+    fn only_plain_file_names_are_accepted() {
+        for good in [
+            "f0000012345.jpg",
+            "f0000012345 (1).jpg",
+            "照片 2026.jpg",
+            "noext",
+            "..hidden",
+        ] {
+            assert!(is_plain_file_name(good), "{good}");
         }
         for bad in [
             "",
-            "f0000012345",
-            "f000001234.jpg",
-            "g0000012345.jpg",
-            "f0000012345.JPG",
-            "f0000012345.jpg.part",
-            "f0000012345.",
+            ".",
+            "..",
             "../f0000012345.jpg",
-            "f0000012345.verylongext",
+            "a/b.jpg",
+            "a\\b.jpg",
+            "C:x.jpg",
+            "f0000012345.jpg:stream",
+            "f0000012345.jpg.part",
+            "nul\0.jpg",
         ] {
-            assert!(!is_recovered_name(bad), "{bad}");
+            assert!(!is_plain_file_name(bad), "{bad}");
         }
     }
 

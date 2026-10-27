@@ -294,6 +294,9 @@ pub struct ExtractItem {
     pub offset: u64,
     pub length: u64,
     pub extension: String,
+    /// 保存成的文件名（另存为时用户起的）；不给时用恢复时起的名字。引擎会替换掉系统不允许的字符。
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -532,6 +535,10 @@ pub struct CopiedFile {
     /// 复制出的内容全是 0：固态硬盘开了 TRIM 时，删除文件的簇常常已被清零，这样的文件多半找不回来了。
     #[serde(default)]
     pub all_zero: bool,
+    /// 保存只扫描的结果时，这个文件在源上的起始偏移（对应 [`ExtractItem::offset`]）：
+    /// 保存成的名字可能与扫描时不同（另存为改了名、重名时加了序号），界面按它对上是哪个文件。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

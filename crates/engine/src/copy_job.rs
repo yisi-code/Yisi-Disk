@@ -70,6 +70,7 @@ pub fn run(
                     size: 0,
                     error: Some(message),
                     all_zero: false,
+                    offset: None,
                 });
             },
         );
@@ -109,6 +110,7 @@ pub fn run(
                     size,
                     error: None,
                     all_zero,
+                    offset: None,
                 });
             }
             Ok(CopyResult::Cancelled) => {
@@ -122,6 +124,7 @@ pub fn run(
                     size: item.file.size,
                     error: Some(message),
                     all_zero: false,
+                    offset: None,
                 });
             }
             Err(error) => {
@@ -264,7 +267,7 @@ fn copy_one(
 
 /// 输出路径：每一级清洗成系统允许的名字；同一目录下重名（例如同名的已删除文件与现存文件）时加序号。
 #[derive(Default)]
-struct Names {
+pub(crate) struct Names {
     taken: HashSet<PathBuf>,
 }
 
@@ -275,7 +278,7 @@ impl Names {
         relative
     }
 
-    fn file(&mut self, path: &[String], output_dir: &Path) -> PathBuf {
+    pub(crate) fn file(&mut self, path: &[String], output_dir: &Path) -> PathBuf {
         let (name, parents) = match path.split_last() {
             Some((name, parents)) => (sanitize(name), parents),
             None => ("_".to_owned(), &[][..]),

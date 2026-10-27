@@ -54,7 +54,11 @@ const props = defineProps<{
 const selectedFile = defineModel<FoundFile | null>('selected', { required: true })
 /** 勾选要保存的文件（按文件名）；每次改动换一个新 Set */
 const checkedNames = defineModel<Set<string>>('checked', { default: () => new Set<string>() })
-const emit = defineEmits<{ open: [file: FoundFile] }>()
+const emit = defineEmits<{
+  open: [file: FoundFile]
+  /** 右键或菜单键：在 (x, y) 处弹出这个文件的操作菜单 */
+  menu: [file: FoundFile, point: { x: number; y: number }]
+}>()
 
 const { t } = useI18n()
 const { fileTypeName } = useFileTypeName()
@@ -150,8 +154,42 @@ function handleRowDoubleClick(row: TreeRow) {
   }
 }
 
+/** 右键文件行：先选中它，再在鼠标处弹出菜单 */
+function handleRowMenu(row: TreeRow, event: MouseEvent) {
+  if (row.kind !== 'file') {
+    return
+  }
+  activeId.value = row.id
+  selectedFile.value = row.file
+  emit('menu', row.file, { x: event.clientX, y: event.clientY })
+}
+
+/** 菜单键或 Shift+F10：在当前行下方弹出菜单 */
+function openMenuFromKeyboard(row: TreeRow | undefined) {
+  if (row?.kind !== 'file') {
+    return
+  }
+  const rect = document.getElementById(domId(row.id))?.getBoundingClientRect()
+  emit('menu', row.file, {
+    x: rect === undefined ? 0 : rect.left + ROW_HEIGHT,
+    y: rect === undefined ? 0 : rect.bottom,
+  })
+}
+
+/** 菜单关闭后，父组件把焦点还给列表 */
+function focus() {
+  viewport.value?.focus()
+}
+
+defineExpose({ focus })
+
 function handleKeydown(event: KeyboardEvent) {
   const current = rows.value[activeIndex.value]
+  if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) {
+    openMenuFromKeyboard(current)
+    event.preventDefault()
+    return
+  }
   switch (event.key) {
     case 'ArrowDown':
       moveTo(activeIndex.value + 1)
@@ -413,6 +451,7 @@ function fileDetail(file: FoundFile): string {
           :aria-posinset="row.position"
           @click="handleRowClick(row)"
           @dblclick="handleRowDoubleClick(row)"
+          @contextmenu.prevent="handleRowMenu(row, $event)"
         >
           <template v-if="row.kind === 'group'">
             <input
@@ -456,9 +495,12 @@ function fileDetail(file: FoundFile): string {
         </div>
       </div>
     </div>
-    <p class="recovered-browser__hint">
-      {{ selectable ? t('carve.browser.selectHint') : t('carve.browser.hint') }}
-    </p>
+    <div class="recovered-browser__footer">
+      <p class="recovered-browser__hint">
+        {{ selectable ? t('carve.browser.selectHint') : t('carve.browser.hint') }}
+      </p>
+      <slot name="actions"></slot>
+    </div>
   </div>
 </template>
 
@@ -509,7 +551,15 @@ function fileDetail(file: FoundFile): string {
 }
 
 .recovered-browser__empty,
+.recovered-browser__footer {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-md);
+}
+
 .recovered-browser__hint {
+  flex: 1;
+  min-width: 0;
   margin: 0;
   color: var(--color-text-muted);
   font-size: var(--font-size-small);

@@ -5,6 +5,7 @@
 
 mod broker;
 mod engines;
+mod shell;
 
 use serde::Serialize;
 use tauri::{AppHandle, State};
@@ -93,7 +94,8 @@ fn carve_preview_range(
     engines.preview_range(&broker, &scan_job_id, offset, length)
 }
 
-/// 保存只扫描时选中的文件。
+/// 保存只扫描时选中的文件（另存为）。不给输出目录时是为打开、复制而保存：存到程序目录下的 `open-cache`，
+/// 同时在后台清掉以前的副本。
 #[tauri::command(async)]
 fn job_start_extract(
     app: AppHandle,
@@ -102,7 +104,7 @@ fn job_start_extract(
     job_id: String,
     scan_job_id: String,
     items: Vec<ExtractItem>,
-    output_dir: String,
+    output_dir: Option<String>,
 ) -> Result<(), HostError> {
     engines.start_extract(app, &broker, job_id, &scan_job_id, items, output_dir)
 }
@@ -130,8 +132,37 @@ fn recovered_open(
     name: String,
 ) -> Result<(), HostError> {
     let path = engines.recovered_file(&job_id, &name)?;
+    // 另存为时可以改名，改成可执行类型的不交给系统打开
+    if is_executable_type(&path) {
+        return Err(HostError::new("executableBlocked", name));
+    }
     tauri_plugin_opener::open_path(&path, None::<&str>)
         .map_err(|error| HostError::new("openFailed", error.to_string()))
+}
+
+/// 用系统的「打开方式」对话框选程序打开恢复出的文件。可执行与脚本类文件同样不打开。
+#[tauri::command(async)]
+fn recovered_open_with(
+    engines: State<'_, Engines>,
+    job_id: String,
+    name: String,
+) -> Result<(), HostError> {
+    let path = engines.recovered_file(&job_id, &name)?;
+    if is_executable_type(&path) {
+        return Err(HostError::new("executableBlocked", name));
+    }
+    shell::open_with(&path)
+}
+
+/// 把恢复出的文件放到剪贴板，之后可以在资源管理器里粘贴。
+#[tauri::command(async)]
+fn recovered_copy(
+    engines: State<'_, Engines>,
+    job_id: String,
+    name: String,
+) -> Result<(), HostError> {
+    let path = engines.recovered_file(&job_id, &name)?;
+    shell::copy_to_clipboard(&path)
 }
 
 /// 在系统的文件管理器里显示恢复出的文件。
@@ -270,6 +301,8 @@ fn main() -> anyhow::Result<()> {
             job_cancel,
             recovered_preview,
             recovered_open,
+            recovered_open_with,
+            recovered_copy,
             recovered_reveal,
             carve_preview_range,
             job_start_extract,
