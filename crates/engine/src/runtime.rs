@@ -18,6 +18,7 @@ use yisi_engine::protocol::{
     PREVIEW_RANGE, PreviewFsParams, PreviewParams, PreviewRangeParams, READ_SCAN, RESUME,
     ReadScanParams, SCAN_DELETED, ScanParams, Source,
 };
+use yisi_engine::protocol::{DIAGNOSE_BOOT, DiagnoseBootParams};
 #[cfg(windows)]
 use yisi_engine::protocol::{DiskList, DiskSummary};
 use yisi_engine::protocol::{OPEN_RANGE, OpenRangeParams, SEARCH_PARTITIONS, SearchParams};
@@ -31,7 +32,7 @@ use yisi_rpc::{
 use crate::browse::{self, Session};
 use crate::copy_job::{self, Planned};
 use crate::job::{self, JobOutcome, ProgressSender, RunningJob};
-use crate::{carve_job, extract_job, image_job, preview, read_scan, search_job};
+use crate::{boot_check, carve_job, extract_job, image_job, preview, read_scan, search_job};
 
 /// 浏览任务每隔这么久看一次有没有被取消。
 const BROWSE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
@@ -199,6 +200,7 @@ fn dispatch_now(
                 IMAGE_RESUME.to_owned(),
                 SEARCH_PARTITIONS.to_owned(),
                 OPEN_RANGE.to_owned(),
+                DIAGNOSE_BOOT.to_owned(),
             ];
             if cfg!(windows) {
                 methods.push(LIST_DISKS.to_owned());
@@ -347,6 +349,11 @@ fn dispatch_now(
             ));
             to_result(&started)
         }
+        DIAGNOSE_BOOT => {
+            let params: DiagnoseBootParams = request.params()?;
+            let device: Arc<dyn BlockDevice> = Arc::from(open_source(&params.source)?);
+            to_result(&boot_check::diagnose(&device)?)
+        }
         PREVIEW_RANGE => {
             let params: PreviewRangeParams = request.params()?;
             let device = open_source(&params.source)?;
@@ -369,7 +376,8 @@ fn dispatch_now(
             let params: BrowseParams = request.params()?;
             let device: Arc<dyn BlockDevice> = Arc::from(open_source(&params.source)?);
             let progress = ProgressSender::new(params.job_id.clone(), Arc::clone(outbox));
-            let (session, opened) = Session::open(device, progress)?;
+            let (session, opened) =
+                Session::open(device, progress, boot_check::fs_copy(params.boot))?;
             let session = Arc::new(session);
             state.session = Some(Arc::clone(&session));
             let finished = events.clone();
@@ -403,7 +411,7 @@ fn dispatch_now(
                 .join(format!("restored-{}", short_id(&params.job_id)));
             let device: Arc<dyn BlockDevice> =
                 Arc::from(open_source_for_output(&params.source, &output_dir)?);
-            let volume = copy_volume(device, params.partition)?;
+            let volume = copy_volume(device, params.partition, params.boot)?;
             std::fs::create_dir_all(&output_dir)
                 .map_err(|error| output_unavailable(&output_dir, &error))?;
             let started = CopyStarted {
@@ -663,6 +671,7 @@ fn copy_items(params: &CopyParams) -> Result<Vec<Planned>, ErrorObject> {
 fn copy_volume(
     device: Arc<dyn BlockDevice>,
     partition: protocol::PartitionRef,
+    boot: protocol::BootCopy,
 ) -> Result<yisi_fs::Volume, ErrorObject> {
     let unavailable =
         |message: String| ErrorObject::new(protocol::error_code::FS_UNAVAILABLE, message);
@@ -701,8 +710,13 @@ fn copy_volume(
             partition.number
         )));
     }
-    yisi_fs::Volume::open(device, partition.offset, partition.length)
-        .map_err(|error| unavailable(error_chain(&error)))
+    yisi_fs::Volume::open_with(
+        device,
+        partition.offset,
+        partition.length,
+        boot_check::fs_copy(boot),
+    )
+    .map_err(|error| unavailable(error_chain(&error)))
 }
 
 #[cfg(windows)]

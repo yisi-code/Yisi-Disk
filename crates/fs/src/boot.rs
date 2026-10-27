@@ -141,12 +141,13 @@ mod tests {
     #[test]
     fn fat32_backup_sector_comes_from_the_bpb() {
         let mut image = FatImage::new(FatType::Fat32).finish();
-        assert_eq!(inspect_boot(&image[..512]).unwrap().backup_at, None);
-        image[50..52].copy_from_slice(&6u16.to_le_bytes());
         assert_eq!(
             inspect_boot(&image[..512]).unwrap().backup_at,
             Some(6 * 512)
         );
+        // 0 表示没有备份
+        image[50..52].copy_from_slice(&0u16.to_le_bytes());
+        assert_eq!(inspect_boot(&image[..512]).unwrap().backup_at, None);
         // 超出保留区的不算
         image[50..52].copy_from_slice(&40u16.to_le_bytes());
         assert_eq!(inspect_boot(&image[..512]).unwrap().backup_at, None);

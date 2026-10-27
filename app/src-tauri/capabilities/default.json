@@ -31,6 +31,7 @@
     "allow-copied-open",
     "allow-copied-reveal",
     "allow-job-start-image",
+    "allow-boot-diagnose",
     "dialog:allow-open",
     "dialog:allow-save",
     "core:event:allow-listen",

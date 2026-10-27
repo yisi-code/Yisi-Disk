@@ -419,6 +419,9 @@ impl NtfsImage {
             }
         }
         self.write_clusters(BITMAP_LCN, &bitmap);
+        // 备份引导扇区在卷的最后一个扇区（卷长度记的是总扇区数减 1）
+        let backup = self.image.len() - SECTOR;
+        self.image.copy_within(..SECTOR, backup);
         self.image
     }
 

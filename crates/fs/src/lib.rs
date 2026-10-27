@@ -1,10 +1,12 @@
 //! 文件系统识别；目录读取与文件提取；空闲空间位图；引导扇区与超级块的检查和重建；exFAT / FAT 一致性检查。
 //!
 //! 目前能浏览的是 FAT12/16/32、exFAT 与 NTFS：列目录（含已删除的项，并判断还能不能完整找回）、读出文件。
-//! NTFS 的已删除项要先扫一遍 MFT（[`Volume::scan`]）才列得出。只读，不写盘。
+//! NTFS 的已删除项要先扫一遍 MFT（[`Volume::scan`]）才列得出。主引导扇区坏了时可以按备份引导扇区打开
+//! （[`Volume::open_with`]）。只读，不写盘。
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
+pub mod backup;
 mod boot;
 mod clusters;
 mod entry;
@@ -22,6 +24,7 @@ use std::sync::Arc;
 
 use yisi_io::{BlockDevice, IoError};
 
+pub use backup::BootCopy;
 pub use boot::{BootLayout, BootSector, inspect_boot};
 pub use entry::{ClusterRef, Entry, FileRef, Listing, Location, State, Unsupported};
 pub use reader::FileReader;
@@ -133,6 +136,22 @@ pub fn detect(device: &dyn BlockDevice, offset: u64, length: u64) -> Result<FsKi
     Ok(FsKind::Unknown)
 }
 
+/// 同 [`detect`]，`copy` 为 [`BootCopy::Backup`] 时按备份引导扇区识别；没有有效的备份时返回 [`FsKind::Unknown`]。
+pub fn detect_with(
+    device: &dyn BlockDevice,
+    offset: u64,
+    length: u64,
+    copy: BootCopy,
+) -> Result<FsKind, IoError> {
+    match copy {
+        BootCopy::Primary => detect(device, offset, length),
+        BootCopy::Backup => {
+            Ok(backup::read_backup(device, offset, length)?
+                .map_or(FsKind::Unknown, |(kind, _)| kind))
+        }
+    }
+}
+
 enum Inner {
     Fat(fat::Fat),
     Exfat(exfat::Exfat),
@@ -148,12 +167,37 @@ pub struct Volume {
 impl Volume {
     /// 打开设备上 `offset` 起 `length` 字节的分区。不是 FAT / exFAT / NTFS 时返回 [`FsError::Unsupported`]。
     pub fn open(device: Arc<dyn BlockDevice>, offset: u64, length: u64) -> Result<Self, FsError> {
-        let kind = detect(device.as_ref(), offset, length)?;
+        Self::open_with(device, offset, length, BootCopy::Primary)
+    }
+
+    /// 同 [`open`](Self::open)，按 `copy` 指定的那一份引导扇区打开。用备份时文件系统的类型也按备份识别，
+    /// 没有有效的备份引导扇区时返回 [`FsError::Invalid`]。
+    pub fn open_with(
+        device: Arc<dyn BlockDevice>,
+        offset: u64,
+        length: u64,
+        copy: BootCopy,
+    ) -> Result<Self, FsError> {
+        let (kind, sector) = match copy {
+            BootCopy::Primary => {
+                let kind = detect(device.as_ref(), offset, length)?;
+                if !kind.is_browsable() {
+                    return Err(FsError::Unsupported(kind));
+                }
+                let mut sector = [0u8; 512];
+                device.read_exact_at(offset, &mut sector)?;
+                (kind, sector)
+            }
+            BootCopy::Backup => backup::read_backup(device.as_ref(), offset, length)?
+                .ok_or(FsError::Invalid("没有找到有效的备份引导扇区"))?,
+        };
         let region = Region::new(device, offset, length);
         let inner = match kind {
-            FsKind::Exfat => Inner::Exfat(exfat::Exfat::open(region)?),
-            FsKind::Fat12 | FsKind::Fat16 | FsKind::Fat32 => Inner::Fat(fat::Fat::open(region)?),
-            FsKind::Ntfs => Inner::Ntfs(ntfs::Ntfs::open(region)?),
+            FsKind::Exfat => Inner::Exfat(exfat::Exfat::open(region, &sector)?),
+            FsKind::Fat12 | FsKind::Fat16 | FsKind::Fat32 => {
+                Inner::Fat(fat::Fat::open(region, &sector)?)
+            }
+            FsKind::Ntfs => Inner::Ntfs(ntfs::Ntfs::open(region, &sector)?),
             other => return Err(FsError::Unsupported(other)),
         };
         let kind = match &inner {

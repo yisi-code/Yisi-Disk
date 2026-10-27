@@ -1175,6 +1175,212 @@ fn image_stopped_midway_resumes_to_identical_bytes() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 三个分区：FAT32 与 NTFS 的主引导扇区被清零（备份完好），exFAT 正常。返回镜像路径与 NTFS 里那个文件的内容。
+fn damaged_boot_image(dir: &Path) -> (String, Vec<u8>) {
+    use yisi_fs::samples::{ExfatImage, FatImage, FatType, Layout, NTFS_ROOT, NtfsImage, pattern};
+    use yisi_part::samples::{MbrEntry, mbr_disk};
+
+    let mut fat = FatImage::new(FatType::Fat32);
+    let root = fat.root();
+    fat.add_file(root, "fat.bin", &pattern(1, 3000), Layout::Contiguous);
+    let mut fat = fat.finish();
+    fat[..512].fill(0);
+    let mut exfat = ExfatImage::new();
+    let root = exfat.root();
+    exfat.add_file(root, "exfat.bin", &pattern(2, 3000), Layout::Contiguous);
+    let exfat = exfat.finish();
+    let mut ntfs = NtfsImage::new();
+    ntfs.set_label("LOST BOOT");
+    let docs = ntfs.mkdir(NTFS_ROOT, "Docs");
+    let content = pattern(3, 30_000);
+    ntfs.add_file(docs, "report.bin", &content);
+    let mut ntfs = ntfs.finish();
+    ntfs[..512].fill(0);
+
+    let mut entries = Vec::new();
+    let mut start = 2048usize;
+    let mut placed = Vec::new();
+    for (type_id, volume) in [(0x0C, &fat), (0x07, &exfat), (0x07, &ntfs)] {
+        entries.push(MbrEntry::new(
+            type_id,
+            start as u32,
+            (volume.len() / 512) as u32,
+        ));
+        placed.push(start);
+        start += volume.len() / 512 + 2048;
+    }
+    let mut image = mbr_disk(start * 512, &entries);
+    for (volume, start) in [&fat, &exfat, &ntfs].into_iter().zip(placed) {
+        image[start * 512..][..volume.len()].copy_from_slice(volume);
+    }
+    let path = dir.join("damaged-boot.img");
+    std::fs::write(&path, &image).unwrap();
+    (path.to_string_lossy().into_owned(), content)
+}
+
+#[test]
+fn boot_sectors_are_diagnosed_and_backups_browsed_and_copied() {
+    use yisi_engine::protocol::{BootDiagnosis, DIAGNOSE_BOOT};
+
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-boot");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (image, content) = damaged_boot_image(&dir);
+    let source = json!({"type": "image", "path": image, "sectorSize": 512});
+
+    // 诊断是一次性的查询，答复后引擎照常等下一个请求
+    let mut engine = Engine::start();
+    let diagnosis: BootDiagnosis = serde_json::from_value(
+        engine
+            .call(DIAGNOSE_BOOT, json!({"source": source}))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(diagnosis.scheme, "mbr");
+    let summary: Vec<_> = diagnosis
+        .partitions
+        .iter()
+        .map(|partition| {
+            (
+                partition.number,
+                partition.filesystem.as_str(),
+                partition.verdict.as_str(),
+                partition
+                    .backup
+                    .as_ref()
+                    .is_some_and(|backup| backup.opened),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (1, "fat32", "primaryDamaged", true),
+            (2, "exfat", "healthy", true),
+            (3, "ntfs", "primaryDamaged", true),
+        ]
+    );
+    let ntfs = &diagnosis.partitions[2];
+    assert_eq!(ntfs.label.as_deref(), Some("LOST BOOT"));
+    assert_eq!(ntfs.primary.issues[0].code, "blank");
+    assert!(!ntfs.primary.opened);
+    let backup = ntfs.backup.as_ref().unwrap();
+    assert_eq!(backup.offset, ntfs.offset + ntfs.length - 512);
+    assert!(backup.issues.is_empty());
+    let missing = engine
+        .call(
+            DIAGNOSE_BOOT,
+            json!({"source": {"type": "image", "path": "Z:/no/such.img", "sectorSize": 512}}),
+        )
+        .unwrap_err();
+    assert_eq!(missing.code, error_code::SOURCE_UNAVAILABLE);
+    engine.close_input();
+    assert!(engine.wait_exit().success());
+
+    // 用主引导扇区浏览时 NTFS 打不开；用备份浏览时三个分区都能浏览
+    let mut primary = Engine::start();
+    let opened: BrowseOpened = serde_json::from_value(
+        primary
+            .call(BROWSE_OPEN, json!({"jobId": "p1", "source": source}))
+            .unwrap(),
+    )
+    .unwrap();
+    let browsable: Vec<bool> = opened.partitions.iter().map(|p| p.browsable).collect();
+    assert_eq!(browsable, [false, true, false]);
+    primary.call(CANCEL, json!({"jobId": "p1"})).unwrap();
+    primary.notifications_until(CANCELLED);
+    assert!(primary.wait_exit().success());
+
+    let mut engine = Engine::start();
+    let opened: BrowseOpened = serde_json::from_value(
+        engine
+            .call(
+                BROWSE_OPEN,
+                json!({"jobId": "k1", "source": source, "boot": "backup"}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let summary: Vec<_> = opened
+        .partitions
+        .iter()
+        .map(|p| (p.filesystem.as_str(), p.browsable, p.label.as_deref()))
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("fat32", true, Some("BOOTLABEL")),
+            ("exfat", true, None),
+            ("ntfs", true, Some("LOST BOOT")),
+        ]
+    );
+    let list = |engine: &mut Engine, dir: Option<&str>| -> FileListPage {
+        serde_json::from_value(
+            engine
+                .call(
+                    LIST_FILES,
+                    json!({"jobId": "k1", "partition": 3, "dir": dir, "offset": 0, "limit": 100}),
+                )
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let root = list(&mut engine, None);
+    assert_eq!(root.entries[0].name, "Docs");
+    let docs = list(&mut engine, Some(&root.entries[0].file));
+    let report = docs.entries[0].clone();
+    assert_eq!(report.name, "report.bin");
+    let preview: FilePreview = serde_json::from_value(
+        engine
+            .call(
+                PREVIEW_FS_FILE,
+                json!({"jobId": "k1", "partition": 3, "file": report.file}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(preview.length, content.len() as u64);
+    engine.call(CANCEL, json!({"jobId": "k1"})).unwrap();
+    engine.notifications_until(CANCELLED);
+    assert!(engine.wait_exit().success());
+
+    // 复制同样按备份打开分区；不说用备份时打不开
+    let partition = &opened.partitions[2];
+    let partition_ref =
+        json!({"number": 3, "offset": partition.offset, "length": partition.length});
+    let items = json!([{"file": root.entries[0].file, "path": ["Docs"]}]);
+    let mut refused = Engine::start();
+    let error = refused
+        .call(
+            COPY_FILES,
+            json!({"jobId": "copy-boot-0", "source": source, "outputDir": dir,
+                   "partition": partition_ref, "items": items}),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, error_code::FS_UNAVAILABLE);
+    refused.close_input();
+    assert!(refused.wait_exit().success());
+
+    let mut copier = Engine::start();
+    copier
+        .call(
+            COPY_FILES,
+            json!({"jobId": "copy-boot-1", "source": source, "outputDir": dir,
+                   "partition": partition_ref, "items": items, "boot": "backup"}),
+        )
+        .unwrap();
+    let notifications = copier.notifications_until(COMPLETED);
+    let summary: CopySummary =
+        serde_json::from_value(notifications.last().unwrap().1["result"].clone()).unwrap();
+    assert_eq!((summary.files, summary.failed), (1, 0));
+    let output = dir.join("restored-copy-boo");
+    assert_eq!(
+        std::fs::read(output.join("Docs").join("report.bin")).unwrap(),
+        content
+    );
+    assert!(copier.wait_exit().success());
+}
+
 /// 丢失分区搜索的镜像：分区表清空，NTFS 的主引导扇区也清零（只剩末尾的备份）。
 fn lost_partitions_image(dir: &Path) -> (String, yisi_repair::samples::SearchDisk) {
     let mut disk = yisi_repair::samples::search_disk();
