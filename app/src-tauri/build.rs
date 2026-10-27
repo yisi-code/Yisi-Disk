@@ -27,6 +27,8 @@ fn main() {
         "copied_reveal",
         "job_start_image",
         "boot_diagnose",
+        "job_start_fs_check",
+        "fs_check_save_report",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("tauri-build 执行失败");

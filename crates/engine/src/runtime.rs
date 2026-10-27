@@ -13,10 +13,10 @@ use yisi_carve::{DirectorySink, ScanOnlySink, Sink};
 use yisi_engine::protocol::{
     self, BROWSE_OPEN, BrowseParams, CANCEL, CANCEL_SCAN, CAPABILITIES, CARVE_EXTRACT, CARVE_START,
     COPY_FILES, Capabilities, CarveParams, CarveStarted, CopyParams, CopyStarted, ExtractParams,
-    HEARTBEAT, HEARTBEAT_INTERVAL, IMAGE_CREATE, IMAGE_RESUME, ImageParams, JobRef, LIST_DISKS,
-    LIST_FILE_TYPES, LIST_FILES, ListFilesParams, PAUSE, PREVIEW_FILE, PREVIEW_FS_FILE,
-    PREVIEW_RANGE, PreviewFsParams, PreviewParams, PreviewRangeParams, READ_SCAN, RESUME,
-    ReadScanParams, SCAN_DELETED, ScanParams, Source,
+    FS_CHECK, FsCheckParams, HEARTBEAT, HEARTBEAT_INTERVAL, IMAGE_CREATE, IMAGE_RESUME,
+    ImageParams, JobRef, LIST_DISKS, LIST_FILE_TYPES, LIST_FILES, ListFilesParams, PAUSE,
+    PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PreviewFsParams, PreviewParams,
+    PreviewRangeParams, READ_SCAN, RESUME, ReadScanParams, SCAN_DELETED, ScanParams, Source,
 };
 use yisi_engine::protocol::{DIAGNOSE_BOOT, DiagnoseBootParams};
 #[cfg(windows)]
@@ -31,7 +31,7 @@ use yisi_rpc::{
 use crate::browse::{self, Session};
 use crate::copy_job::{self, Planned};
 use crate::job::{self, JobOutcome, ProgressSender, RunningJob};
-use crate::{boot_check, carve_job, extract_job, image_job, preview, read_scan};
+use crate::{boot_check, carve_job, extract_job, fs_check_job, image_job, preview, read_scan};
 
 /// 浏览任务每隔这么久看一次有没有被取消。
 const BROWSE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
@@ -194,6 +194,7 @@ fn dispatch_now(
                 IMAGE_CREATE.to_owned(),
                 IMAGE_RESUME.to_owned(),
                 DIAGNOSE_BOOT.to_owned(),
+                FS_CHECK.to_owned(),
             ];
             if cfg!(windows) {
                 methods.push(LIST_DISKS.to_owned());
@@ -435,6 +436,31 @@ fn dispatch_now(
                 },
             ));
             to_result(&started)
+        }
+        FS_CHECK => {
+            if state.job.is_some() {
+                return Err(ErrorObject::new(
+                    protocol::error_code::JOB_ALREADY_RUNNING,
+                    "每个引擎进程只运行一个任务",
+                ));
+            }
+            let params: FsCheckParams = request.params()?;
+            let device = open_source(&params.source)?;
+            fs_check_job::verify_partition(device.as_ref(), params.partition)?;
+            let partition = params.partition;
+            let finished = events.clone();
+            state.job = Some(
+                job::start(
+                    params.job_id,
+                    Arc::clone(outbox),
+                    move |context| fs_check_job::run(device.as_ref(), partition, context),
+                    move || {
+                        let _ = finished.send(Event::JobFinished);
+                    },
+                )
+                .pausable(),
+            );
+            Ok(json!({}))
         }
         PREVIEW_FILE => {
             let PreviewParams { path } = request.params()?;
