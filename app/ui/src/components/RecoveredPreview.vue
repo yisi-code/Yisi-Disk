@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, useId } from 'vue'
 import { useI18n } from 'vue-i18n'
 import FilePreviewView from './FilePreviewView.vue'
 import { useDelayedPreview } from '../composables/useDelayedPreview'
@@ -37,6 +37,7 @@ const emit = defineEmits<{
 
 const { t, locale } = useI18n()
 const { formatHostError } = useHostErrorText()
+const titleId = useId()
 
 const { preview, error: previewError, isLoading } = useDelayedPreview(
   () => (props.jobId !== null && props.file !== null ? { jobId: props.jobId, file: props.file } : null),
@@ -66,66 +67,73 @@ function locate(offset: number) {
 </script>
 
 <template>
-  <section class="recovered-preview" :aria-label="t('carve.preview.title')">
-    <p v-if="file === null" class="recovered-preview__placeholder">
-      {{ t('carve.preview.placeholder') }}
-    </p>
-    <template v-else>
-      <dl class="recovered-preview__details">
-        <dt>{{ t('carve.preview.name') }}</dt>
-        <dd class="recovered-preview__selectable">{{ file.name }}</dd>
-        <dt>{{ t('carve.preview.format') }}</dt>
-        <dd>{{ typeName }}</dd>
-        <dt>{{ t('carve.preview.size') }}</dt>
-        <dd>
-          {{ t('carve.preview.sizeValue', { size: formatBytes(file.length), bytes: file.length }) }}
-        </dd>
-        <template v-if="extent">
-          <dt>{{ t('carve.preview.start') }}</dt>
-          <dd>{{ t('carve.preview.positionValue', extent.start) }}</dd>
-          <dt>{{ t('carve.preview.end') }}</dt>
-          <dd>{{ t('carve.preview.positionValue', extent.end) }}</dd>
-        </template>
-      </dl>
-
-      <div class="recovered-preview__actions">
-        <button
-          class="recovered-preview__button"
-          type="button"
-          :disabled="jobId === null || !canOpen"
-          @click="emit('open', file)"
-        >
-          {{ t('carve.preview.open') }}
-        </button>
-        <button
-          class="recovered-preview__button recovered-preview__button--secondary"
-          type="button"
-          :disabled="jobId === null || !canSaveAs"
-          @click="emit('saveAs', file)"
-        >
-          {{ t('carve.preview.saveAs') }}
-        </button>
-        <button
-          class="recovered-preview__button recovered-preview__button--secondary"
-          type="button"
-          :disabled="jobId === null || !isSaved"
-          @click="emit('reveal', file)"
-        >
-          {{ t('carve.preview.reveal') }}
-        </button>
-      </div>
-      <p v-if="!isSaved" class="recovered-preview__note">{{ t('carve.preview.notSavedHint') }}</p>
-      <p v-if="actionError" class="recovered-preview__error" role="alert">
-        {{ formatHostError(actionError) }}
+  <section class="recovered-preview" :aria-labelledby="titleId">
+    <h3 :id="titleId" class="recovered-preview__title">
+      {{ t('carve.preview.title') }}
+    </h3>
+    <div class="recovered-preview__card">
+      <p v-if="file === null" class="recovered-preview__placeholder">
+        {{ t('carve.preview.placeholder') }}
       </p>
+      <template v-else>
+        <dl class="recovered-preview__details">
+          <dt>{{ t('carve.preview.name') }}</dt>
+          <dd class="recovered-preview__selectable">{{ file.name }}</dd>
+          <dt>{{ t('carve.preview.format') }}</dt>
+          <dd>{{ typeName }}</dd>
+          <dt>{{ t('carve.preview.size') }}</dt>
+          <dd>
+            {{ t('carve.preview.sizeValue', { size: formatBytes(file.length), bytes: file.length }) }}
+          </dd>
+          <template v-if="extent">
+            <dt>{{ t('carve.preview.start') }}</dt>
+            <dd>{{ t('carve.preview.positionValue', extent.start) }}</dd>
+            <dt>{{ t('carve.preview.end') }}</dt>
+            <dd>{{ t('carve.preview.positionValue', extent.end) }}</dd>
+          </template>
+        </dl>
 
-      <FilePreviewView
-        :preview="preview"
-        :is-loading="isLoading"
-        :error="previewError"
-        :name="file.name"
-      />
-    </template>
+        <div class="recovered-preview__actions">
+          <button
+            class="recovered-preview__button"
+            type="button"
+            :disabled="jobId === null || !canOpen"
+            @click="emit('open', file)"
+          >
+            {{ t('carve.preview.open') }}
+          </button>
+          <button
+            class="recovered-preview__button recovered-preview__button--secondary"
+            type="button"
+            :disabled="jobId === null || !canSaveAs"
+            @click="emit('saveAs', file)"
+          >
+            {{ t('carve.preview.saveAs') }}
+          </button>
+          <button
+            class="recovered-preview__button recovered-preview__button--secondary"
+            type="button"
+            :disabled="jobId === null || !isSaved"
+            @click="emit('reveal', file)"
+          >
+            {{ t('carve.preview.reveal') }}
+          </button>
+        </div>
+        <p v-if="actionError" class="recovered-preview__error" role="alert">
+          {{ formatHostError(actionError) }}
+        </p>
+
+        <FilePreviewView
+          :preview="preview"
+          :is-loading="isLoading"
+          :error="previewError"
+          :name="file.name"
+        />
+      </template>
+    </div>
+    <p v-if="file !== null && !isSaved" class="recovered-preview__note">
+      {{ t('carve.preview.notSavedHint') }}
+    </p>
   </section>
 </template>
 
@@ -136,6 +144,26 @@ function locate(offset: number) {
   gap: var(--space-sm);
   width: 100%;
   min-width: 0;
+}
+
+.recovered-preview__title {
+  align-self: center;
+  margin: 0;
+  font-size: var(--font-size-body);
+  font-weight: 600;
+}
+
+/* 高度跟随所在布局（深度恢复里与左边的文件列表框等高），不按内容撑开；内容超出时在框里滚动 */
+.recovered-preview__card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  min-height: 240px;
+  padding: var(--space-sm);
+  overflow-y: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  contain: size;
 }
 
 .recovered-preview__placeholder,

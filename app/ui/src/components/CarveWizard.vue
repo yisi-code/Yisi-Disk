@@ -57,7 +57,6 @@ const {
   percent,
   bytesPerSecond,
   foundCount,
-  foundByType,
   files,
   summary,
   failure,
@@ -97,8 +96,6 @@ const pendingAction = ref<{ file: FoundFile; action: FileAction } | null>(null)
 /** 上次另存的目录，单个文件另存为时作为对话框的起点 */
 const lastSaveDir = ref('')
 const save = useCopy()
-/** 发起扫描时勾选的格式：之后回到上一步改勾选，不影响正在显示的这次结果 */
-const runExtensions = ref<string[]>([])
 /** 结果列表里选中的文件，右侧显示它的详情与预览 */
 const selectedFile = ref<FoundFile | null>(null)
 /** 文件操作失败的原因与完成的提示，换选中的文件时清掉 */
@@ -201,23 +198,11 @@ const selectedTypeNames = computed(() => {
   return new Intl.ListFormat(locale.value, { type: 'conjunction' }).format(names)
 })
 
-/** 按格式统计：运行中边找边累计，结束后以扫描报告为准；行按格式列表的顺序排列 */
-const typeRows = computed(() => {
-  const totals = summary.value?.byType ?? foundByType.value
-  return fileTypes.value
-    .filter((type) => runExtensions.value.includes(type.extension))
-    .map((type) => ({
-      extension: type.extension,
-      name: fileTypeName(type.extension, type.description),
-      totals: totals[type.extension] ?? { count: 0, bytes: 0 },
-    }))
-})
-
 const selectedTypeName = computed(() =>
   selectedFile.value === null ? '' : typeNameOf(selectedFile.value),
 )
 
-/** 启动失败（例如输出目录在源盘上）时还没有任何结果，不显示空的统计表 */
+/** 启动失败（例如输出目录在源盘上）时还没有任何结果，不显示空的文件列表 */
 const hasResults = computed(
   () =>
     status.value === 'running' ||
@@ -359,14 +344,15 @@ function handleStart() {
     return
   }
   dialogError.value = null
-  runExtensions.value = [...selectedExtensions.value]
   runScanOnly.value = !saveWhileScanning.value
   selectedFile.value = null
   checkedNames.value = new Set()
   savedCopies.value = new Map()
   openCopies.value = new Map()
   step.value = 'scan'
-  void start(target.value, runScanOnly.value ? null : trimmedOutputDir.value, runExtensions.value)
+  void start(target.value, runScanOnly.value ? null : trimmedOutputDir.value, [
+    ...selectedExtensions.value,
+  ])
 }
 
 function handleCancel() {
@@ -598,23 +584,64 @@ function handleAdvancedToggle(event: Event) {
       </h2>
     </header>
 
-    <ol class="wizard__steps">
-      <li
-        v-for="(name, index) in STEPS"
-        :key="name"
-        class="wizard__step"
-        :class="{
-          'wizard__step--current': name === step,
-          'wizard__step--done': index < stepIndex,
-        }"
-        :aria-current="name === step ? 'step' : undefined"
-      >
-        <span class="wizard__step-number">{{ index + 1 }}</span>
-        {{ t(`carve.steps.${name}`) }}
-      </li>
-    </ol>
-
     <form class="wizard__form" @submit.prevent="handleSubmit">
+      <div class="wizard__stepbar">
+        <ol class="wizard__steps">
+          <li
+            v-for="(name, index) in STEPS"
+            :key="name"
+            class="wizard__step"
+            :class="{
+              'wizard__step--current': name === step,
+              'wizard__step--done': index < stepIndex,
+            }"
+            :aria-current="name === step ? 'step' : undefined"
+          >
+            <span class="wizard__step-number">{{ index + 1 }}</span>
+            {{ t(`carve.steps.${name}`) }}
+          </li>
+        </ol>
+        <div class="wizard__nav">
+          <button
+            v-if="stepIndex > 0"
+            class="wizard__button wizard__button--secondary"
+            type="button"
+            :disabled="isBusy || save.isBusy.value"
+            @click="goBack"
+          >
+            {{ t('carve.previous') }}
+          </button>
+          <button
+            v-if="step === 'source'"
+            class="wizard__button"
+            type="submit"
+            :disabled="target === null"
+          >
+            {{ t('carve.next') }}
+          </button>
+          <button
+            v-else-if="step === 'formats'"
+            class="wizard__button"
+            type="submit"
+            :disabled="!canStart"
+          >
+            {{ t('carve.formats.start') }}
+          </button>
+          <button v-else-if="!isBusy" class="wizard__button" type="submit" :disabled="!canStart">
+            {{ t('carve.run.restart') }}
+          </button>
+          <button
+            v-else
+            class="wizard__button wizard__button--secondary"
+            type="button"
+            :disabled="status !== 'running'"
+            @click="handleCancel"
+          >
+            {{ status === 'cancelling' ? t('carve.run.cancelling') : t('carve.run.cancel') }}
+          </button>
+        </div>
+      </div>
+
       <div v-if="step === 'source'" class="wizard__panel">
         <SourcePicker
           v-model:kind="sourceKind"
@@ -710,31 +737,44 @@ function handleAdvancedToggle(event: Event) {
           </p>
 
           <div v-if="hasResults" class="wizard__results">
-            <table class="wizard__table">
-              <caption class="wizard__caption">
-                {{ t('carve.run.found', { count: summary?.files ?? foundCount }) }}
-              </caption>
-              <thead>
-                <tr>
-                  <th scope="col">{{ t('carve.run.typeColumn') }}</th>
-                  <th scope="col" class="wizard__number">{{ t('carve.run.countColumn') }}</th>
-                  <th scope="col" class="wizard__number">{{ t('carve.run.sizeColumn') }}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="row in typeRows" :key="row.extension">
-                  <th scope="row">{{ row.name }}</th>
-                  <td class="wizard__number">{{ row.totals.count }}</td>
-                  <td class="wizard__number">{{ formatBytes(row.totals.bytes) }}</td>
-                </tr>
-              </tbody>
-            </table>
+            <dl v-if="summary && status === 'completed'" class="carve-wizard__report">
+              <div class="carve-wizard__report-item">
+                <dt>{{ t('carve.run.report.files') }}</dt>
+                <dd>
+                  {{
+                    t('carve.run.report.filesValue', {
+                      count: summary.files,
+                      bytes: formatBytes(summary.bytes),
+                    })
+                  }}
+                </dd>
+              </div>
+              <div class="carve-wizard__report-item">
+                <dt>{{ t('carve.run.report.unreadable') }}</dt>
+                <dd>{{ formatBytes(summary.unreadableBytes) }}</dd>
+              </div>
+              <div class="carve-wizard__report-item">
+                <dt>{{ t('carve.run.report.elapsed') }}</dt>
+                <dd>
+                  {{
+                    t('carve.run.report.elapsedValue', {
+                      seconds: (summary.elapsedMs / 1000).toFixed(1),
+                    })
+                  }}
+                </dd>
+              </div>
+              <div v-if="summary.outputDir" class="carve-wizard__report-item">
+                <dt>{{ t('carve.run.report.outputDir') }}</dt>
+                <dd class="wizard__path-text">{{ summary.outputDir }}</dd>
+              </div>
+            </dl>
 
-            <div class="wizard__files">
+            <div class="carve-wizard__files">
               <RecoveredBrowser
                 ref="browser"
                 v-model:selected="selectedFile"
                 v-model:checked="checkedNames"
+                class="carve-wizard__pane"
                 :files="files"
                 :file-types="fileTypes"
                 :device-size="total"
@@ -759,6 +799,7 @@ function handleAdvancedToggle(event: Event) {
                 </template>
               </RecoveredBrowser>
               <RecoveredPreview
+                class="carve-wizard__pane"
                 :job-id="jobId"
                 :file="selectedFile"
                 :type-name="selectedTypeName"
@@ -824,79 +865,12 @@ function handleAdvancedToggle(event: Event) {
               <p v-else class="wizard__status">{{ saveStatusText }}</p>
             </div>
           </div>
-
-          <dl v-if="summary && status === 'completed'" class="wizard__details">
-            <dt>{{ t('carve.run.report.files') }}</dt>
-            <dd>
-              {{
-                t('carve.run.report.filesValue', {
-                  count: summary.files,
-                  bytes: formatBytes(summary.bytes),
-                })
-              }}
-            </dd>
-            <dt>{{ t('carve.run.report.unreadable') }}</dt>
-            <dd>{{ formatBytes(summary.unreadableBytes) }}</dd>
-            <dt>{{ t('carve.run.report.elapsed') }}</dt>
-            <dd>
-              {{
-                t('carve.run.report.elapsedValue', {
-                  seconds: (summary.elapsedMs / 1000).toFixed(1),
-                })
-              }}
-            </dd>
-            <template v-if="summary.outputDir">
-              <dt>{{ t('carve.run.report.outputDir') }}</dt>
-              <dd class="wizard__path-text">{{ summary.outputDir }}</dd>
-            </template>
-          </dl>
         </div>
       </div>
 
       <p v-if="dialogError" class="wizard__error" role="alert">
         {{ formatHostError(dialogError) }}
       </p>
-
-      <div class="wizard__nav">
-        <button
-          v-if="stepIndex > 0"
-          class="wizard__button wizard__button--secondary"
-          type="button"
-          :disabled="isBusy || save.isBusy.value"
-          @click="goBack"
-        >
-          {{ t('carve.previous') }}
-        </button>
-        <span class="wizard__nav-gap"></span>
-        <button
-          v-if="step === 'source'"
-          class="wizard__button"
-          type="submit"
-          :disabled="target === null"
-        >
-          {{ t('carve.next') }}
-        </button>
-        <button
-          v-else-if="step === 'formats'"
-          class="wizard__button"
-          type="submit"
-          :disabled="!canStart"
-        >
-          {{ t('carve.formats.start') }}
-        </button>
-        <button v-else-if="!isBusy" class="wizard__button" type="submit" :disabled="!canStart">
-          {{ t('carve.run.restart') }}
-        </button>
-        <button
-          v-else
-          class="wizard__button wizard__button--secondary"
-          type="button"
-          :disabled="status !== 'running'"
-          @click="handleCancel"
-        >
-          {{ status === 'cancelling' ? t('carve.run.cancelling') : t('carve.run.cancel') }}
-        </button>
-      </div>
     </form>
 
     <ContextMenu
@@ -942,6 +916,44 @@ function handleAdvancedToggle(event: Event) {
   align-items: center;
   gap: var(--space-xs);
   cursor: pointer;
+}
+
+/* 扫描报告排成一行，放不下时折行 */
+.carve-wizard__report {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs) var(--space-lg);
+  margin: 0;
+}
+
+.carve-wizard__report-item {
+  display: flex;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.carve-wizard__report-item dt {
+  color: var(--color-text-muted);
+}
+
+.carve-wizard__report-item dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 文件列表与文件详情两栏，都分标题、主体、底部三行：标题、列表框与详情框、提示各自对齐。
+   右栏略宽，十六进制预览的 ASCII 列在 1200px 宽的窗口里不用横向滚动 */
+.carve-wizard__files {
+  display: grid;
+  grid-template-columns: minmax(0, 9fr) minmax(0, 11fr);
+  grid-template-rows: auto auto auto;
+  gap: var(--space-sm) var(--space-lg);
+}
+
+.carve-wizard__files > .carve-wizard__pane {
+  display: grid;
+  grid-row: span 3;
+  grid-template-rows: subgrid;
 }
 
 .carve-wizard__save-as {

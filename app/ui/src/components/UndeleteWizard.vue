@@ -24,6 +24,9 @@ const STEPS = ['source', 'partition', 'browse'] as const
 type WizardStep = (typeof STEPS)[number]
 /** 复制失败的文件最多列出这么多个 */
 const MAX_LISTED_FAILURES = 20
+/** 为打开而复制时，宿主拒绝写程序目录下的 open-cache（例如程序就在源盘上），改请用户选保存位置 */
+const OPEN_COPY_REFUSED = ['outputOnSource', 'outputUnavailable']
+const FINISHED_STATUSES: string[] = ['completed', 'failed', 'cancelled']
 
 const emit = defineEmits<{ exit: [] }>()
 
@@ -41,12 +44,15 @@ const selectedPartition = ref<number | null>(null)
 const deletedOnly = ref(false)
 const selectedItem = ref<TreeItem | null>(null)
 const checkedItems = ref(new Map<string, TreeItem>())
-const outputDir = ref('')
 const dialogError = ref<HostError | null>(null)
 const fileActionError = ref<HostError | null>(null)
 const fileActionNote = ref<string | null>(null)
-/** 当前的复制任务是为「打开」而复制的单个文件，复制完就打开它 */
-const isCopyingToOpen = ref(false)
+/** 当前的复制任务是另存为，还是为「打开」而复制单个文件 */
+const copyPurpose = ref<'saveAs' | 'open'>('saveAs')
+/** 为打开而复制的文件，复制好就打开它 */
+const openingItem = ref<TreeItem | null>(null)
+/** 当前的复制任务写的是程序目录下的 open-cache */
+const isOpenCacheCopy = ref(false)
 
 const stepIndex = computed(() => STEPS.indexOf(step.value))
 
@@ -62,7 +68,6 @@ const partitions = computed(() => browse.opened.value?.partitions ?? [])
 const currentPartition = computed(
   () => partitions.value.find((partition) => partition.number === selectedPartition.value) ?? null,
 )
-const trimmedOutputDir = computed(() => outputDir.value.trim())
 const isSourceDisk = computed(() => browse.target.value?.kind === 'disk')
 
 const canGoNext = computed(() => {
@@ -125,6 +130,9 @@ const openingText = computed(() =>
 )
 
 const copyStatusText = computed(() => {
+  if (copyPurpose.value === 'open') {
+    return t('undelete.copy.preparing')
+  }
   switch (copy.status.value) {
     case 'starting':
       return t('undelete.copy.status.starting')
@@ -159,35 +167,15 @@ watch(selectedItem, () => {
   fileActionNote.value = null
 })
 
-// 为「打开」复制的文件复制好了就打开；可执行与脚本类文件宿主不打开，改为在文件夹中显示
-watch(copy.status, async (status) => {
-  if (!isCopyingToOpen.value || !['completed', 'failed', 'cancelled'].includes(status)) {
-    return
-  }
-  isCopyingToOpen.value = false
-  const jobId = copy.jobId.value
-  const first = copy.succeeded.value[0]
-  if (status !== 'completed' || jobId === null || first === undefined) {
-    fileActionError.value = copy.failure.value ?? {
-      code: 'jobFailed',
-      detail: copy.failures.value[0]?.error ?? '',
-    }
-    return
-  }
-  try {
-    await openCopiedFile(jobId, first.path)
-  } catch (error) {
-    const hostError = toHostError(error)
-    if (hostError.code !== 'executableBlocked') {
-      fileActionError.value = hostError
-      return
-    }
-    try {
-      await revealCopiedFile(jobId, first.path)
-      fileActionNote.value = t('undelete.details.executableRevealed')
-    } catch (revealError) {
-      fileActionError.value = toHostError(revealError)
-    }
+/** 另存为的进度与结果一直显示；为打开而复制只在进行中显示一行状态 */
+const isCopyStatusShown = computed(
+  () => copy.status.value !== 'idle' && (copyPurpose.value === 'saveAs' || copy.isBusy.value),
+)
+
+watch(copy.status, (status) => {
+  const item = openingItem.value
+  if (item !== null && FINISHED_STATUSES.includes(status)) {
+    void finishOpen(item)
   }
 })
 
@@ -254,48 +242,74 @@ async function openSource() {
   }
 }
 
-async function browseOutputDir() {
-  const picked = await pickOutputDir()
-  if (picked !== null) {
-    outputDir.value = picked
+/**
+ * 为「打开」复制的文件复制好了就打开；可执行与脚本类文件宿主不打开，改为在文件夹中显示。
+ * watch 与 copyToOpen 都可能先调到这里，只处理一次
+ */
+async function finishOpen(item: TreeItem) {
+  if (openingItem.value !== item) {
+    return
+  }
+  openingItem.value = null
+  const status = copy.status.value
+  const jobId = copy.jobId.value
+  const first = copy.succeeded.value[0]
+  const failureCode = copy.failure.value?.code ?? ''
+  if (status === 'failed' && isOpenCacheCopy.value && OPEN_COPY_REFUSED.includes(failureCode)) {
+    const dir = await pickOutputDir(t('undelete.copy.fallbackTitle'))
+    if (dir !== null) {
+      await copyToOpen(item, dir)
+    }
+    return
+  }
+  if (status !== 'completed' || jobId === null || first === undefined) {
+    fileActionError.value = copy.failure.value ?? {
+      code: 'jobFailed',
+      detail: copy.failures.value[0]?.error ?? '',
+    }
+    return
+  }
+  try {
+    await openCopiedFile(jobId, first.path)
+  } catch (error) {
+    const hostError = toHostError(error)
+    if (hostError.code !== 'executableBlocked') {
+      fileActionError.value = hostError
+      return
+    }
+    try {
+      await revealCopiedFile(jobId, first.path)
+      fileActionNote.value = t('undelete.details.executableRevealed')
+    } catch (revealError) {
+      fileActionError.value = toHostError(revealError)
+    }
   }
 }
 
 /** 系统的选择文件夹对话框；用户取消时返回 null */
-async function pickOutputDir(): Promise<string | null> {
+async function pickOutputDir(title: string): Promise<string | null> {
   dialogError.value = null
   try {
-    return await pickDirectory(t('undelete.copy.pickTitle'))
+    return await pickDirectory(title)
   } catch (error) {
     dialogError.value = toHostError(error)
     return null
   }
 }
 
-/** 还没选保存位置时先弹出选择文件夹对话框 */
-async function ensureOutputDir(): Promise<string | null> {
-  if (trimmedOutputDir.value !== '') {
-    return trimmedOutputDir.value
-  }
-  const picked = await pickOutputDir()
-  if (picked !== null) {
-    outputDir.value = picked
-  }
-  return picked
-}
-
-async function handleCopy() {
+/** 另存为：每次都选保存位置，选好就开始复制 */
+async function handleSaveAs() {
   if (!canCopy.value) {
     return
   }
-  const dir = await ensureOutputDir()
+  const dir = await pickOutputDir(t('undelete.copy.pickTitle'))
   if (dir === null) {
     return
   }
-  await startCopy(copyItems.value, dir)
+  await startCopy(copyItems.value, dir, 'saveAs')
 }
 
-/** 双击文件或点「用默认程序打开」：先把它复制到保存位置，复制好再交给系统打开 */
+/** 双击文件或点「用默认程序打开」：先在 open-cache 里复制一份，复制好再交给系统打开 */
 async function openItem(item: TreeItem) {
   if (item.entry.isDir || item.entry.unsupported !== null || copy.isBusy.value) {
     return
@@ -303,24 +317,31 @@ async function openItem(item: TreeItem) {
   selectedItem.value = item
   fileActionError.value = null
   fileActionNote.value = null
-  const dir = await ensureOutputDir()
-  if (dir === null) {
-    return
-  }
-  isCopyingToOpen.value = true
-  await startCopy([{ file: item.entry.file, path: [item.entry.name] }], dir)
-  if (copy.status.value === 'failed' && isCopyingToOpen.value) {
-    isCopyingToOpen.value = false
-    fileActionError.value = copy.failure.value
+  await copyToOpen(item, null)
+}
+
+/** `dir` 为 null 时复制到程序目录下的 open-cache；用户另选了位置时按另存为显示结果，让人知道存在了哪 */
+async function copyToOpen(item: TreeItem, dir: string | null) {
+  openingItem.value = item
+  await startCopy(
+    [{ file: item.entry.file, path: [item.entry.name] }],
+    dir,
+    dir === null ? 'open' : 'saveAs',
+  )
+  // 启动就失败、而上一个任务也是失败时，状态没有变化，watch 不触发，这里补上
+  if (FINISHED_STATUSES.includes(copy.status.value)) {
+    await finishOpen(item)
   }
 }
 
-async function startCopy(items: CopyItem[], dir: string) {
+async function startCopy(items: CopyItem[], dir: string | null, purpose: 'saveAs' | 'open') {
   const source = browse.target.value
   const partition = currentPartition.value
   if (source === null || partition === null) {
     return
   }
+  copyPurpose.value = purpose
+  isOpenCacheCopy.value = dir === null
   const partitionRef = { number: partition.number, offset: partition.offset, length: partition.length }
   await copy.start((jobId) => startCopyJob(jobId, source, partitionRef, items, dir))
 }
@@ -380,23 +401,39 @@ function noteText(note: string): string {
       </h2>
     </header>
 
-    <ol class="wizard__steps">
-      <li
-        v-for="(name, index) in STEPS"
-        :key="name"
-        class="wizard__step"
-        :class="{
-          'wizard__step--current': name === step,
-          'wizard__step--done': index < stepIndex,
-        }"
-        :aria-current="name === step ? 'step' : undefined"
-      >
-        <span class="wizard__step-number">{{ index + 1 }}</span>
-        {{ t(`undelete.steps.${name}`) }}
-      </li>
-    </ol>
-
     <form class="wizard__form" @submit.prevent="handleSubmit">
+      <div class="wizard__stepbar">
+        <ol class="wizard__steps">
+          <li
+            v-for="(name, index) in STEPS"
+            :key="name"
+            class="wizard__step"
+            :class="{
+              'wizard__step--current': name === step,
+              'wizard__step--done': index < stepIndex,
+            }"
+            :aria-current="name === step ? 'step' : undefined"
+          >
+            <span class="wizard__step-number">{{ index + 1 }}</span>
+            {{ t(`undelete.steps.${name}`) }}
+          </li>
+        </ol>
+        <div class="wizard__nav">
+          <button
+            v-if="stepIndex > 0"
+            class="wizard__button wizard__button--secondary"
+            type="button"
+            :disabled="copy.isBusy.value || browse.isScanning.value"
+            @click="goBack"
+          >
+            {{ t('carve.previous') }}
+          </button>
+          <button v-if="step !== 'browse'" class="wizard__button" type="submit" :disabled="!canGoNext">
+            {{ t('carve.next') }}
+          </button>
+        </div>
+      </div>
+
       <div v-if="step === 'source'" class="wizard__panel">
         <SourcePicker
           v-model:kind="sourceKind"
@@ -536,21 +573,41 @@ function noteText(note: string): string {
         <p v-if="!browse.isOpen.value && browse.failure.value" class="wizard__error" role="alert">
           {{ formatHostError(browse.failure.value) }}
         </p>
-        <label class="undelete-wizard__filter">
-          <input v-model="deletedOnly" type="checkbox" />
-          {{ t('undelete.browse.deletedOnly') }}
-        </label>
-
         <div class="undelete-wizard__files">
           <FsBrowser
             v-model:selected="selectedItem"
             v-model:checked="checkedItems"
+            class="undelete-wizard__pane"
             :job-id="browse.jobId.value"
             :partition="currentPartition.number"
             :deleted-only="deletedOnly"
             @open="openItem"
-          />
+          >
+            <template #tools>
+              <label class="undelete-wizard__filter">
+                <input v-model="deletedOnly" type="checkbox" />
+                {{ t('undelete.browse.deletedOnly') }}
+              </label>
+            </template>
+            <template #actions>
+              <div class="undelete-wizard__save-as">
+                <button class="wizard__button" type="button" :disabled="!canCopy" @click="handleSaveAs">
+                  {{ t('undelete.copy.saveAs', { count: copyItems.length }) }}
+                </button>
+                <button
+                  v-if="copy.isBusy.value"
+                  class="wizard__button wizard__button--secondary"
+                  type="button"
+                  :disabled="copy.status.value !== 'running'"
+                  @click="copy.cancel"
+                >
+                  {{ copy.status.value === 'cancelling' ? t('carve.run.cancelling') : t('carve.run.cancel') }}
+                </button>
+              </div>
+            </template>
+          </FsBrowser>
           <FsEntryDetails
+            class="undelete-wizard__pane"
             :job-id="browse.jobId.value"
             :partition="currentPartition.number"
             :item="selectedItem"
@@ -560,53 +617,21 @@ function noteText(note: string): string {
             :action-error="fileActionError"
             :action-note="fileActionNote"
             @open="openItem"
-          />
-        </div>
-        <p class="wizard__hint">{{ t('undelete.browse.stateHint') }}</p>
-        <p v-if="currentPartition.timesUtc" class="wizard__hint">
-          {{ t('undelete.browse.timesUtc') }}
-        </p>
-
-        <div class="wizard__path">
-          <label class="wizard__label" for="undelete-output-dir">{{ t('undelete.copy.label') }}</label>
-          <input
-            id="undelete-output-dir"
-            v-model="outputDir"
-            class="wizard__input"
-            type="text"
-            spellcheck="false"
-            autocomplete="off"
-            :placeholder="t('undelete.copy.placeholder')"
-          />
-          <button
-            class="wizard__button wizard__button--secondary"
-            type="button"
-            @click="browseOutputDir"
           >
-            {{ t('carve.browseFolder') }}
-          </button>
-        </div>
-        <p class="wizard__hint">{{ t('undelete.copy.hint') }}</p>
-        <p v-if="isSourceDisk" class="wizard__hint wizard__hint--warning">
-          {{ t('carve.output.diskHint') }}
-        </p>
-        <div class="undelete-wizard__copy-actions">
-          <button class="wizard__button" type="button" :disabled="!canCopy" @click="handleCopy">
-            {{ t('undelete.copy.start', { count: copyItems.length }) }}
-          </button>
-          <button
-            v-if="copy.isBusy.value"
-            class="wizard__button wizard__button--secondary"
-            type="button"
-            :disabled="copy.status.value !== 'running'"
-            @click="copy.cancel"
-          >
-            {{ copy.status.value === 'cancelling' ? t('carve.run.cancelling') : t('carve.run.cancel') }}
-          </button>
+            <template #footer>
+              <div class="undelete-wizard__pane-notes">
+                <p class="wizard__hint">{{ t('undelete.browse.stateHint') }}</p>
+                <p v-if="currentPartition.timesUtc" class="wizard__hint">
+                  {{ t('undelete.browse.timesUtc') }}
+                </p>
+              </div>
+            </template>
+          </FsEntryDetails>
         </div>
 
-        <div v-if="copy.status.value !== 'idle'" class="wizard__job" aria-live="polite">
+        <div v-if="isCopyStatusShown" class="wizard__job" aria-live="polite">
           <progress
+            v-if="copyPurpose === 'saveAs'"
             class="wizard__progress"
             :value="copy.done.value"
             :max="copy.total.value || 1"
@@ -674,22 +699,6 @@ function noteText(note: string): string {
       <p v-if="dialogError" class="wizard__error" role="alert">
         {{ formatHostError(dialogError) }}
       </p>
-
-      <div class="wizard__nav">
-        <button
-          v-if="stepIndex > 0"
-          class="wizard__button wizard__button--secondary"
-          type="button"
-          :disabled="copy.isBusy.value || browse.isScanning.value"
-          @click="goBack"
-        >
-          {{ t('carve.previous') }}
-        </button>
-        <span class="wizard__nav-gap"></span>
-        <button v-if="step !== 'browse'" class="wizard__button" type="submit" :disabled="!canGoNext">
-          {{ t('carve.next') }}
-        </button>
-      </div>
     </form>
   </section>
 </template>
@@ -732,15 +741,29 @@ function noteText(note: string): string {
   cursor: pointer;
 }
 
+/* 列表与详情两栏都分标题、框体、底部三行，三行上下边对齐；列表要放名字、状态与时间，占得宽一些 */
 .undelete-wizard__files {
   display: grid;
   grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
-  gap: var(--space-lg);
-  align-items: start;
+  grid-template-rows: auto auto auto;
+  gap: var(--space-sm) var(--space-lg);
 }
 
-.undelete-wizard__copy-actions {
+.undelete-wizard__files > .undelete-wizard__pane {
+  display: grid;
+  grid-row: span 3;
+  grid-template-rows: subgrid;
+}
+
+.undelete-wizard__save-as {
   display: flex;
+  flex: none;
   gap: var(--space-sm);
+}
+
+.undelete-wizard__pane-notes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
 }
 </style>

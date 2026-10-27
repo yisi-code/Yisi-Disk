@@ -25,13 +25,24 @@
   outline: none;
 }
 
+/* 步骤条与上一步、下一步等按钮同在一行，按钮靠右 */
+.wizard__stepbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm) var(--space-lg);
+  margin-top: var(--space-md);
+  padding-bottom: var(--space-sm);
+  border-bottom: 1px solid var(--color-border);
+}
+
 .wizard__steps {
   display: flex;
   gap: var(--space-lg);
-  margin: var(--space-md) 0;
-  padding: 0 0 var(--space-sm);
+  margin: 0;
+  padding: 0;
   list-style: none;
-  border-bottom: 1px solid var(--color-border);
 }
 
 .wizard__step {
@@ -171,13 +182,6 @@
   width: 100%;
   max-width: 560px;
   border-collapse: collapse;
-}
-
-.wizard__files {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: var(--space-lg);
-  align-items: start;
 }
 
 .wizard__caption {
