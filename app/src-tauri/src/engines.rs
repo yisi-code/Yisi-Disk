@@ -403,6 +403,7 @@ impl Engines {
     }
 
     /// 把分区里选中的项复制到另一块盘。源为物理磁盘时，引擎在开始前核对输出目录不在这块盘上。
+    /// 不给输出目录时是为打开而复制：存到程序目录下的 `open-cache`，同时在后台清掉以前的副本。
     #[expect(clippy::too_many_arguments, reason = "与界面命令的参数一一对应")]
     pub fn start_copy(
         &self,
@@ -412,11 +413,20 @@ impl Engines {
         target: Target,
         partition: PartitionRef,
         items: Vec<CopyItem>,
-        output_dir: String,
+        output_dir: Option<String>,
     ) -> Result<(), HostError> {
         if let Target::Disk { disk_number } = &target {
             disk_path(*disk_number)?;
         }
+        validate_job_id(&job_id)?;
+        let output_dir = match output_dir {
+            Some(dir) => dir,
+            None => {
+                let dir = open_cache_root()?.join(&job_id);
+                self.clean_open_cache(&job_id);
+                dir.display().to_string()
+            }
+        };
         let params_job_id = job_id.clone();
         let started = self.start_job_with(
             app,

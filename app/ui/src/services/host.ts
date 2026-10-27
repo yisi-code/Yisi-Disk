@@ -429,15 +429,16 @@ export function cancelScan(jobId: string, partition: number): Promise<void> {
 }
 
 /**
- * 把浏览中选中的项复制到 outputDir 下新建的子目录里。源为物理磁盘时，
- * 输出目录在源盘上（或无法确认不在）会返回 outputOnSource
+ * 把浏览中选中的项复制到 outputDir 下新建的子目录里（另存为）。源为物理磁盘时，
+ * 输出目录在源盘上（或无法确认不在）会返回 outputOnSource。
+ * outputDir 为 null 时是为打开而复制：宿主存到程序目录下的 open-cache 并在后台清掉以前的副本
  */
 export function startCopy(
   jobId: string,
   target: JobTarget,
   partition: PartitionRef,
   items: CopyItem[],
-  outputDir: string,
+  outputDir: string | null,
 ): Promise<void> {
   return invoke<void>('job_start_copy', { jobId, target, partition, items, outputDir })
 }

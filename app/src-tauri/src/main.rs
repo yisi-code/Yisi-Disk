@@ -230,7 +230,8 @@ fn browse_cancel_scan(
     engines.cancel_scan(job_id, partition)
 }
 
-/// 把浏览中选中的项复制到另一块盘。
+/// 把浏览中选中的项复制到另一块盘（另存为）。不给输出目录时是为打开而复制：存到程序目录下的 `open-cache`，
+/// 同时在后台清掉以前的副本。
 #[tauri::command(async)]
 #[expect(clippy::too_many_arguments, reason = "与界面传来的参数一一对应")]
 fn job_start_copy(
@@ -241,7 +242,7 @@ fn job_start_copy(
     target: Target,
     partition: PartitionRef,
     items: Vec<CopyItem>,
-    output_dir: String,
+    output_dir: Option<String>,
 ) -> Result<(), HostError> {
     engines.start_copy(app, &broker, job_id, target, partition, items, output_dir)
 }

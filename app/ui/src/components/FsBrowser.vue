@@ -390,12 +390,18 @@ function withShownName(entry: FsEntry): FsEntry {
 
 <template>
   <div class="fs-browser">
+    <div class="fs-browser__toolbar">
+      <h3 :id="`${domPrefix}-title`" class="fs-browser__title">
+        {{ t('undelete.browser.title') }}
+      </h3>
+      <slot name="tools"></slot>
+    </div>
     <div
       ref="viewport"
       class="fs-browser__viewport"
       role="tree"
       tabindex="0"
-      :aria-label="t('undelete.browser.title')"
+      :aria-labelledby="`${domPrefix}-title`"
       :aria-activedescendant="activeDomId"
       :style="{ height: `${VIEWPORT_ROWS * ROW_HEIGHT}px` }"
       @scroll="handleScroll"
@@ -473,7 +479,10 @@ function withShownName(entry: FsEntry): FsEntry {
         </div>
       </div>
     </div>
-    <p class="fs-browser__hint">{{ t('undelete.browser.hint') }}</p>
+    <div class="fs-browser__footer">
+      <p class="fs-browser__hint">{{ t('undelete.browser.hint') }}</p>
+      <slot name="actions"></slot>
+    </div>
   </div>
 </template>
 
@@ -609,7 +618,29 @@ function withShownName(entry: FsEntry): FsEntry {
   padding-left: calc(var(--space-md) + var(--space-md));
 }
 
+.fs-browser__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.fs-browser__title {
+  margin: 0;
+  font-size: var(--font-size-body);
+  font-weight: 600;
+}
+
+.fs-browser__footer {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-md);
+}
+
 .fs-browser__hint {
+  flex: 1;
+  min-width: 0;
   margin: 0;
   color: var(--color-text-muted);
   font-size: var(--font-size-small);

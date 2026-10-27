@@ -37,7 +37,7 @@ type TreeRow = GroupRow | FileRow
 
 /** 行高固定，按滚动位置只渲染看得见的行 */
 const ROW_HEIGHT = 28
-const VIEWPORT_ROWS = 14
+const VIEWPORT_ROWS = 16
 const OVERSCAN = 6
 /** 按磁盘位置分组时最多分这么多段，每段至少 1 MiB、按 2 的幂取整 */
 const MAX_POSITION_GROUPS = 32
