@@ -456,3 +456,174 @@ fn mismatched_map_or_options_are_rejected() {
     .unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
 }
+
+#[test]
+fn scope_is_aligned_merged_and_checked() {
+    let scope = Scope::new(
+        &[(1000, 10), (0, 0), (1500, 600), (5000, 100), (5900, 500)],
+        6000,
+        512,
+    )
+    .unwrap();
+    assert_eq!(scope.ranges(), &[(512, 2560), (4608, 5120), (5632, 6000)]);
+    assert_eq!(scope.total(), 2048 + 512 + 368);
+    assert!(!scope.is_whole(6000));
+    assert!(Scope::new(&[(0, 6000)], 6000, 512).unwrap().is_whole(6000));
+    assert!(Scope::new(&[(6000, 1)], 6000, 512).is_err());
+    assert!(Scope::new(&[(0, 0)], 6000, 512).is_err());
+    assert!(Scope::new(&[], 6000, 512).is_err());
+}
+
+#[test]
+fn scoped_imaging_reads_only_the_selected_ranges_and_later_runs_fill_the_rest() {
+    let device = damaged_device();
+    let (expected_map, expected_image) = image_in_one_go(&device);
+    let device = damaged_device();
+    let scope = Scope::new(&[(2 * MIB, 2 * MIB), (9 * MIB, MIB)], device.size(), 512).unwrap();
+    let mut map = new_map(&device);
+    let mut store = MemoryStore::new(device.size());
+    let options = ImagingOptions {
+        scope: Some(scope.clone()),
+        ..ImagingOptions::default()
+    };
+    let outcome = run_imaging(
+        &device,
+        &mut map,
+        &mut store,
+        &Recorder::default(),
+        &options,
+    )
+    .unwrap();
+    assert!(matches!(outcome, ImagingOutcome::Finished), "{outcome:?}");
+
+    let inside = |offset: u64, end: u64| {
+        scope
+            .ranges()
+            .iter()
+            .any(|&(start, range_end)| start <= offset && end <= range_end)
+    };
+    for &(offset, length, _) in device.log.lock().unwrap().iter() {
+        assert!(
+            inside(offset, offset + length),
+            "读到了范围以外：{offset} +{length}"
+        );
+    }
+    // 范围内与一次做完的结果相同，范围外还没读
+    for &(start, end) in scope.ranges() {
+        for state in [
+            SegmentState::Untried,
+            SegmentState::Trim,
+            SegmentState::Scrape,
+            SegmentState::Bad,
+            SegmentState::Done,
+        ] {
+            assert_eq!(
+                map.bytes_within(state, start, end),
+                expected_map.bytes_within(state, start, end),
+                "{start}..{end} {state:?}"
+            );
+        }
+        assert_eq!(
+            store.image[start as usize..end as usize],
+            expected_image[start as usize..end as usize]
+        );
+    }
+    assert_eq!(scope.unfinished(&map), 0);
+    assert_eq!(
+        map.bytes(SegmentState::Untried),
+        device.size() - scope.total()
+    );
+
+    // 之后不加限制再做一次，结果与一次做完相同
+    let outcome = run_imaging(
+        &device,
+        &mut map,
+        &mut store,
+        &Recorder::default(),
+        &ImagingOptions::default(),
+    )
+    .unwrap();
+    assert!(matches!(outcome, ImagingOutcome::Finished));
+    assert_eq!(map, expected_map);
+    assert_eq!(store.image, expected_image);
+}
+
+#[test]
+fn copy_only_reads_good_areas_and_leaves_bad_ones_for_later() {
+    let device = damaged_device();
+    let (expected_map, expected_image) = image_in_one_go(&device);
+    let device = damaged_device();
+    let recorder = Recorder::default();
+    let mut map = new_map(&device);
+    let mut store = MemoryStore::new(device.size());
+    let options = ImagingOptions {
+        copy_only: true,
+        ..ImagingOptions::default()
+    };
+    let outcome = run_imaging(&device, &mut map, &mut store, &recorder, &options).unwrap();
+    assert!(matches!(outcome, ImagingOutcome::Finished), "{outcome:?}");
+    // 只有复制这一轮：没有修边、细读，也就没有记下坏扇区
+    assert_eq!(*recorder.rounds.borrow(), vec![Round::Copy]);
+    assert_eq!(map.bytes(SegmentState::Bad), 0);
+    assert_eq!(map.bytes(SegmentState::Scrape), 0);
+    // 读出的部分与原盘一致，大部分完好区域已经读出
+    for (offset, length) in map.ranges(SegmentState::Done) {
+        let (start, end) = (offset as usize, (offset + length) as usize);
+        assert_eq!(store.image[start..end], device.data[start..end]);
+    }
+    assert!(map.bytes(SegmentState::Untried) + map.bytes(SegmentState::Trim) > 0);
+    assert!(map.bytes(SegmentState::Untried) + map.bytes(SegmentState::Trim) > 0);
+
+    // 之后照常做完，结果与一次做完相同
+    run_imaging(
+        &device,
+        &mut map,
+        &mut store,
+        &Recorder::default(),
+        &ImagingOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(map, expected_map);
+    assert_eq!(store.image, expected_image);
+}
+
+#[test]
+fn copy_only_leaves_just_the_block_around_a_lone_bad_sector() {
+    // 复制这一轮按 1 MiB 一块读：读错的那一块整块留给修边、细读，跳过的一小段由反向读补上
+    let device = FakeDevice::new(16 * MIB, vec![(5 * MIB + SECTOR, 5 * MIB + 2 * SECTOR)]);
+    let mut map = new_map(&device);
+    let options = ImagingOptions {
+        copy_only: true,
+        ..ImagingOptions::default()
+    };
+    run_imaging(
+        &device,
+        &mut map,
+        &mut MemoryStore::new(device.size()),
+        &Recorder::default(),
+        &options,
+    )
+    .unwrap();
+    assert_eq!(map.bytes(SegmentState::Done), 15 * MIB);
+    assert_eq!(map.bytes_within(SegmentState::Trim, 5 * MIB, 6 * MIB), MIB);
+}
+
+#[test]
+fn scope_outside_the_device_is_rejected() {
+    let device = FakeDevice::new(MIB, vec![]);
+    let scope = Scope::new(&[(0, 2 * MIB)], 2 * MIB, 512).unwrap();
+    let mut map = new_map(&device);
+    let options = ImagingOptions {
+        scope: Some(scope),
+        ..ImagingOptions::default()
+    };
+    let error = run_imaging(
+        &device,
+        &mut map,
+        &mut MemoryStore::new(MIB),
+        &Recorder::default(),
+        &options,
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+}

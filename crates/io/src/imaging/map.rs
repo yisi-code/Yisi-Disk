@@ -2,8 +2,8 @@
 
 use std::fmt::Write as _;
 
-/// 坏区图文本的格式版本。
-const VERSION: u32 = 1;
+/// 坏区图文本的格式版本。2 起多记做镜像时的分区表（`part` 行）；1 没有这些行，照样能读。
+const VERSION: u32 = 2;
 
 /// 区段的读取状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -78,6 +78,15 @@ pub struct MapHeader {
     pub source: String,
 }
 
+/// 做镜像时源上的一个分区（编号、起点、长度，单位字节）。续做前与源上现在的分区表对比，
+/// 看出分区有没有增删、挪动。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordedPartition {
+    pub number: u32,
+    pub offset: u64,
+    pub length: u64,
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("坏区图第 {line} 行：{reason}")]
 pub struct MapError {
@@ -89,6 +98,8 @@ pub struct MapError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BadMap {
     header: MapHeader,
+    /// 最近一次开始读时源上的分区表；旧版坏区图没有，为空。
+    partitions: Vec<RecordedPartition>,
     segments: Vec<Segment>,
     /// 各状态的总字节数，按 [`SegmentState::index`] 排列。
     totals: [u64; 5],
@@ -110,6 +121,7 @@ impl BadMap {
         }
         Self {
             header,
+            partitions: Vec::new(),
             segments,
             totals,
         }
@@ -119,6 +131,15 @@ impl BadMap {
         &self.header
     }
 
+    pub fn partitions(&self) -> &[RecordedPartition] {
+        &self.partitions
+    }
+
+    /// 记下这一次开始读时源上的分区表。
+    pub fn set_partitions(&mut self, partitions: Vec<RecordedPartition>) {
+        self.partitions = partitions;
+    }
+
     pub fn segments(&self) -> &[Segment] {
         &self.segments
     }
@@ -126,6 +147,19 @@ impl BadMap {
     /// 处于 `state` 的总字节数。
     pub fn bytes(&self, state: SegmentState) -> u64 {
         self.totals[state.index()]
+    }
+
+    /// `[start, end)` 之内处于 `state` 的字节数。
+    pub fn bytes_within(&self, state: SegmentState, start: u64, end: u64) -> u64 {
+        let first = self
+            .segments
+            .partition_point(|segment| segment.end() <= start);
+        self.segments[first..]
+            .iter()
+            .take_while(|segment| segment.offset < end)
+            .filter(|segment| segment.state == state)
+            .map(|segment| segment.end().min(end) - segment.offset.max(start))
+            .sum()
     }
 
     /// 处于 `state` 的各个区段，依次给出起点与长度。
@@ -239,6 +273,13 @@ impl BadMap {
         let _ = writeln!(text, "size {}", header.size);
         let _ = writeln!(text, "sector {}", header.sector_size);
         let _ = writeln!(text, "source {}", header.source);
+        for partition in &self.partitions {
+            let _ = writeln!(
+                text,
+                "part {} {} {}",
+                partition.number, partition.offset, partition.length
+            );
+        }
         for segment in &self.segments {
             let _ = writeln!(
                 text,
@@ -258,6 +299,7 @@ impl BadMap {
         let mut size = None;
         let mut sector_size = None;
         let mut source = None;
+        let mut partitions = Vec::new();
         let mut segments: Vec<Segment> = Vec::new();
         let mut totals = [0u64; 5];
 
@@ -284,6 +326,21 @@ impl BadMap {
                     );
                 }
                 "source" => source = Some(rest.to_owned()),
+                "part" => {
+                    let numbers: Vec<u64> = rest
+                        .split(' ')
+                        .map(|field| field.parse::<u64>())
+                        .collect::<Result<_, _>>()
+                        .map_err(|_| invalid("分区应为「编号 起点 长度」三个数"))?;
+                    let [number, offset, length] = numbers[..] else {
+                        return Err(invalid("分区应为「编号 起点 长度」三个数"));
+                    };
+                    partitions.push(RecordedPartition {
+                        number: u32::try_from(number).map_err(|_| invalid("分区编号太大"))?,
+                        offset,
+                        length,
+                    });
+                }
                 _ => {
                     let mut fields = line.split(' ');
                     let (Some(offset), Some(length), Some(state), None) =
@@ -326,7 +383,7 @@ impl BadMap {
             reason: format!("缺少{what}"),
         };
         let version = version.ok_or_else(|| missing("版本号"))?;
-        if version != VERSION {
+        if !(1..=VERSION).contains(&version) {
             return Err(MapError {
                 line: line_count,
                 reason: format!("版本 {version} 不受支持"),
@@ -345,6 +402,7 @@ impl BadMap {
         }
         Ok(Self {
             header,
+            partitions,
             segments,
             totals,
         })
@@ -449,6 +507,52 @@ mod tests {
     }
 
     #[test]
+    fn partitions_are_kept_and_old_maps_have_none() {
+        let mut map = BadMap::new(header(1 << 20));
+        map.set(0, 4096, SegmentState::Done);
+        let partitions = vec![
+            RecordedPartition {
+                number: 1,
+                offset: 1024,
+                length: 4096,
+            },
+            RecordedPartition {
+                number: 2,
+                offset: 8192,
+                length: 8192,
+            },
+        ];
+        map.set_partitions(partitions.clone());
+        let text = map.to_text();
+        assert!(text.contains("version 2\n"), "{text}");
+        assert!(text.contains("part 2 8192 8192\n"), "{text}");
+        let parsed = BadMap::parse(&text).unwrap();
+        assert_eq!(parsed.partitions(), partitions.as_slice());
+        assert_eq!(parsed, map);
+
+        // 版本 1 没有分区行，照样能读，读出来没有分区
+        let old = "version 1\nsize 1000\nsector 512\nsource s\n0 1000 done\n";
+        let parsed = BadMap::parse(old).unwrap();
+        assert!(parsed.partitions().is_empty());
+        assert_eq!(parsed.bytes(SegmentState::Done), 1000);
+    }
+
+    #[test]
+    fn bytes_within_counts_only_the_overlap() {
+        use SegmentState::*;
+        let mut map = BadMap::new(header(10_000));
+        map.set(1000, 2000, Done);
+        map.set(5000, 1000, Bad);
+        assert_eq!(map.bytes_within(Done, 0, 10_000), 2000);
+        assert_eq!(map.bytes_within(Done, 1500, 2500), 1000);
+        assert_eq!(map.bytes_within(Done, 2500, 5500), 500);
+        assert_eq!(map.bytes_within(Bad, 2500, 5500), 500);
+        assert_eq!(map.bytes_within(Untried, 0, 1000), 1000);
+        assert_eq!(map.bytes_within(Untried, 3000, 3000), 0);
+        assert_eq!(map.bytes_within(Done, 9000, 20_000), 0);
+    }
+
+    #[test]
     fn empty_device_has_no_segments() {
         let map = BadMap::new(header(0));
         assert!(map.segments().is_empty());
@@ -461,12 +565,20 @@ mod tests {
         assert!(BadMap::parse(good).is_ok());
         let cases = [
             (
-                "version 2\nsize 1000\nsector 512\nsource s\n0 1000 done\n",
+                "version 3\nsize 1000\nsector 512\nsource s\n0 1000 done\n",
                 "版本",
             ),
             ("size 1000\nsector 512\nsource s\n0 1000 done\n", "版本号"),
             ("version 1\nsector 512\nsource s\n0 1000 done\n", "容量"),
             ("version 1\nsize 1000\nsector 512\n0 1000 done\n", "来源"),
+            (
+                "version 2\nsize 1000\nsector 512\nsource s\npart 1 512\n0 1000 done\n",
+                "三个数",
+            ),
+            (
+                "version 2\nsize 1000\nsector 512\nsource s\npart 4294967296 0 512\n0 1000 done\n",
+                "编号太大",
+            ),
             (
                 "version 1\nsize 1000\nsector 512\nsource s\n0 512 done\n",
                 "覆盖",

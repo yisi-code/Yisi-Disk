@@ -47,6 +47,7 @@ export function useCopy() {
     summary,
     failure: job.failure,
     isUnresponsive: job.isUnresponsive,
+    readHealth: job.readHealth,
     isBusy: job.isBusy,
     start,
     cancel: job.cancel,

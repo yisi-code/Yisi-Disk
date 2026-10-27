@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import SourcePicker from './SourcePicker.vue'
 import UnreadableRanges from './UnreadableRanges.vue'
 import JobControls from './JobControls.vue'
+import ReadHealthHint from './ReadHealthHint.vue'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { useReadScan } from '../composables/useReadScan'
 import type { JobTarget } from '../services/host'
@@ -27,6 +28,7 @@ const {
   failure,
   isUnresponsive,
   isBusy,
+  readHealth,
   start,
   cancel,
 } = useReadScan()
@@ -151,6 +153,11 @@ function handleCancel() {
       <div v-if="status !== 'idle'" class="wizard__job" aria-live="polite">
         <progress class="wizard__progress" :value="done" :max="total || 1"></progress>
         <p class="wizard__status">{{ statusText }}</p>
+        <ReadHealthHint
+          :health="readHealth"
+          :source-is-disk="targetKind === 'disk'"
+          context="badSectors"
+        />
         <p v-if="isUnresponsive" class="wizard__error" role="alert">
           {{ t('common.unresponsive') }}
         </p>

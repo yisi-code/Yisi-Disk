@@ -9,6 +9,7 @@ import SourcePicker from './SourcePicker.vue'
 import WizardSteps from './WizardSteps.vue'
 import JobControls from './JobControls.vue'
 import FailureList from './FailureList.vue'
+import ReadHealthHint from './ReadHealthHint.vue'
 import { useCarve } from '../composables/useCarve'
 import { useCopy } from '../composables/useCopy'
 import { useFileTypeName } from '../composables/useFileTypeName'
@@ -70,6 +71,7 @@ const {
   isPaused,
   isTogglingPause,
   isBusy,
+  readHealth,
   start,
   cancel,
   pause,
@@ -721,6 +723,7 @@ function handleAdvancedToggle(event: Event) {
         <div v-if="status !== 'idle'" class="wizard__job wizard__fill" aria-live="polite">
           <progress class="wizard__progress" :value="done" :max="total || 1"></progress>
           <p class="wizard__status">{{ statusText }}</p>
+          <ReadHealthHint :health="readHealth" :source-is-disk="targetKind === 'disk'" context="scan" />
           <p v-if="isUnresponsive" class="wizard__error" role="alert">
             {{ t('common.unresponsive') }}
           </p>

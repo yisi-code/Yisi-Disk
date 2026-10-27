@@ -1835,3 +1835,155 @@ fn partition_search_pauses_and_resumes() {
     assert!(engine.wait_exit().success());
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn image_inspect_partial_image_change_check_and_describe() {
+    use yisi_engine::protocol::{
+        IMAGE_DESCRIBE, IMAGE_INSPECT, ImageDescriptions, ImageInspection, ImageRegion,
+    };
+
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-image-partial");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (source_path, _, _) = browse_image(&dir);
+    let source = json!({"type": "image", "path": source_path, "sectorSize": 512});
+    let image_path = dir.join("out").join("part.img");
+    let inspect = |engine: &mut Engine| -> ImageInspection {
+        serde_json::from_value(
+            engine
+                .call(
+                    IMAGE_INSPECT,
+                    json!({"source": source, "imagePath": image_path}),
+                )
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let region = |inspection: &ImageInspection, number: u32| -> ImageRegion {
+        inspection
+            .regions
+            .iter()
+            .find(|region| region.partition == Some(number))
+            .cloned()
+            .unwrap()
+    };
+
+    // 还没有镜像：列出两个分区，全部未读
+    let mut engine = Engine::start();
+    let first = inspect(&mut engine);
+    assert_eq!(first.scheme.as_deref(), Some("mbr"));
+    let filesystems: Vec<&str> = first
+        .partitions
+        .iter()
+        .map(|partition| partition.filesystem.as_str())
+        .collect();
+    assert_eq!(filesystems, vec!["fat16", "exfat"]);
+    assert!(first.existing.is_none());
+    let second = region(&first, 2);
+    assert_eq!(second.progress.untried_bytes, second.length);
+    assert!(second.check.is_none());
+    assert!(!first.table_areas.is_empty());
+    let Some(output) = first.output.clone() else {
+        // 查不到输出位置的属性（非 Windows）：只读一部分的部分测不了
+        return;
+    };
+    if !output.sparse {
+        return;
+    }
+
+    // 只做第 2 个分区
+    let partition = json!([{"offset": second.offset, "length": second.length}]);
+    let started: ImageStarted = serde_json::from_value(
+        engine
+            .call(
+                IMAGE_CREATE,
+                json!({"jobId": "part-1", "source": source, "imagePath": image_path, "ranges": partition}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(started.source_identity.starts_with("image "));
+    let summary = image_summary(&engine.notifications_until(COMPLETED));
+    assert!(summary.partial);
+    assert_eq!(summary.unfinished_bytes, 0);
+    assert!(summary.device_unfinished_bytes > 0);
+    assert!(engine.wait_exit().success());
+    // 分区表所在的开头 1 MiB 一起读了：镜像里认得出分区
+    assert_eq!(first.table_areas[0].offset, 0);
+    let table_end = first.table_areas[0].length as usize;
+    assert_eq!(
+        std::fs::read(&image_path).unwrap()[..table_end],
+        std::fs::read(&source_path).unwrap()[..table_end]
+    );
+
+    // 再看：第 2 个分区已做完、抽查一致，第 1 个还没做；分区表与上次一样
+    let mut engine = Engine::start();
+    let after = inspect(&mut engine);
+    let existing = after.existing.clone().unwrap();
+    assert_eq!(existing.state, "ok");
+    assert!(existing.sparse);
+    assert!(existing.partitions_recorded);
+    assert!(existing.partition_changes.is_empty());
+    let done = region(&after, 2);
+    assert_eq!(done.progress.read_bytes, done.length);
+    let check = done.check.unwrap();
+    assert!(check.checked >= 1);
+    assert_eq!((check.mismatched, check.unreadable), (0, 0));
+    assert_eq!(region(&after, 1).progress.read_bytes, 0);
+
+    // 源上第 2 个分区被改过：抽查发现对不上（每段第一块取最前面读出的位置）
+    let mut changed = std::fs::read(&source_path).unwrap();
+    let at = done.offset as usize;
+    changed[at..at + 512].fill(0xee);
+    std::fs::write(&source_path, &changed).unwrap();
+    let mismatched = inspect(&mut engine);
+    assert!(region(&mismatched, 2).check.unwrap().mismatched >= 1);
+    engine.close_input();
+    assert!(engine.wait_exit().success());
+
+    // 重做这个分区之后又一致
+    let mut engine = Engine::start();
+    engine
+        .call(
+            IMAGE_RESUME,
+            json!({"jobId": "part-2", "source": source, "imagePath": image_path,
+                   "ranges": partition, "reset": partition}),
+        )
+        .unwrap();
+    image_summary(&engine.notifications_until(COMPLETED));
+    assert!(engine.wait_exit().success());
+    let mut engine = Engine::start();
+    let redone = inspect(&mut engine);
+    assert_eq!(region(&redone, 2).check.unwrap().mismatched, 0);
+
+    // 以前做过的镜像：在的、不见了的、只剩镜像文件的
+    let missing = dir.join("gone.img");
+    let describe = |engine: &mut Engine| -> ImageDescriptions {
+        serde_json::from_value(
+            engine
+                .call(IMAGE_DESCRIBE, json!({"imagePaths": [image_path, missing]}))
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let described = describe(&mut engine);
+    let states: Vec<&str> = described
+        .images
+        .iter()
+        .map(|image| image.state.as_str())
+        .collect();
+    assert_eq!(states, vec!["ok", "missing"]);
+    let ok = &described.images[0];
+    assert_eq!(ok.size, Some(changed.len() as u64));
+    assert!(ok.progress.unwrap().untried_bytes > 0);
+    assert!(ok.saved_at_ms.is_some());
+    std::fs::rename(
+        dir.join("out").join("part.img.map"),
+        dir.join("out").join("moved.map"),
+    )
+    .unwrap();
+    assert_eq!(describe(&mut engine).images[0].state, "mapMissing");
+    engine.close_input();
+    assert!(engine.wait_exit().success());
+    let _ = std::fs::remove_dir_all(&dir);
+}

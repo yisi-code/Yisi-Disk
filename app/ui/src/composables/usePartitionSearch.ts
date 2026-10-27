@@ -33,6 +33,7 @@ export function usePartitionSearch() {
     summary,
     failure: job.failure,
     isUnresponsive: job.isUnresponsive,
+    readHealth: job.readHealth,
     isPaused: job.isPaused,
     isTogglingPause: job.isTogglingPause,
     isBusy: job.isBusy,
