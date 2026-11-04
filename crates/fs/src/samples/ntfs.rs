@@ -5,6 +5,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::boot_write::{NtfsBoot, ntfs_boot};
+
 const SECTOR: usize = 512;
 const CLUSTER: usize = 4096;
 const RECORD: usize = 1024;
@@ -426,21 +428,18 @@ impl NtfsImage {
     }
 
     fn write_boot(&mut self) {
-        let boot = &mut self.image[..SECTOR];
-        boot[0..3].copy_from_slice(&[0xEB, 0x52, 0x90]);
-        boot[3..11].copy_from_slice(b"NTFS    ");
-        boot[0x0B..0x0D].copy_from_slice(&(SECTOR as u16).to_le_bytes());
-        boot[0x0D] = (CLUSTER / SECTOR) as u8;
-        boot[0x15] = 0xF8;
-        boot[0x28..0x30]
-            .copy_from_slice(&((TOTAL_CLUSTERS * CLUSTER / SECTOR - 1) as u64).to_le_bytes());
-        boot[0x30..0x38].copy_from_slice(&(MFT_LCN as u64).to_le_bytes());
-        boot[0x38..0x40].copy_from_slice(&(MIRROR_LCN as u64).to_le_bytes());
-        boot[0x40] = 0xF6; // 2^10 = 1024 字节一条记录
-        boot[0x44] = 0x01; // 一个索引块一簇
-        boot[0x48..0x50].copy_from_slice(&0x1234_5678_9ABC_DEF0u64.to_le_bytes());
-        boot[510] = 0x55;
-        boot[511] = 0xAA;
+        let boot = ntfs_boot(&NtfsBoot {
+            bytes_per_sector: SECTOR as u16,
+            cluster_size: CLUSTER as u64,
+            hidden_sectors: 0,
+            total_sectors: (TOTAL_CLUSTERS * CLUSTER / SECTOR - 1) as u64,
+            mft_lcn: MFT_LCN as u64,
+            mirror_lcn: MIRROR_LCN as u64,
+            record_size: RECORD as u64,
+            index_size: INDEX_BLOCK as u64,
+            serial: 0x1234_5678_9ABC_DEF0,
+        });
+        self.image[..SECTOR].copy_from_slice(&boot);
     }
 
     fn file_name_value(&self, record: u64, name: &Name) -> Vec<u8> {

@@ -2284,3 +2284,89 @@ fn mft_plans_rewrite_a_stale_mirror_record() {
     engine.close_input();
     assert!(engine.wait_exit().success());
 }
+
+#[test]
+fn rebuilt_boot_sectors_are_planned_and_browsed_without_writing() {
+    use yisi_engine::protocol::{
+        BootDiagnosis, BootFix, BootSectorPlan, BrowseOpened, DIAGNOSE_BOOT, PLAN_BOOT_SECTOR,
+    };
+
+    // 在主引导扇区已坏的样本上再清掉 FAT32 的备份（分区从第 2048 扇区起，备份在它的第 6 扇区）
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-boot-rebuild");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (image, _) = damaged_boot_image(&dir);
+    let mut bytes = std::fs::read(&image).unwrap();
+    bytes[(2048 + 6) * 512..(2048 + 7) * 512].fill(0);
+    std::fs::write(&image, &bytes).unwrap();
+    let source = json!({"type": "image", "path": image, "sectorSize": 512});
+
+    let mut engine = Engine::start();
+    let diagnosis: BootDiagnosis = serde_json::from_value(
+        engine
+            .call(DIAGNOSE_BOOT, json!({"source": source}))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(diagnosis.partitions[0].verdict, "bothDamaged");
+    let plan: BootSectorPlan = serde_json::from_value(
+        engine
+            .call(
+                PLAN_BOOT_SECTOR,
+                json!({"source": source, "partition": 1, "fix": "rebuild"}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(plan.fix, BootFix::Rebuild);
+    assert_eq!(plan.filesystem, "fat32");
+    let offsets: Vec<u64> = plan.plan.writes.iter().map(|write| write.offset).collect();
+    assert_eq!(offsets, [2048 * 512, (2048 + 6) * 512]);
+    let rebuilt = plan.rebuilt.unwrap();
+    assert_eq!(rebuilt.root, ["fat.bin"]);
+    assert_eq!(rebuilt.root_count, 1);
+    assert!(
+        rebuilt
+            .fields
+            .iter()
+            .any(|field| field.field == "sectorsPerCluster" && field.value == 1)
+    );
+    // 别的方向不适用
+    let refused = engine
+        .call(
+            PLAN_BOOT_SECTOR,
+            json!({"source": source, "partition": 1, "fix": "primaryFromBackup"}),
+        )
+        .unwrap_err();
+    assert_eq!(refused.code, error_code::PLAN_NOT_APPLICABLE);
+    engine.close_input();
+    assert!(engine.wait_exit().success());
+
+    // 按推算的引导扇区浏览：FAT32 能打开，NTFS 的备份还在、不重建，按主引导扇区仍打不开；镜像没有被改动
+    let mut browser = Engine::start();
+    let opened: BrowseOpened = serde_json::from_value(
+        browser
+            .call(
+                BROWSE_OPEN,
+                json!({"jobId": "r1", "source": source, "boot": "rebuilt"}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let browsable: Vec<bool> = opened.partitions.iter().map(|p| p.browsable).collect();
+    assert_eq!(browsable, [true, true, false]);
+    let page: FileListPage = serde_json::from_value(
+        browser
+            .call(
+                LIST_FILES,
+                json!({"jobId": "r1", "partition": 1, "dir": null, "offset": 0, "limit": 10}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(page.entries.iter().any(|entry| entry.name == "fat.bin"));
+    browser.call(CANCEL, json!({"jobId": "r1"})).unwrap();
+    browser.notifications_until(CANCELLED);
+    assert!(browser.wait_exit().success());
+    assert_eq!(std::fs::read(&image).unwrap(), bytes);
+}

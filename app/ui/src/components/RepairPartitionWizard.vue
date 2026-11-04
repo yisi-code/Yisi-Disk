@@ -17,6 +17,7 @@ import {
   diagnoseBoot,
   sameTarget,
   toHostError,
+  type BootCopy,
   type BootCopyReport,
   type BootDiagnosis,
   type BootFix,
@@ -50,8 +51,10 @@ const diagnosis = shallowRef<BootDiagnosis | null>(null)
 const diagnosedTarget = shallowRef<JobTarget | null>(null)
 const isDiagnosing = ref(false)
 const diagnoseFailure = ref<HostError | null>(null)
-/** 正在用备份浏览的分区；为 null 时结果页列出诊断结论 */
+/** 正在用备份或推算的引导扇区浏览的分区；为 null 时结果页列出诊断结论 */
 const browsingNumber = ref<number | null>(null)
+/** 浏览会话按哪一份引导扇区打开 */
+const browsingBoot = ref<BootCopy>('backup')
 /** 正在为哪个分区打开浏览会话 */
 const openingNumber = ref<number | null>(null)
 const browseError = ref<{ number: number; text: string } | null>(null)
@@ -172,8 +175,11 @@ async function runDiagnosis() {
   }
 }
 
-/** 按备份引导扇区打开浏览会话，进入这个分区；会话里这个分区仍打不开时留在结论列表，写明原因 */
-async function browseWithBackup(partition: PartitionBoot) {
+/**
+ * 按备份引导扇区（或主备都坏了时按推算出的引导扇区，不写盘）打开浏览会话，进入这个分区；
+ * 会话里这个分区仍打不开时留在结论列表，写明原因
+ */
+async function browseWith(partition: PartitionBoot, boot: BootCopy) {
   const source = diagnosedTarget.value
   if (source === null || isBusy.value) {
     return
@@ -182,7 +188,8 @@ async function browseWithBackup(partition: PartitionBoot) {
   openingNumber.value = partition.number
   try {
     await closeBrowse()
-    await browse.open(source, 'backup')
+    browsingBoot.value = boot
+    await browse.open(source, boot)
     const opened = browse.opened.value?.partitions.find((candidate) => candidate.number === partition.number)
     if (browse.isOpen.value && opened?.browsable === true) {
       browsingNumber.value = partition.number
@@ -341,12 +348,24 @@ async function proposeTypeFix(partition: PartitionBoot) {
   }
 }
 
-/** 能修的方向：主坏备好时用备份修主引导扇区，主好备坏时用主引导扇区修备份 */
+/** 能修的方向：主坏备好时用备份修主引导扇区，主好备坏时用主引导扇区修备份，主备都坏了时重建 */
 function fixDirection(partition: PartitionBoot): BootFix | null {
   if (partition.verdict === 'primaryDamaged' && partition.backup?.issues.length === 0) {
     return 'primaryFromBackup'
   }
+  if (canRebuild(partition)) {
+    return 'rebuild'
+  }
   return partition.verdict === 'backupDamaged' ? 'backupFromPrimary' : null
+}
+
+/** 主备都坏了（或两处都认不出）、又不是 FAT12/16（没有备份，这一版不重建）：可以按分区里的结构推算引导扇区 */
+function canRebuild(partition: PartitionBoot): boolean {
+  return (
+    (partition.verdict === 'bothDamaged' || partition.verdict === 'unrecognized') &&
+    partition.filesystem !== 'fat12' &&
+    partition.filesystem !== 'fat16'
+  )
 }
 
 /** 主引导扇区坏了、备份核对通过并且打得开：可以用备份浏览 */
@@ -435,7 +454,9 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
           <dt>{{ t('partitionFiles.browse.partition') }}</dt>
           <dd>{{ partitionLine(browsingPartition) }}</dd>
         </dl>
-        <p class="wizard__hint wizard__hint--warning">{{ t('repair.browse.intro') }}</p>
+        <p class="wizard__hint wizard__hint--warning">
+          {{ browsingBoot === 'rebuilt' ? t('repair.browse.rebuiltIntro') : t('repair.browse.intro') }}
+        </p>
         <p v-if="isDeviceKind(browse.target.value.kind)" class="wizard__hint">{{ t('partitionFiles.browse.liveHint') }}</p>
         <p v-if="browse.isUnresponsive.value" class="wizard__error" role="alert">
           {{ t('common.unresponsive') }}
@@ -452,7 +473,7 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
             :partition-ref="browsingRef"
             :sector-size="browse.opened.value?.sectorSize ?? 512"
             :can-browse="browse.isOpen.value"
-            boot="backup"
+            :boot="browsingBoot"
           />
         </div>
       </div>
@@ -594,7 +615,7 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
           </p>
 
           <div
-            v-if="canBrowseBackup(partition) || (canWrite && fixDirection(partition))"
+            v-if="canBrowseBackup(partition) || canRebuild(partition) || (canWrite && fixDirection(partition))"
             class="repair-wizard__actions"
           >
             <button
@@ -602,9 +623,18 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
               class="wizard__button"
               type="button"
               :disabled="isBusy"
-              @click="browseWithBackup(partition)"
+              @click="browseWith(partition, 'backup')"
             >
               {{ t('repair.browse.start') }}
+            </button>
+            <button
+              v-if="canRebuild(partition)"
+              class="wizard__button wizard__button--secondary"
+              type="button"
+              :disabled="isBusy"
+              @click="browseWith(partition, 'rebuilt')"
+            >
+              {{ t('repair.browse.startRebuilt') }}
             </button>
             <button
               v-if="canWrite && fixDirection(partition)"

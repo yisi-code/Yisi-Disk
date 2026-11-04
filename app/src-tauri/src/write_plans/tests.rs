@@ -204,6 +204,7 @@ fn boot_sector_plans_must_match_the_request() {
         from: 4608,
         to: 1024,
         length: 512,
+        rebuilt: None,
     };
     let expected = Writable {
         identity: image_identity(&real),
@@ -232,6 +233,35 @@ fn boot_sector_plans_must_match_the_request() {
         ("two", two),
         ("sector", sector),
     ] {
+        assert_eq!(
+            check_boot_sector_plan(&bad, &expected).unwrap_err().code,
+            "planMismatch",
+            "{name}"
+        );
+    }
+
+    // 重建：主引导扇区与备份两段，都要在分区里；再多一段、或第二段出了分区都不行
+    let rebuild = || {
+        let mut plan = planned();
+        plan.fix = BootFix::Rebuild;
+        plan.from = 1024;
+        plan.plan.writes.push(SectorWrite {
+            offset: 1024 + 3584,
+            before: vec![0; 512],
+            after: vec![1; 512],
+        });
+        plan
+    };
+    assert!(check_boot_sector_plan(&rebuild(), &expected).is_ok());
+    let mut three = rebuild();
+    three.plan.writes.push(SectorWrite {
+        offset: 4608 + 512,
+        before: vec![0; 512],
+        after: vec![1; 512],
+    });
+    let mut past_end = rebuild();
+    past_end.plan.writes[1].offset = 1024 + 4096;
+    for (name, bad) in [("three", three), ("past_end", past_end)] {
         assert_eq!(
             check_boot_sector_plan(&bad, &expected).unwrap_err().code,
             "planMismatch",

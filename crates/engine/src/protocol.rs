@@ -438,13 +438,15 @@ pub struct BrowseParams {
     pub boot: BootCopy,
 }
 
-/// 打开卷时用哪一份引导扇区：主引导扇区坏了、备份完好时，用备份浏览和复制（[`DIAGNOSE_BOOT`] 说备份可用的分区）。
+/// 打开卷时用哪一份引导扇区：主引导扇区坏了、备份完好时，用备份浏览和复制（[`DIAGNOSE_BOOT`] 说备份可用的分区）；
+/// 主备都坏了时，用按分区里的结构推算出的引导扇区（`rebuilt`，只在内存里换上，不写盘；推算不出的分区照旧）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum BootCopy {
     #[default]
     Primary,
     Backup,
+    Rebuilt,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1100,9 +1102,31 @@ pub enum BootFix {
     PrimaryFromBackup,
     /// 主引导扇区正常、备份坏了：把主引导扇区复制到它记的备份位置。
     BackupFromPrimary,
+    /// 主备都坏了（或两处都认不出）：按分区里的结构推算出引导扇区，主引导扇区与备份都写（FAT32、exFAT、NTFS）。
+    /// 卷序列号推不出来，换一个新的。
+    Rebuild,
 }
 
-/// 修复引导扇区的写入计划。FAT32、NTFS 只复制引导扇区本身，exFAT 复制整个引导区（12 个扇区）。
+/// 重建出的引导扇区：推算出的各项（规范字段名，界面按 `bootField.*` 显示）、卷标，以及按它打开后根目录里
+/// 没删除的项的前几个名字与总数。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebuiltBoot {
+    pub fields: Vec<BootField>,
+    pub label: Option<String>,
+    pub root: Vec<String>,
+    pub root_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootField {
+    pub field: String,
+    pub value: u64,
+}
+
+/// 修复引导扇区的写入计划。FAT32、NTFS 只复制引导扇区本身，exFAT 复制整个引导区（12 个扇区）；
+/// 重建时主引导扇区与备份各写一段（FAT32 连同 FSInfo），`from`、`to` 都是分区起点，`length` 是第一段的长度。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BootSectorPlan {
@@ -1117,6 +1141,8 @@ pub struct BootSectorPlan {
     pub from: u64,
     pub to: u64,
     pub length: u64,
+    /// 重建时推算出的内容。
+    pub rebuilt: Option<RebuiltBoot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

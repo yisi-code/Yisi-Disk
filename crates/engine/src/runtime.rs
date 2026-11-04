@@ -386,6 +386,7 @@ fn dispatch_now(
             let params: BrowseParams = request.params()?;
             let device: Arc<dyn BlockDevice> = Arc::from(open_source(&params.source)?);
             let progress = ProgressSender::new(params.job_id.clone(), Arc::clone(outbox));
+            let device = boot_check::boot_view(device, params.boot, None)?;
             let (session, opened) =
                 Session::open(device, progress, boot_check::fs_copy(params.boot))?;
             let session = Arc::new(session);
@@ -754,6 +755,7 @@ fn copy_volume(
     boot: protocol::BootCopy,
 ) -> Result<yisi_fs::Volume, ErrorObject> {
     browse::verify_partition(device.as_ref(), partition)?;
+    let device = boot_check::boot_view(device, boot, Some(partition))?;
     yisi_fs::Volume::open_with(
         device,
         partition.offset,

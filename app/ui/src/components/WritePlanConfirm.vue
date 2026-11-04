@@ -22,7 +22,7 @@ const emit = defineEmits<{ confirm: []; cancel: [] }>()
 
 const { t, locale } = useI18n()
 const { formatHostError } = useHostErrorText()
-const { sourceName, filesystemName } = usePartitionText()
+const { sourceName, filesystemName, bootFieldName, bootFieldValue } = usePartitionText()
 const { writeActionText, tableTypeText } = useWritePlanText()
 
 const isAcknowledged = ref(false)
@@ -45,6 +45,23 @@ const partitionDetail = computed(() => {
   return detail.value ?? tableDetail.value
 })
 const totalBytes = computed(() => props.plan.writes.reduce((sum, range) => sum + range.length, 0))
+/** 重建引导扇区时推算出的内容；回滚时不再列出 */
+const rebuilt = computed(() => (props.plan.kind === 'rollback' ? null : (detail.value?.rebuilt ?? null)))
+/** 根目录的前几项，后面还有时加「…」 */
+const rootText = computed(() => {
+  const current = rebuilt.value
+  if (current === null) {
+    return ''
+  }
+  if (current.rootCount === 0) {
+    return t('writePlan.rebuiltRootEmpty')
+  }
+  const names = current.root.join(t('writePlan.listSeparator'))
+  return t('writePlan.rebuiltRootValue', {
+    names: current.rootCount > current.root.length ? `${names}…` : names,
+    count: current.rootCount.toLocaleString(locale.value),
+  })
+})
 
 const whatText = computed(() => {
   const mft = mftDetail.value
@@ -74,8 +91,13 @@ const whatText = computed(() => {
   if (current === null) {
     return null
   }
-  return props.plan.kind === 'rollback'
-    ? t('writePlan.rollbackValue', { to: position(current.to), size: formatBytes(current.length) })
+  if (props.plan.kind === 'rollback') {
+    return current.fix === 'rebuild'
+      ? t('writePlan.rebuildRollbackValue')
+      : t('writePlan.rollbackValue', { to: position(current.to), size: formatBytes(current.length) })
+  }
+  return current.fix === 'rebuild'
+    ? t('writePlan.rebuildValue', { size: formatBytes(totalBytes.value) })
     : t('writePlan.copyValue', {
         from: position(current.from),
         to: position(current.to),
@@ -115,6 +137,22 @@ function position(offset: number): string {
       <template v-if="whatText">
         <dt>{{ t('writePlan.what') }}</dt>
         <dd>{{ whatText }}</dd>
+      </template>
+      <template v-if="rebuilt">
+        <dt>{{ t('writePlan.rebuiltRoot') }}</dt>
+        <dd>{{ rootText }}</dd>
+        <template v-if="rebuilt.label">
+          <dt>{{ t('writePlan.rebuiltLabel') }}</dt>
+          <dd>{{ rebuilt.label }}</dd>
+        </template>
+        <dt>{{ t('writePlan.rebuiltFields') }}</dt>
+        <dd>
+          <ul class="wizard__list">
+            <li v-for="field in rebuilt.fields" :key="field.field">
+              {{ t('writePlan.rebuiltField', { name: bootFieldName(field.field), value: bootFieldValue(field.field, field.value) }) }}
+            </li>
+          </ul>
+        </dd>
       </template>
       <dt>{{ t('writePlan.writes') }}</dt>
       <dd>
