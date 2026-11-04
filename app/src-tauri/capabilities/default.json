@@ -36,6 +36,7 @@
     "allow-image-history-relocate",
     "allow-boot-diagnose",
     "allow-write-plan-boot-sector",
+    "allow-write-plan-partition-table",
     "allow-write-plan-execute",
     "allow-write-plan-discard",
     "allow-write-plan-rollback",

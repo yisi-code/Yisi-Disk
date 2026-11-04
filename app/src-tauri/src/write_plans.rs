@@ -18,7 +18,9 @@ use yisi_broker::backup::SavedBackup;
 use yisi_broker::execute::{self, ImageFile};
 /// 执行的结果：成功，或停在哪一步、失败前已经写下去几段。与磁盘代理的答复同一个类型。
 pub use yisi_broker::protocol::WriteExecuted as WriteOutcome;
-use yisi_engine::protocol::{BootFix, BootSectorPlan, WritePlan, image_identity};
+use yisi_engine::protocol::{
+    BootFix, BootSectorPlan, PartitionTableFix, PartitionTablePlan, WritePlan, image_identity,
+};
 
 use crate::broker::BrokerSession;
 use crate::engines::{Engines, HostError, IMAGE_SECTOR_SIZE, Target, lock};
@@ -30,11 +32,16 @@ const MAX_RECORDS: usize = 200;
 /// 修复引导扇区的计划最多写这么多字节：exFAT 的引导区 12 个扇区、扇区最大 4 KiB。
 const MAX_BOOT_SECTOR_BYTES: u64 = 12 * 4096;
 
+/// 改写分区表只写设备开头与末尾这么大的范围：MBR 在第 0 扇区，GPT 的主表在开头、备份表在末尾
+/// （128 项 × 128 字节的表项区，按 512 或 4096 字节扇区都在 64 KiB 之内）。
+const TABLE_AREA: u64 = 64 * 1024;
+
 /// 计划做什么。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PlanKind {
     BootSector,
+    PartitionTable,
     Rollback,
 }
 
@@ -60,6 +67,20 @@ pub struct BootSectorDetail {
     pub length: u64,
 }
 
+/// 改写分区表的细节，同引擎答复的 [`PartitionTablePlan`]（不含要写的内容）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionTableDetail {
+    pub fix: PartitionTableFix,
+    pub scheme: String,
+    pub filesystem: String,
+    pub partition: u32,
+    pub offset: u64,
+    pub length: u64,
+    pub type_id: String,
+    pub role: Option<String>,
+}
+
 /// 计划的摘要：给界面确认用，也记进写盘记录。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -69,6 +90,9 @@ pub struct PlanSummary {
     pub writes: Vec<WriteRange>,
     /// 修复引导扇区的计划，以及回滚这类计划时，原来那次修复的细节。
     pub boot_sector: Option<BootSectorDetail>,
+    /// 改写分区表的计划（以及回滚它时）的细节。
+    #[serde(default)]
+    pub partition_table: Option<PartitionTableDetail>,
     /// 回滚的是哪一次写入（计划 ID）。
     pub rollback_of: Option<String>,
 }
@@ -148,6 +172,41 @@ impl WritePlans {
                 target,
                 writes: Vec::new(),
                 boot_sector: Some(detail),
+                partition_table: None,
+                rollback_of: None,
+            },
+        )
+    }
+
+    /// 请引擎生成改写分区表的计划（把丢失的分区写回去、改分区类型），存好备份后交给界面确认。只读源。
+    pub fn plan_partition_table(
+        &self,
+        engines: &Engines,
+        broker: &BrokerSession,
+        target: Target,
+        fix: PartitionTableFix,
+    ) -> Result<PlanView, HostError> {
+        let expected = writable(&target, &self.data_dir)?;
+        let planned = engines.plan_partition_table(broker, target.clone(), fix)?;
+        check_table_plan(&planned, &expected)?;
+        let detail = PartitionTableDetail {
+            fix: planned.fix,
+            scheme: planned.scheme,
+            filesystem: planned.filesystem,
+            partition: planned.partition,
+            offset: planned.offset,
+            length: planned.length,
+            type_id: planned.type_id,
+            role: planned.role,
+        };
+        self.propose(
+            planned.plan,
+            PlanSummary {
+                kind: PlanKind::PartitionTable,
+                target,
+                writes: Vec::new(),
+                boot_sector: None,
+                partition_table: Some(detail),
                 rollback_of: None,
             },
         )
@@ -182,6 +241,7 @@ impl WritePlans {
                 target: record.summary.target.clone(),
                 writes: Vec::new(),
                 boot_sector: record.summary.boot_sector.clone(),
+                partition_table: record.summary.partition_table.clone(),
                 rollback_of: Some(record.plan_id.clone()),
             },
         )
@@ -370,14 +430,7 @@ fn execute_on(
 fn check_boot_sector_plan(planned: &BootSectorPlan, expected: &Writable) -> Result<(), HostError> {
     let plan = &planned.plan;
     let mismatch = |what: &str| HostError::new("planMismatch", what.to_owned());
-    if plan.device.identity != expected.identity {
-        return Err(mismatch("计划写的不是这个镜像文件或这块盘"));
-    }
-    if plan.device.sector_size != expected.sector_size {
-        return Err(mismatch("计划的扇区大小与读源时不同"));
-    }
-    plan.validate()
-        .map_err(|error| mismatch(&error.to_string()))?;
+    check_device(plan, expected)?;
     let [write] = plan.writes.as_slice() else {
         return Err(mismatch("修复引导扇区的计划应该只有一段"));
     };
@@ -390,6 +443,42 @@ fn check_boot_sector_plan(planned: &BootSectorPlan, expected: &Writable) -> Resu
         return Err(mismatch("计划要写的位置不在这个分区的引导扇区上"));
     }
     Ok(())
+}
+
+/// 改写分区表的计划只写设备开头或末尾 [`TABLE_AREA`] 之内（分区表所在的地方），最多两段（GPT 主、备各一段）。
+fn check_table_plan(planned: &PartitionTablePlan, expected: &Writable) -> Result<(), HostError> {
+    let plan = &planned.plan;
+    check_device(plan, expected)?;
+    let size = plan.device.size;
+    let in_table_area = |offset: u64, length: u64| {
+        let end = offset.saturating_add(length);
+        end <= TABLE_AREA || offset >= size.saturating_sub(TABLE_AREA)
+    };
+    if plan.writes.len() > 2
+        || plan
+            .writes
+            .iter()
+            .any(|write| !in_table_area(write.offset, write.len()))
+    {
+        return Err(HostError::new(
+            "planMismatch",
+            "计划要写的位置不在分区表所在的区域",
+        ));
+    }
+    Ok(())
+}
+
+/// 计划写的是请求的那个镜像或那块盘、扇区大小与读它时一致，计划本身合法。
+fn check_device(plan: &WritePlan, expected: &Writable) -> Result<(), HostError> {
+    let mismatch = |what: &str| HostError::new("planMismatch", what.to_owned());
+    if plan.device.identity != expected.identity {
+        return Err(mismatch("计划写的不是这个镜像文件或这块盘"));
+    }
+    if plan.device.sector_size != expected.sector_size {
+        return Err(mismatch("计划的扇区大小与读源时不同"));
+    }
+    plan.validate()
+        .map_err(|error| mismatch(&error.to_string()))
 }
 
 #[cfg(test)]

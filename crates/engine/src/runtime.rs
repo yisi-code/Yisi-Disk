@@ -20,7 +20,8 @@ use yisi_engine::protocol::{
     ReadScanParams, SCAN_DELETED, ScanParams, Source,
 };
 use yisi_engine::protocol::{
-    DIAGNOSE_BOOT, DiagnoseBootParams, PLAN_BOOT_SECTOR, PlanBootSectorParams,
+    DIAGNOSE_BOOT, DiagnoseBootParams, PLAN_BOOT_SECTOR, PLAN_PARTITION_TABLE,
+    PlanBootSectorParams, PlanPartitionTableParams,
 };
 #[cfg(windows)]
 use yisi_engine::protocol::{DiskList, DiskSummary, DiskVolume};
@@ -37,7 +38,7 @@ use crate::copy_job::{self, Planned};
 use crate::job::{self, JobContext, JobOutcome, ProgressSender, RunningJob};
 use crate::{
     boot_check, carve_job, extract_job, fs_check_job, image_inspect, image_job, preview, read_scan,
-    reading, search_job,
+    reading, search_job, table_plan,
 };
 
 /// 浏览任务每隔这么久看一次有没有被取消。
@@ -238,6 +239,7 @@ fn dispatch_now(
                 OPEN_RANGE.to_owned(),
                 DIAGNOSE_BOOT.to_owned(),
                 PLAN_BOOT_SECTOR.to_owned(),
+                PLAN_PARTITION_TABLE.to_owned(),
                 FS_CHECK.to_owned(),
             ];
             if cfg!(windows) {
@@ -346,19 +348,17 @@ fn dispatch_now(
         }
         PLAN_BOOT_SECTOR => {
             let params: PlanBootSectorParams = request.params()?;
-            let before = reading::snapshot();
-            let (device, identity) = open_plan_source(&params.source)?;
-            let device: Arc<dyn BlockDevice> = Arc::from(device);
-            let planned = boot_check::plan(&device, identity, params.partition, params.fix);
-            // 读的时候出过错的盘不往上写：先做镜像（不管计划生没生成，都先说这一条）
-            let errors = reading::snapshot().since(&before).errors;
-            if errors > 0 {
-                return Err(ErrorObject::new(
-                    protocol::error_code::PLAN_READ_ERRORS,
-                    format!("生成计划时读源出错 {errors} 次"),
-                ));
-            }
-            to_result(&planned?)
+            to_result(&plan_without_read_errors(
+                &params.source,
+                |device, identity| boot_check::plan(device, identity, params.partition, params.fix),
+            )?)
+        }
+        PLAN_PARTITION_TABLE => {
+            let params: PlanPartitionTableParams = request.params()?;
+            to_result(&plan_without_read_errors(
+                &params.source,
+                |device, identity| table_plan::plan(device, identity, params.fix),
+            )?)
         }
         PREVIEW_RANGE => {
             let params: PreviewRangeParams = request.params()?;
@@ -638,6 +638,25 @@ fn open_image_source(
             open_source(source).map(|device| (device, "disk".to_owned()))
         }
     }
+}
+
+/// 打开要读的设备或镜像、生成写入计划。读的时候出过错的盘不往上写：先做镜像（不管计划生没生成，都先说这一条）。
+fn plan_without_read_errors<T>(
+    source: &Source,
+    plan: impl FnOnce(&Arc<dyn BlockDevice>, String) -> Result<T, ErrorObject>,
+) -> Result<T, ErrorObject> {
+    let before = reading::snapshot();
+    let (device, identity) = open_plan_source(source)?;
+    let device: Arc<dyn BlockDevice> = Arc::from(device);
+    let planned = plan(&device, identity);
+    let errors = reading::snapshot().since(&before).errors;
+    if errors > 0 {
+        return Err(ErrorObject::new(
+            protocol::error_code::PLAN_READ_ERRORS,
+            format!("生成计划时读源出错 {errors} 次"),
+        ));
+    }
+    planned
 }
 
 /// 打开要生成写入计划的源，给出计划里记的设备标识（与坏区图里的来源相同）。写入计划只写镜像文件与整块物理盘：

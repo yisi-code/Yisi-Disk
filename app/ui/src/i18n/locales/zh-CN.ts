@@ -852,8 +852,16 @@ export default {
       unreadable: '有 {size} 读不出、跳过了，那些位置上的分区找不到。',
       truncated: '找到的分区太多，只列出前 {count} 个。',
       readOnly:
-        '这一版只读：不写回分区表，也不改动这块盘。先把需要的文件另存到另一块盘；把找到的分区写回分区表要等后续版本。',
+        '搜索与浏览只读，不改动这块盘。先把需要的文件另存到另一块盘；之后可以把「丢失」的分区写回分区表。',
       opening: '正在打开浏览…',
+    },
+    write: {
+      start: '写回分区表…',
+      preparing: '正在生成写回分区表的计划…',
+      hint: '「丢失」的分区可以写回分区表：先存写前备份，确认后才写，之后能回滚。写回之后 Windows 会挂载它并可能往里写，先把要的文件另存出来。',
+      volumeUnsupported: '选的是一个盘符，不能改分区表：请改选整块磁盘。',
+      outcome: '{action}：{outcome}',
+      reopenHint: '分区表已经改了，搜索结果里的「丢失」不会自动更新：要核对就重新搜索，或到「修复打不开的分区」里看。',
     },
     list: {
       title: '找到的分区',
@@ -963,6 +971,7 @@ export default {
       backupFromPrimary: '用主引导扇区修复备份…',
       preparing: '正在生成修复计划…',
       volumeUnsupported: '选的是一个盘符，不能修复：请改选整块磁盘，或先制作镜像、在镜像上修复。',
+      setType: '改分区类型…',
       outcome: '{action}：{outcome}',
     },
     issue: {
@@ -1000,6 +1009,10 @@ export default {
     target: '写到',
     partition: '分区',
     partitionValue: '分区 {number} · {filesystem}',
+    typeValue: '{role}（{type}）',
+    addLostValue: '在分区表里加一个分区：起点{start}，大小 {size}，类型 {type}',
+    setTypeValue: '把分区表里这个分区的类型改为 {type}',
+    tableRollbackValue: '把分区表恢复成上次改写之前的样子',
     what: '做什么',
     copyValue: '把{from}处的 {size} 复制到{to}',
     rollbackValue: '把{to}处的 {size} 恢复成上次写入之前的内容',
@@ -1031,6 +1044,8 @@ export default {
     action: {
       primaryFromBackup: '分区 {number}：用备份修复主引导扇区',
       backupFromPrimary: '分区 {number}：用主引导扇区修复备份',
+      addLost: '把找到的 {filesystem} 分区（起点 {start}，{size}）写回分区表',
+      setType: '分区 {number}：分区类型改为 {type}',
       rollback: '回滚（{action}）',
       unknown: '写入',
     },

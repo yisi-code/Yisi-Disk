@@ -10,9 +10,11 @@ use crate::{Note, PartError, Partition, PartitionKind};
 
 pub(crate) const GPT_PROTECTIVE: u8 = 0xEE;
 /// 扩展分区的类型：CHS 扩展、LBA 扩展、Linux 扩展。
-const EXTENDED: [u8; 3] = [0x05, 0x0F, 0x85];
+pub(crate) const EXTENDED: [u8; 3] = [0x05, 0x0F, 0x85];
 const TABLE_OFFSET: usize = 446;
 const ENTRY_SIZE: usize = 16;
+/// CHS 地址写成「超出 CHS 能表示的范围，按 LBA 找」：磁头 254、扇区 63、柱面 1023。
+const CHS_BEYOND: [u8; 3] = [0xFE, 0xFF, 0xFF];
 /// 逻辑分区最多列这么多个，挡住构造出来的超长链。
 const MAX_LOGICAL: u32 = 128;
 
@@ -31,6 +33,48 @@ pub(crate) fn primary_entries(sector: &[u8]) -> Vec<Entry> {
         .filter_map(|slot| entry(sector, slot))
         .filter(|entry| matches!(entry.status, 0x00 | 0x80))
         .collect()
+}
+
+/// 第 `slot` 个表项是空的（类型为 0 或扇区数为 0）。
+pub(crate) fn slot_is_free(sector: &[u8], slot: usize) -> bool {
+    slot < 4 && entry(sector, slot).is_none()
+}
+
+/// 写一个表项（主分区表或 EBR 里的）。CHS 字段一律写成按 LBA 的标记，起点与扇区数按 LBA 记。
+/// 位置超出扇区时返回 `None`，什么都不写。
+pub(crate) fn put_entry(
+    sector: &mut [u8],
+    slot: usize,
+    status: u8,
+    type_id: u8,
+    start: u32,
+    sectors: u32,
+) -> Option<()> {
+    let at = TABLE_OFFSET.checked_add(slot.checked_mul(ENTRY_SIZE)?)?;
+    let [s0, s1, s2, s3] = start.to_le_bytes();
+    let [n0, n1, n2, n3] = sectors.to_le_bytes();
+    let [c0, c1, c2] = CHS_BEYOND;
+    let entry = [
+        status, c0, c1, c2, type_id, c0, c1, c2, s0, s1, s2, s3, n0, n1, n2, n3,
+    ];
+    sector
+        .get_mut(at..at.checked_add(ENTRY_SIZE)?)?
+        .copy_from_slice(&entry);
+    Some(())
+}
+
+/// 改第 `slot` 个表项的类型字节。
+pub(crate) fn set_type(sector: &mut [u8], slot: usize, type_id: u8) -> Option<()> {
+    let at = TABLE_OFFSET
+        .checked_add(slot.checked_mul(ENTRY_SIZE)?)?
+        .checked_add(4)?;
+    *sector.get_mut(at)? = type_id;
+    Some(())
+}
+
+/// 第 `slot` 个表项的类型字节。
+pub(crate) fn type_at(sector: &[u8], slot: usize) -> Option<u8> {
+    entry(sector, slot).map(|entry| entry.type_id)
 }
 
 fn entry(sector: &[u8], slot: usize) -> Option<Entry> {

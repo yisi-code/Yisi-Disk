@@ -4,8 +4,8 @@
 
 use yisi_io::{BlockDevice, IoError};
 
-use crate::Guid;
 use crate::crc32::crc32;
+use crate::{Guid, gpt};
 
 /// 内存里的块设备。
 pub struct MemoryDisk {
@@ -110,11 +110,16 @@ impl MbrEntry {
 }
 
 fn put_mbr_entry(sector: &mut [u8], slot: usize, entry: &MbrEntry) {
-    let at = 446 + slot * 16;
-    sector[at] = if entry.bootable { 0x80 } else { 0 };
-    sector[at + 4] = entry.type_id;
-    sector[at + 8..at + 12].copy_from_slice(&entry.start.to_le_bytes());
-    sector[at + 12..at + 16].copy_from_slice(&entry.sectors.to_le_bytes());
+    let status = if entry.bootable { 0x80 } else { 0 };
+    crate::mbr::put_entry(
+        sector,
+        slot,
+        status,
+        entry.type_id,
+        entry.start,
+        entry.sectors,
+    )
+    .unwrap();
 }
 
 /// `size` 字节的镜像，开头是带 `entries`（最多 4 项）的 MBR，位置按 512 字节扇区。
@@ -190,14 +195,16 @@ pub fn gpt_disk(sectors: u64, sector_size: u32, entries: &[GptEntry]) -> Vec<u8>
     let mut table = vec![0u8; GPT_ENTRY_COUNT * GPT_ENTRY_SIZE];
     for (index, entry) in entries.iter().enumerate() {
         let at = index * GPT_ENTRY_SIZE;
-        let slot = &mut table[at..at + GPT_ENTRY_SIZE];
-        slot[..16].copy_from_slice(&entry.type_guid.0);
-        slot[16..32].copy_from_slice(&[index as u8 + 1; 16]);
-        slot[32..40].copy_from_slice(&entry.first.to_le_bytes());
-        slot[40..48].copy_from_slice(&entry.last.to_le_bytes());
-        for (unit_index, unit) in entry.name.encode_utf16().take(36).enumerate() {
-            slot[56 + unit_index * 2..58 + unit_index * 2].copy_from_slice(&unit.to_le_bytes());
-        }
+        gpt::put_entry(
+            &mut table[at..at + GPT_ENTRY_SIZE],
+            entry.type_guid,
+            Guid([index as u8 + 1; 16]),
+            entry.first,
+            entry.last,
+            0,
+            &entry.name,
+        )
+        .unwrap();
     }
     let table_sectors = (table.len() / sector) as u64;
     let last = sectors - 1;
@@ -205,21 +212,28 @@ pub fn gpt_disk(sectors: u64, sector_size: u32, entries: &[GptEntry]) -> Vec<u8>
     let table_crc = crc32(&[&table]);
 
     for (my_lba, alternate, entries_lba) in [(1, last, 2), (last, 1, backup_entries)] {
-        let mut header = vec![0u8; 92];
-        header[..8].copy_from_slice(b"EFI PART");
+        let mut header = vec![0u8; gpt::HEADER_SIZE];
+        header[..8].copy_from_slice(gpt::SIGNATURE);
         header[8..12].copy_from_slice(&0x0001_0000u32.to_le_bytes());
-        header[12..16].copy_from_slice(&92u32.to_le_bytes());
-        header[24..32].copy_from_slice(&my_lba.to_le_bytes());
-        header[32..40].copy_from_slice(&alternate.to_le_bytes());
-        header[40..48].copy_from_slice(&(2 + table_sectors).to_le_bytes());
-        header[48..56].copy_from_slice(&(backup_entries - 1).to_le_bytes());
+        header[gpt::HEADER_SIZE_AT..gpt::HEADER_SIZE_AT + 4]
+            .copy_from_slice(&(gpt::HEADER_SIZE as u32).to_le_bytes());
+        header[gpt::MY_LBA_AT..gpt::MY_LBA_AT + 8].copy_from_slice(&my_lba.to_le_bytes());
+        header[gpt::ALTERNATE_LBA_AT..gpt::ALTERNATE_LBA_AT + 8]
+            .copy_from_slice(&alternate.to_le_bytes());
+        header[gpt::FIRST_USABLE_AT..gpt::FIRST_USABLE_AT + 8]
+            .copy_from_slice(&(2 + table_sectors).to_le_bytes());
+        header[gpt::LAST_USABLE_AT..gpt::LAST_USABLE_AT + 8]
+            .copy_from_slice(&(backup_entries - 1).to_le_bytes());
         header[56..72].copy_from_slice(&[0x5A; 16]);
-        header[72..80].copy_from_slice(&entries_lba.to_le_bytes());
-        header[80..84].copy_from_slice(&(GPT_ENTRY_COUNT as u32).to_le_bytes());
-        header[84..88].copy_from_slice(&(GPT_ENTRY_SIZE as u32).to_le_bytes());
-        header[88..92].copy_from_slice(&table_crc.to_le_bytes());
-        let header_crc = crc32(&[&header]);
-        header[16..20].copy_from_slice(&header_crc.to_le_bytes());
+        header[gpt::ENTRIES_LBA_AT..gpt::ENTRIES_LBA_AT + 8]
+            .copy_from_slice(&entries_lba.to_le_bytes());
+        header[gpt::ENTRY_COUNT_AT..gpt::ENTRY_COUNT_AT + 4]
+            .copy_from_slice(&(GPT_ENTRY_COUNT as u32).to_le_bytes());
+        header[gpt::ENTRY_SIZE_AT..gpt::ENTRY_SIZE_AT + 4]
+            .copy_from_slice(&(GPT_ENTRY_SIZE as u32).to_le_bytes());
+        header[gpt::ENTRIES_CRC_AT..gpt::ENTRIES_CRC_AT + 4]
+            .copy_from_slice(&table_crc.to_le_bytes());
+        gpt::seal_header(&mut header).unwrap();
 
         let at = my_lba as usize * sector;
         image[at..at + 92].copy_from_slice(&header);

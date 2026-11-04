@@ -4,6 +4,7 @@
 
 pub mod bytes;
 pub mod crc32;
+mod edit;
 mod gpt;
 mod guid;
 mod mbr;
@@ -12,8 +13,9 @@ mod role;
 pub mod samples;
 mod table;
 
+pub use edit::{EditError, GPT_DATA_NAME, TableEdit, plan_table_edit};
 pub use guid::Guid;
-pub use role::Role;
+pub use role::{BASIC_DATA, Role};
 pub use table::{Note, PartError, Partition, PartitionKind, PartitionTable, Scheme, read_table};
 
 #[cfg(test)]

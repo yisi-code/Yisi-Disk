@@ -321,6 +321,26 @@ function openFailure(partition: PartitionBoot): string | null {
   return first === undefined ? null : t('repair.result.openFailed', { reason: first.openError })
 }
 
+/** 分区表里的类型与文件系统不符：可以改成对的类型 */
+function hasTypeMismatch(partition: PartitionBoot): boolean {
+  return partition.tableIssues.some((issue) => issue.code === 'typeMismatch')
+}
+
+/** 生成改分区类型的计划（宿主先存好备份），之后显示确认内容 */
+async function proposeTypeFix(partition: PartitionBoot) {
+  const source = diagnosedTarget.value
+  if (source === null || isBusy.value) {
+    return
+  }
+  fixingNumber.value = partition.number
+  try {
+    await closeBrowse()
+    await writePlan.prepareTableFix(source, { kind: 'setType', partition: partition.number })
+  } finally {
+    fixingNumber.value = null
+  }
+}
+
 /** 能修的方向：主坏备好时用备份修主引导扇区，主好备坏时用主引导扇区修备份 */
 function fixDirection(partition: PartitionBoot): BootFix | null {
   if (partition.verdict === 'primaryDamaged' && partition.backup?.issues.length === 0) {
@@ -556,6 +576,16 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
                 {{ tableIssueText(partition, issue) }}
               </li>
             </ul>
+            <div v-if="canWrite && hasTypeMismatch(partition)" class="repair-wizard__actions">
+              <button
+                class="wizard__button wizard__button--secondary"
+                type="button"
+                :disabled="isBusy"
+                @click="proposeTypeFix(partition)"
+              >
+                {{ t('repair.fix.setType') }}
+              </button>
+            </div>
           </template>
 
           <p v-if="openFailure(partition)" class="wizard__hint">{{ openFailure(partition) }}</p>
