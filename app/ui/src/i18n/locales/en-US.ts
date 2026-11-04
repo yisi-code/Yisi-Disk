@@ -862,8 +862,8 @@ const enUS: typeof zhCN = {
     results: {
       separator: ' ',
       mode: {
-        quick: 'Quick search:',
-        deep: 'Deep search:',
+        quick: 'Quick search.',
+        deep: 'Deep search.',
       },
       summary: 'Found {count} partition. | Found {count} partitions.',
       none: 'No FAT, exFAT or NTFS partitions were found. You can still try "Recover files by type" for the files.',
