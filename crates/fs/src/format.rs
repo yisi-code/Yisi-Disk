@@ -35,6 +35,11 @@ impl FatWidth {
         }
     }
 
+    /// 标成坏簇时写的值。
+    pub fn bad_cluster(self) -> u32 {
+        self.markers().0
+    }
+
     /// 坏簇标记与链尾标记（不小于它的都是链尾）。
     fn markers(self) -> (u32, u32) {
         match self {

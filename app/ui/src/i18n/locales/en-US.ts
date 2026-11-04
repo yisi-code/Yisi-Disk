@@ -177,9 +177,9 @@ const enUS: typeof zhCN = {
     },
     fsCheck: {
       name: 'Check a file system',
-      summary: 'Checks, read-only, that the FAT and exFAT boot region, FAT chains, allocation bitmap and directory entries agree, and lists the problems and how they can be repaired later. Nothing on the disk is changed.',
+      summary: 'Checks that the FAT and exFAT boot region, FAT chains, allocation bitmap and directory entries agree and lists the problems; lost clusters, broken chains, cross-links, FAT copies that disagree, directory entries, bitmap gaps, unreadable free clusters and more can be ticked for repair. The check itself is read-only.',
       suits: 'The partition opens but file names are garbled, folders will not open, the space does not add up, or Windows asks to scan and fix after unplugging.',
-      limits: 'NTFS gets only the boot sector and master file table checks. FAT copies that disagree, cross-links, broken chains and damaged directory entries are only reported in this version.',
+      limits: 'NTFS gets only the boot sector and master file table checks. On FAT and exFAT, a damaged allocation bitmap or up-case table itself and unreadable folders are only reported in this version.',
     },
     image: {
       name: 'Create a disk image (bad-sector aware)',
@@ -1053,6 +1053,12 @@ const enUS: typeof zhCN = {
       tooLong: 'Shortens the FAT chain of {items} file(s), freeing {clusters} extra cluster(s)',
       lost: 'Frees {items} run(s) of lost clusters ({clusters} cluster(s))',
       dirty: 'Marks the volume as cleanly unmounted',
+      fatFromFirst: 'Takes the first FAT as correct and rewrites the {items} differing sector(s) of the second',
+      fatFromSecond: 'Takes the second FAT as correct and rewrites the {items} differing sector(s) of the first',
+      chains: 'Ends {items} broken chain(s) and adjusts the file sizes',
+      crossLinks: 'Gives {items} cross-linked file(s) their own copy of {clusters} cluster(s)',
+      entries: 'Repairs {items} directory entry problem(s)',
+      badClusters: 'Marks {clusters} unreadable free cluster(s) ({items} run(s)) as bad',
     },
     fsFixRollbackValue: 'Restores these locations to what they were before the repair',
     mftTable: 'master file table',
@@ -1186,6 +1192,40 @@ const enUS: typeof zhCN = {
       intro: 'Tick the kinds of problem to repair and prepare a write plan; nothing is written until you confirm. A backup is saved first, the result is read back, and it can be rolled back. Repair an image first, then the original disk.',
       count: '{count} place | {count} places',
       lostCount: '{clusters} cluster | {clusters} clusters',
+      crossCount: '{items} file, {clusters} cluster(s) | {items} files, {clusters} cluster(s)',
+      labelWithCount: '{label} ({count})',
+      fatCopies: {
+        label: 'Make the two FATs the same',
+        hint: 'The two copies disagree: choose one as correct and the {sectors} differing sector(s) of the other are rewritten. Below is what each direction leaves behind.',
+        fatFromFirst: 'Take the first copy as correct',
+        fatFromSecond: 'Take the second copy as correct',
+        recommended: ' (recommended)',
+        rating: 'Trying both directions; the partition is checked twice…',
+        left: 'Leaves {dataLoss} data loss, {structure} structure and {minor} minor problem(s)',
+        clean: 'Leaves no problems',
+        alone: 'Making the FATs the same is done on its own: the partition is checked again afterwards, then repair the rest.',
+      },
+      chains: {
+        label: 'Repair broken chains',
+        hint: 'Each chain ends where it breaks and the file size shrinks to match; files whose first cluster is invalid become empty. Copy these files out first, as much as can be read.',
+      },
+      crossLinks: {
+        label: 'Separate cross-linked files',
+        hint: 'Two files share clusters: the later one gets its own copy on free clusters, so the current contents of both are kept. One of them was wrong to begin with; check them afterwards.',
+      },
+      entries: {
+        label: 'Repair directory entries',
+        hint: 'exFAT entry counts, name lengths and checksums are recalculated from the entries present; orphaned entries and long names that do not match are marked deleted (the file keeps its short name); the . and .. entries of folders are rewritten.',
+      },
+      badClusters: {
+        label: 'Mark unreadable free clusters as bad',
+        hint: 'Unreadable free clusters are marked bad so nothing is written to them again; clusters that belong to files are left alone.',
+        scan: 'Read the free clusters…',
+        scanning: 'Reading free clusters: {done} / {total}',
+        scanned: 'Read {size} of free space; {count} cluster(s) could not be read.',
+        scannedClean: 'Read {size} of free space; everything could be read, nothing to mark.',
+        scanFirst: 'The source disk is only read; a lot of free space takes a long time.',
+      },
       fsInfo: {
         label: 'Rewrite the FSInfo sector',
         hint: 'The free cluster count is marked unknown; Windows recounts it when mounting.',
@@ -1387,7 +1427,7 @@ const enUS: typeof zhCN = {
       fatCopiesDiffer: {
         title: 'The two FATs differ in {count} place, starting at cluster {cluster} | The two FATs differ in {count} places, starting at cluster {cluster}',
         detail: 'The two FATs should be identical; a difference means a write was interrupted. The check uses the first FAT.',
-        fix: 'Later, once it is clear which copy is right, it can overwrite the other.',
+        fix: 'From the Repair section above, choose one copy as correct; what each direction leaves behind is shown first.',
       },
       fatMediaMismatch: {
         title: 'FAT entry 0 ({actual}) does not match the media descriptor in the boot sector ({expected})',
@@ -1417,32 +1457,32 @@ const enUS: typeof zhCN = {
       firstClusterInvalid: {
         title: '{path}: invalid first cluster {actual}',
         detail: 'The recorded data location of this file or folder is broken, so its contents cannot be read.',
-        fix: 'Later the file can be truncated to 0 bytes or the broken folder entry removed; try "Deep recovery by file type" for the contents.',
+        fix: 'The file can be made empty from the Repair section above; try "Deep recovery by file type" for the contents first.',
       },
       chainOutOfRange: {
         title: '{path}: the FAT chain points outside the cluster area at cluster {cluster} ({actual})',
         detail: 'The rest of the file after this point cannot be found.',
-        fix: 'Later the chain can be ended here and the file truncated to the readable part.',
+        fix: 'Copy the file out first, then end the chain here from the Repair section above.',
       },
       chainLoop: {
         title: '{path}: the FAT chain loops back at cluster {cluster}',
         detail: 'The chain forms a loop: programs reading this file may never stop, and the contents read are wrong.',
-        fix: 'Later the chain can be ended before the loop and the file truncated to the readable part.',
+        fix: 'Copy the file out first, then end the chain before the loop from the Repair section above.',
       },
       chainFree: {
         title: '{path}: the FAT chain breaks at cluster {cluster} (the cluster is free in the FAT)',
         detail: 'The rest of the file cannot be found, and this cluster may be taken by a new file at any time.',
-        fix: 'Later the chain can be ended here and the file truncated; the clusters after the break can be saved as orphan files to look at.',
+        fix: 'End the chain here from the Repair section above; the clusters after the break become lost clusters, which can be saved before freeing.',
       },
       chainBadCluster: {
         title: '{path}: the FAT chain passes through cluster {cluster}, which is marked bad',
         detail: 'This cluster had read or write errors before, and the chain breaks here.',
-        fix: 'Make an image first; later the file can be truncated to before the bad cluster.',
+        fix: 'Make an image first; the file can be truncated to before the bad cluster from the Repair section above.',
       },
       chainTooShort: {
         title: '{path}: the FAT chain has only {actual} cluster, but the file size needs {expected} | {path}: the FAT chain has only {actual} clusters, but the file size needs {expected}',
         detail: 'The end of the file has no space allocated, so it reads incomplete.',
-        fix: 'Later the file size can be set to what the chain holds.',
+        fix: 'Set the file size to what the chain holds from the Repair section above.',
       },
       chainTooLong: {
         title: '{path}: the FAT chain has {actual} cluster, but the file size needs only {expected} | {path}: the FAT chain has {actual} clusters, but the file size needs only {expected}',
@@ -1452,7 +1492,7 @@ const enUS: typeof zhCN = {
       crossLink: {
         title: '{path} and {otherPath} share {count} cluster (from cluster {cluster}) | {path} and {otherPath} share {count} clusters (from cluster {cluster})',
         detail: 'Two files occupy the same space, so at least one of them has wrong contents; changing one corrupts the other.',
-        fix: 'Copy both files out and compare them first; later one of them can get its own copy of the clusters.',
+        fix: 'Copy both files out and compare them first; the later one can get its own copy of the clusters from the Repair section above.',
       },
       lostClusters: {
         title: '{count} cluster from cluster {cluster} is in use but not referenced by any file | {count} clusters from cluster {cluster} are in use but not referenced by any file',
@@ -1472,42 +1512,42 @@ const enUS: typeof zhCN = {
       sizeInvalid: {
         title: '{path}: the valid data length ({actual}) is larger than the file length ({expected})',
         detail: 'The length records contradict each other, so the length read may be wrong.',
-        fix: 'Later the valid data length can be set to no more than the file length.',
+        fix: 'Set the valid data length to the file length from the Repair section above.',
       },
       entrySetChecksum: {
         title: '{path}: the directory entry checksum is wrong',
         detail: 'Windows treats this entry set as damaged, so the file may not show up or open; the check still verified its clusters using the recorded contents.',
-        fix: 'Later the checksum can be recalculated.',
+        fix: 'Recalculate the checksum from the Repair section above.',
       },
       entrySetCount: {
         title: '{path}: the directory entry lists {expected} secondary entries, but only {actual} follows | {path}: the directory entry lists {expected} secondary entries, but only {actual} follow',
         detail: 'This entry set is incomplete; part of the file name or location may be lost.',
-        fix: 'Later the secondary count can be corrected to the entries present, or the set removed.',
+        fix: 'Correct the secondary count to the entries present from the Repair section above.',
       },
       entryNameLength: {
         title: '{path}: the file name length does not match the name entries (should be {expected}, found {actual})',
         detail: 'The file name may show truncated or garbled.',
-        fix: 'Later the length can be corrected from the name entries.',
+        fix: 'Correct the length from the name entries in the Repair section above.',
       },
       orphanEntries: {
         title: '{path}: {count} directory entry belongs to no file | {path}: {count} directory entries belong to no file',
         detail: 'Most likely left over from an interrupted directory write; other files are not affected.',
-        fix: 'Later these entries can be cleared.',
+        fix: 'Mark these entries deleted from the Repair section above.',
       },
       lfnChecksum: {
         title: '{path}: the long file name does not match the short name',
         detail: 'The system ignores this long name and shows only the 8.3 short name.',
-        fix: 'Later the long name checksum can be recalculated.',
+        fix: 'Mark the mismatched long name entries deleted from the Repair section above; the file keeps its short name.',
       },
       lfnOrder: {
         title: '{path}: the long file name parts are out of order, or there are stray long name entries',
         detail: 'The long name may show incomplete or be ignored.',
-        fix: 'Later the broken long name entries can be cleared.',
+        fix: 'Mark the broken long name entries deleted from the Repair section above.',
       },
       dotEntries: {
         title: '{path}: the "." and ".." entries at the start are missing or point to the wrong place',
         detail: 'Some programs use these entries to go up a folder and may fail to open this folder.',
-        fix: 'Later these two entries can be rewritten.',
+        fix: 'Rewrite these two entries from the Repair section above.',
       },
       tooDeep: {
         title: '{path}: folders are nested too deeply; the check did not go further',

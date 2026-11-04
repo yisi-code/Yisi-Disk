@@ -9,7 +9,7 @@ pub(crate) use yisi_fs::format::{Run, push_run};
 use crate::check::disk::Span;
 use crate::check::issue::{Area, Issue, IssueKind};
 use crate::check::table::{FatTable, Link, Owners};
-use crate::check::{CheckItem, Ctx, LongChain, Stage};
+use crate::check::{BrokenChain, CheckItem, CrossLinked, Ctx, EntryRef, LongChain, Stage};
 
 /// 一个目录最多读这么多字节（FAT 规范的上限是 2 MiB，exFAT 是 256 MiB）。
 pub(crate) const MAX_DIR_BYTES: u64 = 256 << 20;
@@ -19,6 +19,44 @@ pub(crate) const MAX_DEPTH: usize = 256;
 const STEP_CHECKPOINT: u64 = 1 << 16;
 /// 丢失簇最多逐段列出这么多段，其余的合成一项。
 const MAX_LOST_RUNS: usize = 100;
+
+/// 目录内容在分区里的位置：FAT12/16 的根目录区，或者按顺序拼起来的一串簇。
+#[derive(Clone, Copy)]
+pub(crate) enum Place<'a> {
+    Fixed(u64),
+    Runs {
+        runs: &'a [Run],
+        count: u32,
+        cluster_size: u64,
+        heap_offset: u64,
+    },
+}
+
+impl Place<'_> {
+    /// 内容里第 `byte` 个字节在分区里的位置。
+    pub fn locate(&self, byte: u64) -> Option<u64> {
+        match *self {
+            Self::Fixed(offset) => offset.checked_add(byte),
+            Self::Runs {
+                runs,
+                count,
+                cluster_size,
+                heap_offset,
+            } => {
+                let mut rest = byte;
+                for run in runs {
+                    let length = u64::from(run.count) * cluster_size;
+                    if rest < length {
+                        return cluster_offset(run.first, count, cluster_size, heap_offset)?
+                            .checked_add(rest);
+                    }
+                    rest -= length;
+                }
+                None
+            }
+        }
+    }
+}
 
 /// 文件的簇怎么找。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,7 +111,9 @@ impl Volume {
         ctx.control.progress(Stage::Directories, total, total);
     }
 
-    /// 认领 `id` 的簇，发现的问题记在 `path` 名下。被取消时返回 `None`。
+    /// 认领 `id` 的簇，发现的问题记在 `path` 名下；`entry` 是它的目录项（系统结构没有），修复要用。
+    /// 被取消时返回 `None`。
+    #[allow(clippy::too_many_arguments)]
     pub fn walk(
         &mut self,
         ctx: &mut Ctx,
@@ -82,6 +122,7 @@ impl Volume {
         first: u32,
         layout: Layout,
         keep_runs: bool,
+        entry: Option<&EntryRef>,
     ) -> Option<Walk> {
         let mut walk = Walk {
             runs: Vec::new(),
@@ -100,29 +141,50 @@ impl Volume {
                     .path(path)
                     .actual(u64::from(first)),
             );
+            self.broken(
+                ctx,
+                IssueKind::FirstClusterInvalid,
+                path,
+                entry,
+                None,
+                0,
+                true,
+            );
             return Some(walk);
         }
         let mut claim = Claim::new(id);
         let mut steps = 0u64;
         let mut cluster = first;
-        // 链过长时修复要用：按大小应保留的最后一簇，以及之后只属于这个文件的簇
+        let mut previous = None;
+        // 修复要用：整条链（按顺序）、与别人共用的位置；链过长时按大小应保留的最后一簇与之后只属于这个文件的簇
+        let mut chain = Vec::new();
+        let mut shared = Vec::new();
         let mut last_kept = None;
         let mut extra = Vec::new();
-        // 链中途出了问题（已记下）：链长就不再另算
+        // 链中途出了问题（已记下）：链长就不再另算；能修时记下修法（问题类型、在哪写链尾、保留几个簇）
         let mut broken = false;
+        let mut cut: Option<(IssueKind, Option<u32>, u64)> = None;
         loop {
             let taken = claim.take(self, ctx, path, cluster);
             let mine = matches!(taken, Taken::Mine);
+            if entry.is_some() {
+                chain.push(cluster);
+            }
             match taken {
                 Taken::Mine => {}
                 Taken::Shared => {
                     if steps == 0 {
                         walk.first_taken = true;
                     }
+                    shared.push(chain.len().saturating_sub(1));
                 }
                 Taken::Loop => broken = true,
             }
             steps += 1;
+            if broken {
+                // 前一个簇指回了走过的簇：在前一个簇处结束
+                cut = Some((IssueKind::ChainLoop, previous, steps - 1));
+            }
             if let Layout::Chain {
                 needed: Some(needed),
             } = layout
@@ -164,6 +226,7 @@ impl Volume {
                                     .actual(u64::from(cluster) + 1),
                             );
                             broken = true;
+                            cut = Some((IssueKind::ChainOutOfRange, None, steps));
                             break;
                         }
                     }
@@ -174,32 +237,51 @@ impl Volume {
                         ctx.issues
                             .push(Issue::new(IssueKind::ChainLoop).path(path).cluster(cluster));
                         broken = true;
+                        cut = Some((IssueKind::ChainLoop, Some(cluster), steps));
                         break;
                     }
-                    let kind = match self.fat.link(ctx, cluster) {
+                    let (issue, fix) = match self.fat.link(ctx, cluster) {
                         Link::Next(next) => {
+                            previous = Some(cluster);
                             cluster = next;
                             continue;
                         }
                         Link::End => break,
-                        // 表项读不出：已记为读不出的区段，链长无从核对
+                        // 表项读不出：已记为读不出的区段，链长无从核对，也不修
                         Link::Unknown => {
                             broken = true;
                             break;
                         }
-                        Link::Free => Issue::new(IssueKind::ChainFree).cluster(cluster),
-                        Link::Bad => Issue::new(IssueKind::ChainBadCluster).cluster(cluster),
-                        Link::Invalid(value) => Issue::new(IssueKind::ChainOutOfRange)
-                            .cluster(cluster)
-                            .actual(u64::from(value)),
+                        // 表项是空闲或不合法的值：这个簇留着，在它这里结束
+                        Link::Free => (
+                            Issue::new(IssueKind::ChainFree).cluster(cluster),
+                            (IssueKind::ChainFree, Some(cluster), steps),
+                        ),
+                        Link::Invalid(value) => (
+                            Issue::new(IssueKind::ChainOutOfRange)
+                                .cluster(cluster)
+                                .actual(u64::from(value)),
+                            (IssueKind::ChainOutOfRange, Some(cluster), steps),
+                        ),
+                        // 走进了标成坏簇的簇：不要它，在前一个簇处结束
+                        Link::Bad => (
+                            Issue::new(IssueKind::ChainBadCluster).cluster(cluster),
+                            (IssueKind::ChainBadCluster, previous, steps - 1),
+                        ),
                     };
-                    ctx.issues.push(kind.path(path));
+                    ctx.issues.push(issue.path(path));
                     broken = true;
+                    cut = Some(fix);
                     break;
                 }
             }
         }
         claim.finish(self, ctx, path);
+        if let Some((kind, end_at, kept)) = cut {
+            // 连续存放的文件没有 FAT 链，只改大小
+            let end_at = end_at.filter(|_| matches!(layout, Layout::Chain { .. }));
+            self.broken(ctx, kind, path, entry, end_at, kept, kept == 0);
+        }
         if let (Some(needed), false) = (needed, broken) {
             if steps < needed {
                 ctx.issues.push(
@@ -207,6 +289,15 @@ impl Volume {
                         .path(path)
                         .expected(needed)
                         .actual(steps),
+                );
+                self.broken(
+                    ctx,
+                    IssueKind::ChainTooShort,
+                    path,
+                    entry,
+                    None,
+                    steps,
+                    false,
                 );
             } else if steps > needed {
                 ctx.issues.push(
@@ -224,7 +315,65 @@ impl Volume {
                 }
             }
         }
+        if let Some(entry) = entry
+            && !shared.is_empty()
+            && !broken
+            && !entry.directory
+            && matches!(layout, Layout::Chain { .. })
+        {
+            ctx.findings.cross.push(CrossLinked {
+                path: path.to_owned(),
+                at: entry.at.clone(),
+                chain,
+                shared,
+            });
+        }
         Some(walk)
+    }
+
+    /// 记下断链的修法：保留 `kept` 个簇，在 `end_at` 写链尾。没有目录项（系统结构）、FAT 的目录要清空时不修。
+    #[allow(clippy::too_many_arguments)]
+    fn broken(
+        &self,
+        ctx: &mut Ctx,
+        kind: IssueKind,
+        path: &str,
+        entry: Option<&EntryRef>,
+        end_at: Option<u32>,
+        kept: u64,
+        empty: bool,
+    ) {
+        let Some(entry) = entry else {
+            return;
+        };
+        // FAT 的目录没有大小，清空不了（起始簇为 0 表示根目录）
+        if empty && entry.size.is_none() {
+            return;
+        }
+        ctx.findings.broken.push(BrokenChain {
+            kind,
+            path: path.to_owned(),
+            at: entry.at.clone(),
+            end_at: end_at.filter(|_| !empty),
+            size: entry
+                .size
+                .map(|size| size.min(kept.saturating_mul(self.cluster_size))),
+            empty,
+        });
+    }
+
+    /// 目录内容里第 `byte` 个字节在分区里的位置（[`Place`]）。
+    pub fn locate(&self, runs: &[Run], byte: u64) -> Option<u64> {
+        self.place(runs).locate(byte)
+    }
+
+    pub fn place<'a>(&self, runs: &'a [Run]) -> Place<'a> {
+        Place::Runs {
+            runs,
+            count: self.fat.count,
+            cluster_size: self.cluster_size,
+            heap_offset: self.heap_offset,
+        }
     }
 
     /// 读一串簇的内容（至多 [`MAX_DIR_BYTES`]），返回内容与读不出的区段（相对内容起点）。
@@ -260,12 +409,14 @@ impl Volume {
         (data, bad)
     }
 
-    /// 逐簇汇总：`allocated` 说明一个簇在 FAT 或分配位图里是否已占用（读不出时为 `None`）。
-    /// 已占用却没人认领的是丢失簇；`check_bitmap` 时，有人认领却未占用的按文件汇总成「不在位图里」。
+    /// 逐簇汇总：`allocated` 说明一个簇在 FAT 或分配位图里是否已占用（读不出时为 `None`），`marked_bad` 说明
+    /// 已占用、没人认领的簇是不是标成了坏簇（exFAT 的坏簇在位图里占用）。已占用却没人认领的是丢失簇；
+    /// `check_bitmap` 时，有人认领却未占用的按文件汇总成「不在位图里」。
     pub fn sweep(
         &mut self,
         ctx: &mut Ctx,
         allocated: &mut dyn FnMut(&mut Ctx, &mut FatTable, u32) -> Option<bool>,
+        marked_bad: &mut dyn FnMut(&mut Ctx, &mut FatTable, u32) -> bool,
         check_bitmap: bool,
     ) -> Option<()> {
         if !self.owners.tracking() {
@@ -294,7 +445,10 @@ impl Volume {
                 continue;
             };
             match (used, self.owners.owner(cluster)) {
+                // 占用而标成坏簇的（exFAT 标坏簇时位图里也占用）：不算丢失
+                (true, None) if marked_bad(ctx, &mut self.fat, cluster) => {}
                 (true, None) => push_run(&mut lost, cluster),
+                (false, None) => push_run(&mut ctx.findings.free, cluster),
                 (false, Some(owner)) if check_bitmap => {
                     push_run(&mut ctx.findings.not_in_bitmap, cluster);
                     match missing_at.get(&owner) {

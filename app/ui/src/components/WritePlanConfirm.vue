@@ -64,20 +64,23 @@ const rootText = computed(() => {
   })
 })
 
-const whatText = computed(() => {
+/** 修文件系统时每类改了什么，逐条列出；回滚时只说恢复原样（`whatText`） */
+const fsFixItems = computed(() => {
   const fsFix = fsFixDetail.value
-  if (fsFix !== null) {
-    if (props.plan.kind === 'rollback') {
-      return t('writePlan.fsFixRollbackValue')
-    }
-    return fsFix.counts
-      .map((count) =>
-        t(`writePlan.fsFixValue.${count.fix}`, {
-          items: count.items.toLocaleString(locale.value),
-          clusters: count.clusters.toLocaleString(locale.value),
-        }),
-      )
-      .join(t('writePlan.listSeparator'))
+  if (fsFix === null || props.plan.kind === 'rollback') {
+    return []
+  }
+  return fsFix.counts.map((count) =>
+    t(`writePlan.fsFixValue.${count.fix}`, {
+      items: count.items.toLocaleString(locale.value),
+      clusters: count.clusters.toLocaleString(locale.value),
+    }),
+  )
+})
+
+const whatText = computed(() => {
+  if (fsFixDetail.value !== null) {
+    return props.plan.kind === 'rollback' ? t('writePlan.fsFixRollbackValue') : null
   }
   const mft = mftDetail.value
   if (mft !== null) {
@@ -149,7 +152,15 @@ function position(offset: number): string {
           }}
         </dd>
       </template>
-      <template v-if="whatText">
+      <template v-if="fsFixItems.length > 0">
+        <dt>{{ t('writePlan.what') }}</dt>
+        <dd>
+          <ul class="wizard__list">
+            <li v-for="item in fsFixItems" :key="item">{{ item }}</li>
+          </ul>
+        </dd>
+      </template>
+      <template v-else-if="whatText">
         <dt>{{ t('writePlan.what') }}</dt>
         <dd>{{ whatText }}</dd>
       </template>

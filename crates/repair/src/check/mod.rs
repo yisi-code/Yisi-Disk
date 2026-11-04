@@ -154,6 +154,87 @@ pub struct Findings {
     pub fs_info_invalid: bool,
     /// 各份 FAT 不一致。
     pub fat_copies_differ: bool,
+    /// 两份 FAT 不一致时哪几处不同（只有两份时给出；三份以上不修）。
+    pub fat_copies: Option<FatCopies>,
+    /// 断了的链：在哪里截断、文件大小改成多少。
+    pub broken: Vec<BrokenChain>,
+    /// 交叉链接里后认领的那个文件（只收沿 FAT 链存放、链本身没断的文件）。
+    pub cross: Vec<CrossLinked>,
+    /// 目录项要改的地方。
+    pub entries: Vec<EntryFix>,
+    /// 真正空闲的簇（FAT 或分配位图里空闲、也没人认领），按簇号排序：修交叉链接时从这里取新簇，
+    /// 找坏簇时只读这些簇。FAT 里标成坏簇的也在里面，用之前要再看一眼表项。
+    pub free: Vec<Run>,
+}
+
+/// 两份 FAT 的位置与不同之处（分区内字节偏移，按扇区对齐的区段，相对每份 FAT 的起点）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FatCopies {
+    pub copies: [u64; 2],
+    pub differing: Vec<(u64, u64)>,
+}
+
+/// 一个文件或目录的目录项在分区里的位置。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryAt {
+    /// FAT：短文件名那一项。
+    Fat(u64),
+    /// exFAT：整组项，第一项是文件项、第二项是流扩展项。
+    Exfat(Vec<u64>),
+}
+
+/// 认领簇的是哪个目录项；系统结构（exFAT 的分配位图、大写表）没有。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryRef {
+    pub at: EntryAt,
+    /// 记录的大小；FAT 的目录没有大小，为 `None`。
+    pub size: Option<u64>,
+    pub directory: bool,
+}
+
+/// 断了的链（起始簇不合法、越界、成环、指向空闲簇或坏簇、比大小短）。修法与 Windows 磁盘检查相同：
+/// 在 `end_at` 写链尾（为 `None` 时不改链），大小改成 `size`（目录没有大小时为 `None`）；
+/// `empty` 时起始簇与大小都改成 0。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokenChain {
+    pub kind: IssueKind,
+    pub path: String,
+    pub at: EntryAt,
+    pub end_at: Option<u32>,
+    pub size: Option<u64>,
+    pub empty: bool,
+}
+
+/// 交叉链接：`path` 是后认领的文件，`chain` 是它的整条链（按顺序），`shared` 是其中与别人共用的位置。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrossLinked {
+    pub path: String,
+    pub at: EntryAt,
+    pub chain: Vec<u32>,
+    pub shared: Vec<usize>,
+}
+
+/// 目录项的一处修改；`kinds` 是它修的那几类问题（一组 exFAT 目录项可能同时有几类）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryFix {
+    pub kinds: Vec<IssueKind>,
+    pub path: String,
+    pub change: EntryChange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryChange {
+    /// exFAT：重算这组项的校验和（`entries` 是改后的整组项，次项个数、文件名长度一并改成给出的值）。
+    ExfatSet {
+        entries: Vec<u64>,
+        count: Option<u8>,
+        name_length: Option<u8>,
+        valid_length: Option<u64>,
+    },
+    /// 标为已删除：FAT 首字节改成 0xE5，exFAT 清掉类型的第 7 位。
+    Delete { at: Vec<u64>, exfat: bool },
+    /// FAT 子目录开头的 `.` 与 `..`：`at` 是第一项的位置，`parent` 为 0 表示上级是根目录。
+    Dots { at: u64, cluster: u32, parent: u32 },
 }
 
 /// FAT / exFAT 的结构在分区里的位置（字节偏移）。
