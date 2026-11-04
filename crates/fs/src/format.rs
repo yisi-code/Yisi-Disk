@@ -428,6 +428,11 @@ pub fn exfat_table_checksum(bytes: &[u8]) -> u32 {
     })
 }
 
+/// exFAT 规范推荐的压缩大写表，Windows 格式化 exFAT 时写的就是它：5836 字节，校验和 [`EXFAT_UPCASE_CHECKSUM`]。
+/// 取自 Windows 格式化的卷，按规范公布的长度与校验和核对过。修复大写表时写回它。
+pub const EXFAT_UPCASE_TABLE: &[u8] = include_bytes!("exfat_upcase.bin");
+pub const EXFAT_UPCASE_CHECKSUM: u32 = 0xE619_D30D;
+
 /// 目录项集合的校验和：逐字节循环右移一位再加，跳过文件项里存校验和的第 2、3 字节；每项的类型字节按使用中计算。
 pub fn exfat_set_checksum(entries: &[[u8; 32]]) -> u16 {
     let mut checksum = 0u16;
@@ -450,6 +455,23 @@ pub fn exfat_set_checksum(entries: &[[u8; 32]]) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_standard_upcase_table_matches_the_published_checksum() {
+        assert_eq!(EXFAT_UPCASE_TABLE.len(), 5836);
+        assert_eq!(
+            exfat_table_checksum(EXFAT_UPCASE_TABLE),
+            EXFAT_UPCASE_CHECKSUM
+        );
+        // 压缩格式：开头 a 到 z 映射成 A 到 Z
+        let unit = |index: usize| {
+            u16::from_le_bytes([
+                EXFAT_UPCASE_TABLE[index * 2],
+                EXFAT_UPCASE_TABLE[index * 2 + 1],
+            ])
+        };
+        assert_eq!((unit(0x61), unit(0x7A)), (0x41, 0x5A));
+    }
 
     #[test]
     fn fat_entries_decode_by_width() {

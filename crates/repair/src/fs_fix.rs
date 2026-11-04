@@ -15,6 +15,11 @@
 //!   子目录开头的 `.` 与 `..` 重写；有效长度不超过数据长度。
 //! - 坏簇：读不出的空闲簇在 FAT 里标成坏簇（exFAT 另在位图里标成占用），已属于文件的不动。读不出的位置由读空闲簇的
 //!   任务（引擎）找出，这里再读一次核对。
+//! - exFAT 大写表坏了或找不到：写回标准大写表（[`EXFAT_UPCASE_TABLE`]）；原来的簇够用就写回原处，不够或找不到时
+//!   另分配空闲簇（原来的簇释放），找不到表项时补在根目录的空项里。内容本来就是标准表、只是记的校验和不对时只改校验和。
+//! - exFAT 分配位图本身坏了：按检查认领的结果重建，写到空闲簇上，位图项改指新簇（找不到时补一项），旧位图的簇释放。
+//!   要单独做。
+//! - FAT 里起始簇不合法的子目录：分配一个空闲簇写上 `.` 与 `..`，改成空目录，名字留着（算在断链一类）。
 //!
 //! FAT 镜像时各份一起改，不镜像时只改在用的那份；各份 FAT 本来就不一致时，先统一两份 FAT 才改别的。主引导扇区
 //! 不能用（按备份检查的）时不修，先修引导扇区。预演：把写入叠加在源上再检查一遍，勾选的几类里计划修的那些必须消失，
@@ -26,7 +31,8 @@ use std::sync::Arc;
 use yisi_fs::FsKind;
 use yisi_fs::boot_write::fat32_fs_info;
 use yisi_fs::format::{
-    FatWidth, Run, exfat_set_checksum, fat_entry_raw, fat_entry_span, put_fat_entry,
+    EXFAT_TYPE_BITMAP, EXFAT_TYPE_UPCASE, EXFAT_UPCASE_CHECKSUM, EXFAT_UPCASE_TABLE, FatWidth, Run,
+    exfat_set_checksum, fat_entry_raw, fat_entry_span, put_fat_entry,
 };
 use yisi_io::{BlockDevice, MAX_PLAN_BYTES, MAX_WRITES, Overlay, SectorWrite};
 
@@ -58,10 +64,15 @@ pub enum FsFix {
     CrossLinks,
     Entries,
     BadClusters,
+    /// exFAT：写回标准大写表。
+    Upcase,
+    /// exFAT：按目录树重建分配位图（要单独做）。
+    RebuildBitmap,
 }
 
 /// 生成计划时按这个次序做：目录项在断链之前（有效长度先按原来的数据长度改，断链再一起截短）。
-const ORDER: [FsFix; 11] = [
+const ORDER: [FsFix; 13] = [
+    FsFix::RebuildBitmap,
     FsFix::FsInfo,
     FsFix::Bitmap,
     FsFix::TooLong,
@@ -73,6 +84,7 @@ const ORDER: [FsFix; 11] = [
     FsFix::Chains,
     FsFix::CrossLinks,
     FsFix::BadClusters,
+    FsFix::Upcase,
 ];
 
 impl FsFix {
@@ -105,6 +117,8 @@ impl FsFix {
                 IssueKind::SizeInvalid,
             ],
             Self::BadClusters => &[],
+            Self::Upcase => &[IssueKind::UpcaseChecksum, IssueKind::UpcaseMissing],
+            Self::RebuildBitmap => &[IssueKind::BitmapInvalid],
         }
     }
 
@@ -112,7 +126,13 @@ impl FsFix {
     fn touches_fat(self) -> bool {
         matches!(
             self,
-            Self::TooLong | Self::Lost | Self::Chains | Self::CrossLinks | Self::BadClusters
+            Self::TooLong
+                | Self::Lost
+                | Self::Chains
+                | Self::CrossLinks
+                | Self::BadClusters
+                | Self::Upcase
+                | Self::RebuildBitmap
         )
     }
 
@@ -127,6 +147,8 @@ impl FsFix {
                 | Self::Dirty
                 | Self::FatFromFirst
                 | Self::FatFromSecond
+                | Self::Upcase
+                | Self::RebuildBitmap
         )
     }
 
@@ -180,8 +202,12 @@ pub enum FsFixError {
     NothingToFix(FsFix),
     #[error("还有别的「会丢数据」或「结构错误」的问题，不清除未正常卸下的标记")]
     DirtyWithProblems,
-    #[error("空闲的簇不够，复制不了交叉链接的簇")]
+    #[error("空闲的簇不够")]
     NoFreeClusters,
+    #[error("重建分配位图要单独做：修完重新检查，再修别的")]
+    BitmapAlone,
+    #[error("根目录里没有空着的项，补不上位图项或大写表项")]
+    NoRootSlot,
     #[error("要改的地方太多：{segments} 段、{bytes} 字节，超过一份计划的上限")]
     TooLarge { segments: usize, bytes: u64 },
     #[error("读不出偏移 {0} 处")]
@@ -243,6 +269,16 @@ pub fn available(findings: &Findings) -> Vec<FixCount> {
             });
         }
     };
+    // 分配位图本身坏了：先重建，别的修法都要用到位图
+    if findings.rebuild.is_some() {
+        let bytes = u64::from(layout.cluster_count).div_ceil(8);
+        add(
+            FsFix::RebuildBitmap,
+            1,
+            bytes.div_ceil(layout.cluster_size.max(1)),
+        );
+        return counts;
+    }
     if findings.fs_info_invalid && layout.fs_info.is_some() {
         add(FsFix::FsInfo, 1, 0);
     }
@@ -293,8 +329,18 @@ pub fn available(findings: &Findings) -> Vec<FixCount> {
     if findings.dirty && layout.width != FatWidth::Fat12 {
         add(FsFix::Dirty, 1, 0);
     }
-    add(FsFix::Chains, findings.broken.len() as u64, 0);
+    add(
+        FsFix::Chains,
+        (findings.broken.len() + findings.empty_dirs.len()) as u64,
+        0,
+    );
     add(FsFix::Entries, findings.entries.len() as u64, 0);
+    // 内容就是标准表时只改校验和；要写新簇时得知道哪些簇空闲
+    if let Some(upcase) = &findings.upcase
+        && (upcase.standard || findings.tracked)
+    {
+        add(FsFix::Upcase, 1, 0);
+    }
     counts
 }
 
@@ -388,6 +434,9 @@ pub fn plan_fs_fix(
             FsFix::Bitmap | FsFix::TooLong | FsFix::Lost | FsFix::CrossLinks | FsFix::BadClusters
         )
     };
+    if findings.rebuild.is_some() && fixes.iter().any(|&fix| fix != FsFix::RebuildBitmap) {
+        return Err(FsFixError::BitmapAlone);
+    }
     if !findings.tracked && fixes.iter().any(needs_tracking) {
         return Err(FsFixError::NotTracked);
     }
@@ -413,6 +462,8 @@ pub fn plan_fs_fix(
     let mut planned: Vec<IssueKind> = Vec::new();
     // 改过的 exFAT 目录项集合，最后统一重算校验和
     let mut sets: BTreeSet<Vec<u64>> = BTreeSet::new();
+    // 要新簇的几类（交叉链接、空目录、大写表、位图）从同一处按簇号顺序取，不会取到同一个簇
+    let mut free = FreeClusters::new(&findings.free);
     for &fix in &fixes {
         let count = match fix {
             FsFix::FsInfo => {
@@ -513,8 +564,22 @@ pub fn plan_fs_fix(
                 }
             }
             FsFix::Chains => {
-                if findings.broken.is_empty() {
+                if findings.broken.is_empty() && findings.empty_dirs.is_empty() {
                     return Err(FsFixError::NothingToFix(fix));
+                }
+                let mut clusters = 0;
+                for dir in &findings.empty_dirs {
+                    let fresh = free.take(&mut patch, &layout)?;
+                    let at = cluster_at(&layout, fresh);
+                    for byte in 0..layout.cluster_size {
+                        patch.set(at + byte, 0)?;
+                    }
+                    write_dot(&mut patch, &layout, at, b".          ", fresh)?;
+                    write_dot(&mut patch, &layout, at + ENTRY, b"..         ", dir.parent)?;
+                    patch.fat(&layout, fresh, layout.width.end_of_chain())?;
+                    set_first(&mut patch, &layout, &EntryAt::Fat(dir.at), fresh, &mut sets)?;
+                    planned.push(IssueKind::FirstClusterInvalid);
+                    clusters += 1;
                 }
                 for chain in &findings.broken {
                     if let Some(end) = chain.end_at {
@@ -530,8 +595,8 @@ pub fn plan_fs_fix(
                 }
                 FixCount {
                     fix,
-                    items: findings.broken.len() as u64,
-                    clusters: 0,
+                    items: (findings.broken.len() + findings.empty_dirs.len()) as u64,
+                    clusters,
                 }
             }
             FsFix::CrossLinks => {
@@ -544,7 +609,6 @@ pub fn plan_fs_fix(
                 } else {
                     Vec::new()
                 };
-                let mut free = FreeClusters::new(&findings.free);
                 let (mut items, mut clusters) = (0u64, 0u64);
                 for cross in findings
                     .cross
@@ -572,6 +636,8 @@ pub fn plan_fs_fix(
                     clusters,
                 }
             }
+            FsFix::Upcase => write_upcase(&mut patch, &layout, &findings, &mut free)?,
+            FsFix::RebuildBitmap => rebuild_bitmap(&mut patch, &layout, &findings, &mut free)?,
             FsFix::BadClusters => {
                 let marked =
                     mark_bad(&mut patch, &layout, &findings, bad, device.as_ref(), offset)?;
@@ -791,14 +857,183 @@ impl<'a> FreeClusters<'a> {
                 }
             };
             self.current = Some((next + 1, end));
-            // 表项为 0、位图里空闲（exFAT）才用
+            // 表项为 0、位图里空闲（exFAT；位图本身坏了、正在重建时不看）才用
             if patch.fat_value(layout, next)? == 0
-                && (layout.kind != FsKind::Exfat || !patch.bitmap_get(layout, next)?)
+                && (layout.kind != FsKind::Exfat
+                    || layout.bitmap.is_empty()
+                    || !patch.bitmap_get(layout, next)?)
             {
                 return Ok(next);
             }
         }
     }
+}
+
+/// 簇 `cluster` 在分区里的位置。
+fn cluster_at(layout: &FatLayout, cluster: u32) -> u64 {
+    layout.heap_offset + u64::from(cluster.saturating_sub(2)) * layout.cluster_size
+}
+
+/// 把 `data` 写进按顺序的这些簇（不满一簇的部分补 0），并把它们连成一条 FAT 链。
+fn write_chain(
+    patch: &mut Patch,
+    layout: &FatLayout,
+    clusters: &[u32],
+    data: &[u8],
+) -> Result<(), FsFixError> {
+    for (index, &cluster) in clusters.iter().enumerate() {
+        let at = cluster_at(layout, cluster);
+        let start = index as u64 * layout.cluster_size;
+        for byte in 0..layout.cluster_size {
+            let value = data.get((start + byte) as usize).copied().unwrap_or(0);
+            patch.set(at + byte, value)?;
+        }
+        let next = clusters
+            .get(index + 1)
+            .copied()
+            .unwrap_or(layout.width.end_of_chain());
+        patch.fat(layout, cluster, next)?;
+    }
+    Ok(())
+}
+
+/// 根目录里补一个系统目录项（位图项、大写表项）：类型、首簇、长度，另带大写表的校验和。
+fn put_system_entry(
+    patch: &mut Patch,
+    at: u64,
+    kind: u8,
+    first: u32,
+    length: u64,
+    checksum: Option<u32>,
+) -> Result<(), FsFixError> {
+    for byte in 0..ENTRY {
+        patch.set(at + byte, 0)?;
+    }
+    patch.set(at, kind)?;
+    if let Some(checksum) = checksum {
+        patch.set_le(at + 4, 4, u64::from(checksum))?;
+    }
+    patch.set_le(at + 20, 4, u64::from(first))?;
+    patch.set_le(at + 24, 8, length)
+}
+
+/// 写回标准大写表。原来的簇够用就写回原处，否则另取空闲簇、释放原来的；表项改指它（找不到表项时补一项）。
+fn write_upcase(
+    patch: &mut Patch,
+    layout: &FatLayout,
+    findings: &Findings,
+    free: &mut FreeClusters,
+) -> Result<FixCount, FsFixError> {
+    let fix = FsFix::Upcase;
+    let upcase = findings
+        .upcase
+        .as_ref()
+        .filter(|_| layout.kind == FsKind::Exfat)
+        .ok_or(FsFixError::NothingToFix(fix))?;
+    // 内容就是标准表：只改记的校验和
+    if let (Some(entry), true) = (upcase.entry, upcase.standard) {
+        patch.set_le(entry + 4, 4, u64::from(EXFAT_UPCASE_CHECKSUM))?;
+        return Ok(FixCount {
+            fix,
+            items: 1,
+            clusters: 0,
+        });
+    }
+    if !findings.tracked {
+        return Err(FsFixError::NotTracked);
+    }
+    let needed = (EXFAT_UPCASE_TABLE.len() as u64).div_ceil(layout.cluster_size.max(1)) as usize;
+    let old: Vec<u32> = clusters_of(&upcase.runs).collect();
+    let mut clusters: Vec<u32> = old.iter().copied().take(needed).collect();
+    while clusters.len() < needed {
+        let fresh = free.take(patch, layout)?;
+        patch.bitmap(layout, fresh, true)?;
+        clusters.push(fresh);
+    }
+    write_chain(patch, layout, &clusters, EXFAT_UPCASE_TABLE)?;
+    // 原来的簇用不上的释放
+    for &cluster in old.iter().filter(|cluster| !clusters.contains(cluster)) {
+        patch.fat(layout, cluster, 0)?;
+        patch.bitmap(layout, cluster, false)?;
+    }
+    let first = *clusters.first().ok_or(FsFixError::NoFreeClusters)?;
+    let length = EXFAT_UPCASE_TABLE.len() as u64;
+    match upcase.entry {
+        Some(entry) => {
+            patch.set_le(entry + 4, 4, u64::from(EXFAT_UPCASE_CHECKSUM))?;
+            patch.set_le(entry + 20, 4, u64::from(first))?;
+            patch.set_le(entry + 24, 8, length)?;
+        }
+        None => {
+            let slot = findings.root_slot.ok_or(FsFixError::NoRootSlot)?;
+            put_system_entry(
+                patch,
+                slot,
+                EXFAT_TYPE_UPCASE,
+                first,
+                length,
+                Some(EXFAT_UPCASE_CHECKSUM),
+            )?;
+        }
+    }
+    Ok(FixCount {
+        fix,
+        items: 1,
+        clusters: needed as u64,
+    })
+}
+
+/// 按目录树重建分配位图：有人认领的簇与新位图自己的簇标成占用，写到空闲簇上；位图项改指新簇（找不到时补一项），
+/// 旧位图的簇释放。
+fn rebuild_bitmap(
+    patch: &mut Patch,
+    layout: &FatLayout,
+    findings: &Findings,
+    free: &mut FreeClusters,
+) -> Result<FixCount, FsFixError> {
+    let fix = FsFix::RebuildBitmap;
+    let rebuild = findings
+        .rebuild
+        .as_ref()
+        .filter(|_| layout.kind == FsKind::Exfat)
+        .ok_or(FsFixError::NothingToFix(fix))?;
+    let length = u64::from(layout.cluster_count).div_ceil(8);
+    let needed = length.div_ceil(layout.cluster_size.max(1)) as usize;
+    let mut clusters = Vec::with_capacity(needed);
+    while clusters.len() < needed {
+        clusters.push(free.take(patch, layout)?);
+    }
+    let mut bits = vec![0u8; usize::try_from(length).unwrap_or(0)];
+    let mut mark = |cluster: u32| {
+        let bit = u64::from(cluster.saturating_sub(2));
+        if let Some(byte) = bits.get_mut((bit / 8) as usize) {
+            *byte |= 1 << (bit % 8);
+        }
+    };
+    clusters_of(&rebuild.claimed).for_each(&mut mark);
+    clusters.iter().copied().for_each(&mut mark);
+    write_chain(patch, layout, &clusters, &bits)?;
+    for cluster in clusters_of(&rebuild.old).filter(|cluster| !clusters.contains(cluster)) {
+        patch.fat(layout, cluster, 0)?;
+    }
+    let first = *clusters.first().ok_or(FsFixError::NoFreeClusters)?;
+    match rebuild.entry {
+        Some(entry) => {
+            // 第 1 字节是位图标志：第 0 位为 0 表示第一份位图
+            patch.set(entry + 1, 0)?;
+            patch.set_le(entry + 20, 4, u64::from(first))?;
+            patch.set_le(entry + 24, 8, length)?;
+        }
+        None => {
+            let slot = findings.root_slot.ok_or(FsFixError::NoRootSlot)?;
+            put_system_entry(patch, slot, EXFAT_TYPE_BITMAP, first, length, None)?;
+        }
+    }
+    Ok(FixCount {
+        fix,
+        items: 1,
+        clusters: needed as u64,
+    })
 }
 
 /// 交叉链接：把 `cross` 这个文件与别人共用的簇复制到空闲簇，链改指新簇（首簇变了时改目录项）。返回复制的簇数。

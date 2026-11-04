@@ -651,3 +651,140 @@ fn available_lists_what_the_check_found() {
     let fixes: Vec<FsFix> = available(&findings).iter().map(|count| count.fix).collect();
     assert_eq!(fixes, [FsFix::Lost, FsFix::Chains]);
 }
+
+// ───────────────────────────── 第三批 ─────────────────────────────
+
+/// 样本 exFAT 根目录（4 号簇）里类型为 `kind` 的系统目录项的位置。
+fn exfat_system_entry(image: &[u8], kind: u8) -> usize {
+    let root = crate::samples::exfat_heap(image) + 2 * 4096;
+    (root..root + 4096)
+        .step_by(32)
+        .find(|&at| image[at] == kind)
+        .unwrap()
+}
+
+/// 按 FAT 链读出样本 exFAT 里从 `first` 起的 `length` 字节。
+fn exfat_chain_bytes(image: &[u8], first: u32, length: usize) -> Vec<u8> {
+    let fat = u32::from_le_bytes(image[80..84].try_into().unwrap()) as usize * 512;
+    let heap = crate::samples::exfat_heap(image);
+    let mut data = Vec::new();
+    let mut cluster = first;
+    while data.len() < length && (2..0xFFFF_FFF7).contains(&cluster) {
+        let at = heap + (cluster as usize - 2) * 4096;
+        data.extend_from_slice(&image[at..at + 4096]);
+        let entry = fat + cluster as usize * 4;
+        cluster = u32::from_le_bytes(image[entry..entry + 4].try_into().unwrap());
+    }
+    data.truncate(length);
+    data
+}
+
+#[test]
+fn the_standard_upcase_table_is_written_back() {
+    use yisi_fs::format::{EXFAT_UPCASE_CHECKSUM, EXFAT_UPCASE_TABLE};
+
+    // 样本的大写表只有 128 字节；记的校验和改坏：写回标准表，原来 1 个簇不够，另取 1 个
+    let (mut image, _) = exfat_image();
+    let entry = exfat_system_entry(&image, 0x82);
+    image[entry + 4] ^= 0xFF;
+    assert_eq!(kinds(&image), [IssueKind::UpcaseChecksum]);
+    let fixed = plan(&image, &[FsFix::Upcase]).unwrap();
+    assert_eq!(fixed.counts[0].clusters, 2);
+    apply(&mut image, &fixed);
+    assert!(kinds(&image).is_empty(), "{:?}", kinds(&image));
+    let first = u32::from_le_bytes(image[entry + 20..entry + 24].try_into().unwrap());
+    let length = u64::from_le_bytes(image[entry + 24..entry + 32].try_into().unwrap());
+    assert_eq!(length, EXFAT_UPCASE_TABLE.len() as u64);
+    assert_eq!(
+        exfat_chain_bytes(&image, first, EXFAT_UPCASE_TABLE.len()),
+        EXFAT_UPCASE_TABLE
+    );
+
+    // 内容就是标准表、只是记的校验和不对：只改校验和（一个扇区）
+    image[entry + 4] ^= 0xFF;
+    assert_eq!(kinds(&image), [IssueKind::UpcaseChecksum]);
+    let fixed = plan(&image, &[FsFix::Upcase]).unwrap();
+    assert_eq!(fixed.writes.len(), 1);
+    assert_eq!(fixed.writes[0].after.len(), 512);
+    apply(&mut image, &fixed);
+    assert!(kinds(&image).is_empty());
+    assert_eq!(
+        u32::from_le_bytes(image[entry + 4..entry + 8].try_into().unwrap()),
+        EXFAT_UPCASE_CHECKSUM
+    );
+
+    // 找不到大写表项（标成已删除）：另取空闲簇写标准表，在根目录的空项里补一项；原来的簇成了丢失簇，一起释放
+    let (mut image, _) = exfat_image();
+    let entry = exfat_system_entry(&image, 0x82);
+    image[entry] &= 0x7F;
+    let found = kinds(&image);
+    assert!(found.contains(&IssueKind::UpcaseMissing), "{found:?}");
+    let fixed = plan(&image, &[FsFix::Upcase, FsFix::Lost]).unwrap();
+    apply(&mut image, &fixed);
+    assert!(kinds(&image).is_empty(), "{:?}", kinds(&image));
+    assert_eq!(read_file(&image, &["photo.jpg"]), pattern(4, 4096 * 3));
+}
+
+#[test]
+fn a_missing_allocation_bitmap_is_rebuilt_from_the_tree() {
+    // 位图项标成已删除：按目录树重建，写到空闲簇上，在根目录的空项里补一项
+    let (mut image, clusters) = exfat_image();
+    let entry = exfat_system_entry(&image, 0x81);
+    image[entry] &= 0x7F;
+    assert!(kinds(&image).contains(&IssueKind::BitmapInvalid));
+    // 只能单独做
+    assert!(matches!(
+        plan(&image, &[FsFix::RebuildBitmap, FsFix::Dirty]),
+        Err(FsFixError::BitmapAlone)
+    ));
+    let disk = MemoryDisk::new(image.clone(), 512);
+    let (_, findings) = check_for_repair(&disk, 0, image.len() as u64, &Quiet).unwrap();
+    let fixes: Vec<FsFix> = available(&findings).iter().map(|count| count.fix).collect();
+    assert_eq!(fixes, [FsFix::RebuildBitmap]);
+    let fixed = plan(&image, &[FsFix::RebuildBitmap]).unwrap();
+    apply(&mut image, &fixed);
+    assert!(kinds(&image).is_empty(), "{:?}", kinds(&image));
+    assert_eq!(read_file(&image, &["photo.jpg"]), pattern(4, 4096 * 3));
+    // 新位图里文件的簇都是占用的：再标一个空闲簇为占用，检查认得出丢失簇（位图确实在用）
+    let new_bitmap = exfat_system_entry(&image, 0x81);
+    let first = u32::from_le_bytes(image[new_bitmap + 20..new_bitmap + 24].try_into().unwrap());
+    let bits = exfat_chain_bytes(&image, first, 64);
+    for &cluster in &clusters {
+        let bit = (cluster - 2) as usize;
+        assert_ne!(bits[bit / 8] & (1 << (bit % 8)), 0, "簇 {cluster}");
+    }
+}
+
+#[test]
+fn a_fat_folder_with_an_invalid_first_cluster_becomes_empty() {
+    for kind in [FatType::Fat16, FatType::Fat32] {
+        let mut image = FatImage::new(kind);
+        let root = image.root();
+        let folder = image.mkdir(root, "folder");
+        image.add_file(
+            folder.as_dir(),
+            "inside.txt",
+            &pattern(13, 50),
+            Layout::Contiguous,
+        );
+        image.add_file(root, "keep.txt", &pattern(14, 700), Layout::Contiguous);
+        set_first_cluster(&mut image, &folder, 0);
+        let mut image = image.finish();
+        let found = kinds(&image);
+        assert!(found.contains(&IssueKind::FirstClusterInvalid), "{found:?}");
+        let fixed = plan(&image, &[FsFix::Chains, FsFix::Lost]).unwrap();
+        apply(&mut image, &fixed);
+        assert!(kinds(&image).is_empty(), "{kind:?}: {:?}", kinds(&image));
+        // 文件夹还在、名字不变、里面是空的；别的文件不受影响
+        let volume =
+            Volume::open_with(device(&image), 0, image.len() as u64, BootCopy::Primary).unwrap();
+        let listing = volume.list(&volume.root()).unwrap();
+        let folder = listing
+            .entries
+            .iter()
+            .find(|entry| entry.name == "folder")
+            .unwrap();
+        assert!(volume.list(&folder.file).unwrap().entries.is_empty());
+        assert_eq!(read_file(&image, &["keep.txt"]), pattern(14, 700));
+    }
+}

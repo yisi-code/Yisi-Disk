@@ -773,7 +773,8 @@ export interface MftDetail {
 
 /**
  * 文件系统修复（FAT、exFAT）的一类问题：FSInfo、分配位图里漏标的簇、过长的链、丢失簇（先另存）、未正常卸下的标记；
- * 两份 FAT 不一致（以第一份 / 第二份为准，单独做）、断了的链、交叉链接、目录项、读不出的空闲簇（先读一遍空闲簇）
+ * 两份 FAT 不一致（以第一份 / 第二份为准，单独做）、断了的链、交叉链接、目录项、读不出的空闲簇（先读一遍空闲簇）；
+ * exFAT 的大写表（写回标准表）、分配位图本身坏了（按目录树重建，单独做）
  */
 export type FsFix =
   | 'fsInfo'
@@ -787,6 +788,8 @@ export type FsFix =
   | 'crossLinks'
   | 'entries'
   | 'badClusters'
+  | 'upcase'
+  | 'rebuildBitmap'
 
 /** 一段连续的簇 */
 export interface ClusterRun {

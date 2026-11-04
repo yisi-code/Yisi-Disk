@@ -6,19 +6,19 @@ use yisi_fs::boot::{exfat_boot_checksum, exfat_stored_checksum};
 use yisi_fs::bpb::{self, ExfatBpb as Geometry, Problem};
 use yisi_fs::format::{
     EXFAT_IN_USE, EXFAT_TYPE_BITMAP, EXFAT_TYPE_FILE, EXFAT_TYPE_NAME, EXFAT_TYPE_STREAM,
-    EXFAT_TYPE_UPCASE, ExfatSet, SetProblem, exfat_entry_set, exfat_set_checksum,
-    exfat_table_checksum,
+    EXFAT_TYPE_UPCASE, EXFAT_UPCASE_CHECKSUM, EXFAT_UPCASE_TABLE, ExfatSet, SetProblem,
+    exfat_entry_set, exfat_set_checksum, exfat_table_checksum,
 };
 use yisi_part::bytes::{le32, le64};
 
-use crate::check::chains::{Layout, MAX_DEPTH, Run, Volume};
+use crate::check::chains::{Layout, MAX_DEPTH, Run, Volume, push_run};
 use crate::check::disk::Span;
 use crate::check::fat::join;
 use crate::check::issue::{Area, Issue, IssueKind};
 use crate::check::table::{FatTable, Link, Owners, ROOT, Width};
 use crate::check::{
-    CheckItem, Ctx, EntryAt, EntryChange, EntryFix, EntryRef, FatLayout, Stage, Summary,
-    check_backup,
+    BitmapRebuild, CheckItem, Ctx, EntryAt, EntryChange, EntryFix, EntryRef, FatLayout, Stage,
+    Summary, UpcaseFix, check_backup,
 };
 
 const ENTRY: usize = 32;
@@ -135,6 +135,9 @@ pub(crate) fn check(ctx: &mut Ctx, region: &[u8], from_backup: bool) -> Option<S
     let mut checker = ExfatChecker {
         volume,
         bitmap: None,
+        bitmap_owner: None,
+        bitmap_entry: None,
+        old_bitmap: Vec::new(),
     };
     checker.tree(ctx, geometry.root_cluster)?;
     checker.volume.finish_directories(ctx);
@@ -142,6 +145,9 @@ pub(crate) fn check(ctx: &mut Ctx, region: &[u8], from_backup: bool) -> Option<S
     ctx.checked(CheckItem::Entries);
 
     let bitmap = checker.bitmap.take();
+    if bitmap.is_none() {
+        checker.plan_rebuild(ctx);
+    }
     let mut volume = checker.volume;
     match &bitmap {
         Some(bitmap) => {
@@ -211,6 +217,10 @@ struct DirJob {
 struct ExfatChecker {
     volume: Volume,
     bitmap: Option<Bitmap>,
+    /// 位图在认领表里的编号、位图项的位置、旧位图占的簇：位图本身坏了时重建要用。
+    bitmap_owner: Option<u32>,
+    bitmap_entry: Option<u64>,
+    old_bitmap: Vec<Run>,
 }
 
 impl ExfatChecker {
@@ -242,7 +252,7 @@ impl ExfatChecker {
             }
             let (data, bad) = self.volume.read_runs(ctx, &walk.runs, &job.path);
             if job.id == ROOT {
-                self.system_entries(ctx, &data, &bad)?;
+                self.system_entries(ctx, &walk.runs, &data, &bad)?;
             }
             self.volume.report_progress(ctx);
             self.directory(ctx, &job, &walk.runs, &data, &bad, &mut stack)?;
@@ -251,9 +261,16 @@ impl ExfatChecker {
     }
 
     /// 根目录里的分配位图项与大写表项。
-    fn system_entries(&mut self, ctx: &mut Ctx, data: &[u8], bad: &[Span]) -> Option<()> {
+    fn system_entries(
+        &mut self,
+        ctx: &mut Ctx,
+        runs: &[Run],
+        data: &[u8],
+        bad: &[Span],
+    ) -> Option<()> {
         let mut bitmap_entry = None;
         let mut upcase_entry = None;
+        let at = |index: usize| self.volume.locate(runs, (index * ENTRY) as u64);
         for (index, raw) in data.as_chunks::<ENTRY>().0.iter().enumerate() {
             if bad
                 .iter()
@@ -262,27 +279,67 @@ impl ExfatChecker {
                 continue;
             }
             match raw[0] {
-                0 => break,
-                EXFAT_TYPE_BITMAP if bitmap_entry.is_none() => bitmap_entry = Some(*raw),
-                EXFAT_TYPE_UPCASE if upcase_entry.is_none() => upcase_entry = Some(*raw),
+                0 => {
+                    // 第一个空着的项：补位图项、大写表项时写在这里
+                    ctx.findings.root_slot = at(index);
+                    break;
+                }
+                EXFAT_TYPE_BITMAP if bitmap_entry.is_none() => {
+                    bitmap_entry = Some((*raw, at(index)))
+                }
+                EXFAT_TYPE_UPCASE if upcase_entry.is_none() => {
+                    upcase_entry = Some((*raw, at(index)))
+                }
                 _ => {}
             }
         }
         match bitmap_entry {
-            Some(raw) => self.load_bitmap(ctx, &raw)?,
+            Some((raw, at)) => {
+                self.bitmap_entry = at;
+                self.load_bitmap(ctx, &raw)?;
+            }
             None => ctx
                 .issues
                 .push(Issue::new(IssueKind::BitmapInvalid).area(Area::Bitmap)),
         }
         match upcase_entry {
-            Some(raw) => self.check_upcase(ctx, &raw)?,
+            Some((raw, at)) => self.check_upcase(ctx, &raw, at)?,
             None => {
                 ctx.issues
                     .push(Issue::new(IssueKind::UpcaseMissing).area(Area::Upcase));
+                ctx.findings.upcase = Some(UpcaseFix {
+                    kind: IssueKind::UpcaseMissing,
+                    entry: None,
+                    runs: Vec::new(),
+                    standard: false,
+                });
                 ctx.skipped(CheckItem::Upcase);
             }
         }
         Some(())
+    }
+
+    /// 分配位图本身坏了：跟踪了每个簇归谁时，记下按目录树重建要用的（有人认领的簇、没人认领的簇、旧位图的簇）。
+    fn plan_rebuild(&self, ctx: &mut Ctx) {
+        let owners = &self.volume.owners;
+        if !owners.tracking() {
+            return;
+        }
+        let mut claimed = Vec::new();
+        let mut free = Vec::new();
+        for index in 0..self.volume.fat.count {
+            let cluster = index + 2;
+            match owners.owner(cluster) {
+                Some(owner) if Some(owner) != self.bitmap_owner => push_run(&mut claimed, cluster),
+                _ => push_run(&mut free, cluster),
+            }
+        }
+        ctx.findings.free = free;
+        ctx.findings.rebuild = Some(BitmapRebuild {
+            entry: self.bitmap_entry,
+            claimed,
+            old: self.old_bitmap.clone(),
+        });
     }
 
     /// 认领分配位图的簇、读进内存，统计已分配的簇数。位图比簇数短时不用它。
@@ -291,6 +348,7 @@ impl ExfatChecker {
         let length = le64(raw, 24).unwrap_or(0);
         let needed_bytes = u64::from(self.volume.fat.count).div_ceil(8);
         let id = self.volume.owners.add(None, "$Bitmap");
+        self.bitmap_owner = Some(id);
         let needed = self.volume.clusters_for(length);
         let walk = self.volume.walk(
             ctx,
@@ -303,6 +361,7 @@ impl ExfatChecker {
             true,
             None,
         )?;
+        self.old_bitmap = walk.runs.clone();
         if length < needed_bytes {
             ctx.issues.push(
                 Issue::new(IssueKind::BitmapInvalid)
@@ -344,7 +403,7 @@ impl ExfatChecker {
     }
 
     /// 认领大写表的簇，核对它的校验和。
-    fn check_upcase(&mut self, ctx: &mut Ctx, raw: &[u8; ENTRY]) -> Option<()> {
+    fn check_upcase(&mut self, ctx: &mut Ctx, raw: &[u8; ENTRY], at: Option<u64>) -> Option<()> {
         let recorded = le32(raw, 4).unwrap_or(0);
         let first = le32(raw, 20).unwrap_or(0);
         let length = le64(raw, 24).unwrap_or(0);
@@ -376,6 +435,13 @@ impl ExfatChecker {
                     .expected(u64::from(recorded))
                     .actual(u64::from(computed)),
             );
+            ctx.findings.upcase = Some(UpcaseFix {
+                kind: IssueKind::UpcaseChecksum,
+                entry: at,
+                runs: walk.runs.clone(),
+                standard: computed == EXFAT_UPCASE_CHECKSUM
+                    && bytes.len() == EXFAT_UPCASE_TABLE.len(),
+            });
         }
         ctx.checked(CheckItem::Upcase);
         Some(())

@@ -163,8 +163,44 @@ pub struct Findings {
     /// 目录项要改的地方。
     pub entries: Vec<EntryFix>,
     /// 真正空闲的簇（FAT 或分配位图里空闲、也没人认领），按簇号排序：修交叉链接时从这里取新簇，
-    /// 找坏簇时只读这些簇。FAT 里标成坏簇的也在里面，用之前要再看一眼表项。
+    /// 找坏簇时只读这些簇。FAT 里标成坏簇的也在里面，用之前要再看一眼表项。分配位图本身坏了时，
+    /// 是没人认领的簇（重建位图时从这里取簇）。
     pub free: Vec<Run>,
+    /// exFAT 大写表坏了或找不到。
+    pub upcase: Option<UpcaseFix>,
+    /// exFAT 分配位图本身坏了（找不到位图项、比簇数短）、又跟踪了每个簇的归属时：按目录树重建要用的。
+    pub rebuild: Option<BitmapRebuild>,
+    /// exFAT 根目录里第一个空着的项（类型为 0），补位图项、大写表项时写在这里。
+    pub root_slot: Option<u64>,
+    /// FAT 里起始簇不合法的子目录：改成空目录。
+    pub empty_dirs: Vec<EmptyDir>,
+}
+
+/// exFAT 大写表的修法：`kind` 是 `UpcaseChecksum` 或 `UpcaseMissing`；`entry` 是大写表项的位置（找不到时为空，
+/// 补在根目录的空项里）；`runs` 是表现在占的簇；`standard` 表示表的内容就是标准大写表、只是记的校验和不对。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpcaseFix {
+    pub kind: IssueKind,
+    pub entry: Option<u64>,
+    pub runs: Vec<Run>,
+    pub standard: bool,
+}
+
+/// 按目录树重建 exFAT 分配位图：`claimed` 是有人认领的簇（位图自己的旧簇不算），`entry` 是位图项的位置
+/// （找不到时为空，补在根目录的空项里），`old` 是旧位图占的簇（重建后释放）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BitmapRebuild {
+    pub entry: Option<u64>,
+    pub claimed: Vec<Run>,
+    pub old: Vec<Run>,
+}
+
+/// FAT 里起始簇不合法的子目录：`at` 是它的目录项，`parent` 是上级目录的起始簇（上级是根目录时为 0，用来写 `..`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmptyDir {
+    pub path: String,
+    pub at: u64,
+    pub parent: u32,
 }
 
 /// 两份 FAT 的位置与不同之处（分区内字节偏移，按扇区对齐的区段，相对每份 FAT 的起点）。

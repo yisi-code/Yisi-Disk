@@ -179,7 +179,7 @@ const enUS: typeof zhCN = {
       name: 'Check a file system',
       summary: 'Checks that the FAT and exFAT boot region, FAT chains, allocation bitmap and directory entries agree and lists the problems; lost clusters, broken chains, cross-links, FAT copies that disagree, directory entries, bitmap gaps, unreadable free clusters and more can be ticked for repair. The check itself is read-only.',
       suits: 'The partition opens but file names are garbled, folders will not open, the space does not add up, or Windows asks to scan and fix after unplugging.',
-      limits: 'NTFS gets only the boot sector and master file table checks. On FAT and exFAT, a damaged allocation bitmap or up-case table itself and unreadable folders are only reported in this version.',
+      limits: 'NTFS gets only the boot sector and master file table checks. On FAT and exFAT, unreadable folders and volumes with more than two FATs are only reported: make an image first and work on the image.',
     },
     image: {
       name: 'Create a disk image (bad-sector aware)',
@@ -1055,10 +1055,12 @@ const enUS: typeof zhCN = {
       dirty: 'Marks the volume as cleanly unmounted',
       fatFromFirst: 'Takes the first FAT as correct and rewrites the {items} differing sector(s) of the second',
       fatFromSecond: 'Takes the second FAT as correct and rewrites the {items} differing sector(s) of the first',
-      chains: 'Ends {items} broken chain(s) and adjusts the file sizes',
+      chains: 'Repairs {items} broken chain(s) or invalid first cluster(s) (files are truncated to match; those with an invalid first cluster become empty files or empty folders)',
       crossLinks: 'Gives {items} cross-linked file(s) their own copy of {clusters} cluster(s)',
       entries: 'Repairs {items} directory entry problem(s)',
       badClusters: 'Marks {clusters} unreadable free cluster(s) ({items} run(s)) as bad',
+      upcase: 'Writes the standard up-case table ({clusters} cluster(s))',
+      rebuildBitmap: 'Rebuilds the allocation bitmap from the directory tree on {clusters} free cluster(s)',
     },
     fsFixRollbackValue: 'Restores these locations to what they were before the repair',
     mftTable: 'master file table',
@@ -1216,7 +1218,7 @@ const enUS: typeof zhCN = {
       },
       chains: {
         label: 'Repair broken chains',
-        hint: 'Each chain ends where it breaks and the file size shrinks to match; files whose first cluster is invalid become empty. Copy these files out first, as much as can be read.',
+        hint: 'Each chain ends where it breaks and the file size shrinks to match; files whose first cluster is invalid become empty, and such folders become empty folders (the name is kept). Copy these files out first, as much as can be read.',
       },
       crossLinks: {
         label: 'Separate cross-linked files',
@@ -1225,6 +1227,15 @@ const enUS: typeof zhCN = {
       entries: {
         label: 'Repair directory entries',
         hint: 'exFAT entry counts, name lengths and checksums are recalculated from the entries present; orphaned entries and long names that do not match are marked deleted (the file keeps its short name); the . and .. entries of folders are rewritten.',
+      },
+      upcase: {
+        label: 'Write the standard up-case table',
+        hint: 'Writes the standard up-case table used by Windows and the exFAT specification, into its own clusters when they are large enough, otherwise onto free clusters. If the content already is the standard table and only the recorded checksum is wrong, only the checksum is changed.',
+      },
+      rebuildBitmap: {
+        label: 'Rebuild the allocation bitmap from the directory tree',
+        hint: 'The allocation bitmap itself is damaged: a new one is generated from which file owns each cluster, written to free clusters, and the bitmap entry in the root folder points to it. Clusters no file owns count as free (save lost clusters first if you want to look at them).',
+        alone: 'Rebuilding the allocation bitmap is done on its own: the partition is checked again afterwards, then repair the rest.',
       },
       badClusters: {
         label: 'Mark unreadable free clusters as bad',
@@ -1451,22 +1462,22 @@ const enUS: typeof zhCN = {
       bitmapInvalid: {
         title: 'The allocation bitmap is missing or too short',
         detail: 'Without a usable bitmap it is impossible to tell which clusters are in use, and the system may write new files over existing ones. The allocation bitmap, lost cluster and cross-link checks were skipped.',
-        fix: 'Later the bitmap can be rebuilt from the directory tree.',
+        fix: 'Rebuild the bitmap from the directory tree in the Repair section above.',
       },
       upcaseMissing: {
         title: 'The root directory has no up-case table',
         detail: 'The up-case table is used to compare file names; without it Windows may refuse to open the partition.',
-        fix: 'Later the standard up-case table can be written.',
+        fix: 'Write the standard up-case table from the Repair section above.',
       },
       upcaseChecksum: {
         title: 'The up-case table checksum is wrong (recorded {expected}, computed {actual})',
         detail: 'With a damaged up-case table, looking files up by name may go wrong.',
-        fix: 'Later the standard up-case table can be written and its checksum updated.',
+        fix: 'Write the standard up-case table from the Repair section above (if the content already is the standard table, only the checksum is changed).',
       },
       firstClusterInvalid: {
         title: '{path}: invalid first cluster {actual}',
         detail: 'The recorded data location of this file or folder is broken, so its contents cannot be read.',
-        fix: 'The file can be made empty from the Repair section above; try "Deep recovery by file type" for the contents first.',
+        fix: 'From the Repair section above, the file can be made empty and a folder made an empty folder (the name is kept); try "Deep recovery by file type" for the contents first.',
       },
       chainOutOfRange: {
         title: '{path}: the FAT chain points outside the cluster area at cluster {cluster} ({actual})',
