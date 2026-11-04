@@ -17,6 +17,7 @@ use windows_sys::Win32::System::Ioctl::{
     StorageDeviceSeekPenaltyProperty,
 };
 
+use crate::WindowsDisk;
 use crate::ioctl::{field, ioctl};
 
 /// 检查 `\\.\PhysicalDrive0` 到这个编号之前的全部设备；拔掉过的盘会留下编号空缺，所以不在第一个空缺处停。
@@ -67,6 +68,28 @@ pub struct DiskInfo {
     pub solid_state: Option<bool>,
     /// 系统认出的分区表格式；查不到时为空。
     pub partition_style: Option<PartitionStyle>,
+}
+
+impl DiskInfo {
+    /// 认盘用的标识：厂商、型号、序列号（空白合并）。磁盘编号不算在内，同一块盘重新插拔后编号可能变。
+    /// 列出磁盘时给界面的标识、坏区图里记的来源、写入计划里的设备都用它。
+    pub fn identity(&self) -> String {
+        identity_of(Some(self))
+    }
+}
+
+/// 已打开的一块物理盘的标识，规则同 [`DiskInfo::identity`]；查不到属性时是 `disk`。
+pub fn disk_identity(disk: &WindowsDisk) -> String {
+    let info = disk.device_number().ok().and_then(query_disk);
+    identity_of(info.as_ref())
+}
+
+fn identity_of(info: Option<&DiskInfo>) -> String {
+    let words = match info {
+        Some(info) => format!("disk {} {} {}", info.vendor, info.model, info.serial),
+        None => "disk".to_owned(),
+    };
+    words.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// 列出能查到容量的物理磁盘，按编号排序。打不开、或查不到容量的设备（例如没插卡的读卡器）跳过。

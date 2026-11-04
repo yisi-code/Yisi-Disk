@@ -169,9 +169,9 @@ const enUS: typeof zhCN = {
     },
     repairPartition: {
       name: 'Repair a partition that will not open',
-      summary: 'Diagnoses each partition\'s boot sector and its backup; if the boot sector is damaged but the backup is intact, browses with the backup and saves files to another disk. Diagnosis is read-only; on an image you can also repair the boot sector from the backup (a backup is saved first and you can roll back).',
+      summary: 'Diagnoses each partition\'s boot sector and its backup; if the boot sector is damaged but the backup is intact, browses with the backup and saves files to another disk. It can also repair the boot sector from the backup (a backup is saved first and you can roll back; repairing an image first is recommended).',
       suits: 'The partition is still there but asks to be formatted or shows up as RAW (FAT32, exFAT and NTFS keep a backup boot sector).',
-      limits: 'If the partition is gone entirely, use "Find lost partitions"; repairs are made on an image only and this version does not write to physical disks; if both copies are damaged use "Deep recovery by file type".',
+      limits: 'If the partition is gone entirely, use "Find lost partitions"; the disk Windows runs from and a single drive letter cannot be repaired; if both copies are damaged use "Deep recovery by file type".',
     },
     fsCheck: {
       name: 'Check a file system',
@@ -899,7 +899,7 @@ const enUS: typeof zhCN = {
     diskHint:
       'Reading a physical disk needs administrator rights; it is read-only and does not change the disk. If the disk has already reported read errors, create an image first and diagnose the image.',
     readOnly:
-      'Diagnosis is read-only. When you diagnose an image file, a damaged primary boot sector or backup can be repaired in the image: a backup is saved first, nothing is written until you confirm, the result is read back and checked, and you can roll it back. This version does not write to physical disks: create an image and repair the image.',
+      'Diagnosis is read-only. A damaged primary boot sector or backup can be repaired: a backup is saved first, nothing is written until you confirm, the result is read back and checked, and you can roll it back. Repair an image first and only then the original disk; the disk Windows runs from is never written, and a single drive letter cannot be repaired (choose the whole disk).',
     diagnose: {
       start: 'Start diagnosis',
       again: 'Diagnose again',
@@ -953,8 +953,8 @@ const enUS: typeof zhCN = {
     },
     next: {
       healthy: 'If the partition still will not open, the problem is not the boot sector: try "Recover deleted files" or "Deep recovery by file type".',
-      backupDamaged: 'No need to act now; when diagnosing an image, you can rewrite the backup from the primary boot sector.',
-      primaryDamaged: 'Browse with the backup first and save your important files to another disk; when diagnosing an image, you can repair the primary boot sector from the backup.',
+      backupDamaged: 'No need to act now; if needed, you can rewrite the backup from the primary boot sector.',
+      primaryDamaged: 'Browse with the backup first and save your important files to another disk; then you can repair the primary boot sector from the backup (repair an image first).',
       bothDamaged: 'This version cannot browse without a usable boot sector: use "Deep recovery by file type", which does not depend on it.',
       unrecognized: 'If the partition does hold data, use "Deep recovery by file type".',
     },
@@ -970,8 +970,7 @@ const enUS: typeof zhCN = {
       primaryFromBackup: 'Repair the primary boot sector from the backup…',
       backupFromPrimary: 'Repair the backup from the primary boot sector…',
       preparing: 'Preparing the repair plan…',
-      imageOnly:
-        'Repairs are done on an image only: use "Create disk image" to image this disk, then diagnose and repair the image. This version does not write to physical disks.',
+      volumeUnsupported: 'A single drive letter cannot be repaired: choose the whole disk instead, or create an image and repair the image.',
       outcome: '{action}: {outcome}',
     },
     issue: {
@@ -1017,14 +1016,23 @@ const enUS: typeof zhCN = {
     position: 'sector {sector} (offset {offset} bytes)',
     backup: 'Backup taken before writing',
     safety: {
-      verify: 'Before writing, the current content at these locations is checked against the plan; if anything differs (the image was changed since), not a single byte is written.',
+      verify: 'Before writing, the current content at these locations is checked against the plan; if anything differs (it was changed since), not a single byte is written.',
+      volumes: 'Before writing, the partitions (volumes) at these locations are locked and dismounted, and handed back afterwards; if a program has files open on them they cannot be locked and nothing is written.',
       readBack: 'After writing, the data is read back and compared with the plan.',
       rollback: 'The content being overwritten is saved in the backup file above, so you can roll back later from the write history.',
       backupKept: 'The content being overwritten is also saved in the backup file above.',
     },
-    warning:
-      'Only this image file is changed, never the original disk. A window browsing this image is closed first; the write fails while another program (a virtual machine, for example) has the image open.',
-    acknowledge: 'I understand: confirming will overwrite {size} in this image file.',
+    image: {
+      warning:
+        'Only this image file is changed, never the original disk. A window browsing this image is closed first; the write fails while another program (a virtual machine, for example) has the image open.',
+      acknowledge: 'I understand: confirming will overwrite {size} in this image file.',
+    },
+    disk: {
+      warning:
+        'This writes directly to the physical disk, not to an image: you cannot start over from a fresh copy, only roll back from the backup above. Once repaired, Windows mounts the partition right away and writes to it (it creates a System Volume Information folder, for example), which can overwrite deleted files not yet recovered and can make a later roll-back refuse because the content changed. So recover and save your files to another disk first, ideally repair an image and check it before changing the original disk; do not repair a disk that has reported read errors.',
+      acknowledge: 'I understand: confirming will overwrite {size} on this disk.',
+      acknowledgeOriginal: 'I have tried this on an image, or I understand this changes the original disk and can only be undone from the backup.',
+    },
     cancel: 'Cancel',
     confirm: 'Write',
     writing: 'Writing…',
@@ -1470,7 +1478,12 @@ const enUS: typeof zhCN = {
     planNotFound: 'This plan has already been carried out or discarded',
     backupFailed: 'Could not save the backup, so nothing was written',
     backupUnreadable: 'The backup file cannot be read or is damaged, so it cannot be rolled back',
-    writeTargetUnsupported: 'This version can only write to image files; create an image of a physical disk first',
+    writeTargetUnsupported: 'A single drive letter cannot be written: choose the whole disk or an image file',
+    writeSystemDisk: 'Windows runs from a partition on this disk, so it is not written',
+    writeWrongDisk: 'This disk number no longer refers to the disk the plan was made for (it may have been reconnected): diagnose again',
+    volumeInUse: 'A partition to be written is in use by another program and cannot be locked: close programs using it (Explorer windows, open files) and click "Write" again',
+    backupOnTarget: 'The program folder is on the disk being written, so there is nowhere safe for the backup: move the program to another disk and try again',
+    planReadErrors: 'Reading this disk produced errors and it may have bad sectors: create an image and repair the image instead of writing to this disk',
     writeTargetUnavailable: 'Cannot open the image file to write to it',
     imageInUse: 'The image is open in another program (a virtual machine or another window, for example): close it and click "Write" again',
     writeRecordNotFound: 'This entry is not in the write history',

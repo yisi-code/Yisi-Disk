@@ -72,7 +72,8 @@ pub const OPEN_RANGE: &str = "repair.openRange";
 pub const DIAGNOSE_BOOT: &str = "repair.diagnoseBoot";
 /// 生成修复引导扇区的写入计划：参数 [`PlanBootSectorParams`]，结果是 [`BootSectorPlan`]。只读源、不写盘，读完即答复（不是任务）。
 /// 生成前重新诊断，结论必须仍是这种修复要求的（主坏备好、主好备坏），否则答复 [`error_code::PLAN_NOT_APPLICABLE`]；
-/// 把写入叠加在源上预演、重新诊断不是「正常」，或者要写的位置读不出等，答复 [`error_code::PLAN_UNAVAILABLE`]。
+/// 把写入叠加在源上预演、重新诊断不是「正常」，或者要写的位置读不出等，答复 [`error_code::PLAN_UNAVAILABLE`]；
+/// 生成计划时读源出过错（盘可能有坏道），答复 [`error_code::PLAN_READ_ERRORS`]。
 /// 源只能是镜像文件或整块物理盘：卷上的偏移不是盘上的偏移，答复 `INVALID_PARAMS`。
 pub const PLAN_BOOT_SECTOR: &str = "repair.planBootSector";
 /// 制作能识别坏区的镜像（任务）：参数 [`ImageParams`]，建好镜像文件与坏区图后答复 [`ImageStarted`]；
@@ -140,6 +141,8 @@ pub mod error_code {
     pub const PLAN_NOT_APPLICABLE: i64 = -32010;
     /// 生不成写入计划：要写的位置读不出、内容已经相同、预演写入后仍修不好等。
     pub const PLAN_UNAVAILABLE: i64 = -32011;
+    /// 生成写入计划时读源出过错：盘可能有坏道，先做镜像、在镜像上修，不往这块盘上写。
+    pub const PLAN_READ_ERRORS: i64 = -32012;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

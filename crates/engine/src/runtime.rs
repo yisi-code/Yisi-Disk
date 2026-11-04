@@ -346,14 +346,19 @@ fn dispatch_now(
         }
         PLAN_BOOT_SECTOR => {
             let params: PlanBootSectorParams = request.params()?;
+            let before = reading::snapshot();
             let (device, identity) = open_plan_source(&params.source)?;
             let device: Arc<dyn BlockDevice> = Arc::from(device);
-            to_result(&boot_check::plan(
-                &device,
-                identity,
-                params.partition,
-                params.fix,
-            )?)
+            let planned = boot_check::plan(&device, identity, params.partition, params.fix);
+            // 读的时候出过错的盘不往上写：先做镜像（不管计划生没生成，都先说这一条）
+            let errors = reading::snapshot().since(&before).errors;
+            if errors > 0 {
+                return Err(ErrorObject::new(
+                    protocol::error_code::PLAN_READ_ERRORS,
+                    format!("生成计划时读源出错 {errors} 次"),
+                ));
+            }
+            to_result(&planned?)
         }
         PREVIEW_RANGE => {
             let params: PreviewRangeParams = request.params()?;
@@ -612,7 +617,7 @@ fn open_image_source(
                 disk.device_number(),
                 yisi_io::volume_disk_numbers(image_path),
             )?;
-            let identity = disk_identity(&disk);
+            let identity = yisi_io::disk_identity(&disk);
             Ok((reading::metered(Box::new(disk)), identity))
         }
         #[cfg(windows)]
@@ -652,7 +657,7 @@ fn open_plan_source(source: &Source) -> Result<(Box<dyn BlockDevice>, String), E
         #[cfg(windows)]
         Source::Disk { handle } => {
             let disk = adopt_disk(*handle)?;
-            let identity = disk_identity(&disk);
+            let identity = yisi_io::disk_identity(&disk);
             Ok((reading::metered(Box::new(disk)), identity))
         }
         #[cfg(not(windows))]
@@ -662,27 +667,6 @@ fn open_plan_source(source: &Source) -> Result<(Box<dyn BlockDevice>, String), E
             "写入计划只能针对镜像文件或整块物理盘，不能针对一个卷",
         )),
     }
-}
-
-/// 物理盘的标识：厂商、型号、序列号。磁盘编号不算在内，同一块盘重新插拔后编号可能变。
-#[cfg(windows)]
-fn disk_identity(disk: &yisi_io::WindowsDisk) -> String {
-    let info = disk.device_number().ok().and_then(|number| {
-        yisi_io::list_disks()
-            .into_iter()
-            .find(|info| info.number == number)
-    });
-    identity_of(info.as_ref())
-}
-
-/// 由磁盘属性得出标识；查不到属性时是 `disk`。列出磁盘时给界面的标识也用它，与坏区图里记的一致。
-#[cfg(windows)]
-fn identity_of(info: Option<&yisi_io::DiskInfo>) -> String {
-    let words = match info {
-        Some(info) => format!("disk {} {} {}", info.vendor, info.model, info.serial),
-        None => "disk".to_owned(),
-    };
-    words.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// 输出目录建不起来时的答复。
@@ -809,7 +793,7 @@ fn disk_list() -> DiskList {
     let disks = yisi_io::list_disks()
         .into_iter()
         .map(|disk| DiskSummary {
-            identity: identity_of(Some(&disk)),
+            identity: disk.identity(),
             solid_state: disk.solid_state,
             partition_style: disk.partition_style.map(|style| {
                 match style {

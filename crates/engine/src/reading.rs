@@ -23,6 +23,11 @@ pub fn metered(device: Box<dyn BlockDevice>) -> Box<dyn BlockDevice> {
     Box::new(MeteredDevice::new(device, Arc::clone(&METER)))
 }
 
+/// 从进程启动起读源的累计统计。不是任务的一次性请求（例如生成写入计划）用前后两次之差看读的时候有没有出错。
+pub fn snapshot() -> ReadStats {
+    METER.snapshot()
+}
+
 /// 开始为任务 `job_id` 每秒发一次统计（没有变化、也没有卡在一次读取上时不发），直到返回的标志被置位。
 pub fn spawn_reporter(job_id: String, outbox: Arc<Outbox>) -> Arc<AtomicBool> {
     let stop = Arc::new(AtomicBool::new(false));

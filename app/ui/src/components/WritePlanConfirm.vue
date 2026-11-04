@@ -9,7 +9,7 @@ import { formatBytes } from '../utils/format'
 
 /**
  * 确认一份写入计划：写到哪里、做什么、改写哪几段、备份存在哪。勾选「我已了解」才能写，默认焦点在「取消」上。
- * 修复引导扇区与回滚共用
+ * 写的是物理磁盘时另有醒目的警告，并要多勾一项「试过镜像或明白改的是原盘」。修复引导扇区与回滚共用
  */
 const props = defineProps<{
   plan: PlanView
@@ -26,8 +26,13 @@ const { sourceName, filesystemName } = usePartitionText()
 const { writeActionText } = useWritePlanText()
 
 const isAcknowledged = ref(false)
+const isOriginalAcknowledged = ref(false)
 const cancelButton = ref<HTMLButtonElement | null>(null)
 
+const isDisk = computed(() => props.plan.target.kind === 'disk')
+const canConfirm = computed(
+  () => isAcknowledged.value && (!isDisk.value || isOriginalAcknowledged.value) && !props.busy,
+)
 const detail = computed(() => props.plan.bootSector)
 const totalBytes = computed(() => props.plan.writes.reduce((sum, range) => sum + range.length, 0))
 
@@ -86,14 +91,22 @@ function position(offset: number): string {
     </dl>
     <ul class="wizard__list">
       <li>{{ t('writePlan.safety.verify') }}</li>
+      <li v-if="isDisk">{{ t('writePlan.safety.volumes') }}</li>
       <li>{{ t('writePlan.safety.readBack') }}</li>
       <!-- 回滚本身不再回滚，只说明备份照样存了 -->
       <li>{{ plan.kind === 'rollback' ? t('writePlan.safety.backupKept') : t('writePlan.safety.rollback') }}</li>
     </ul>
-    <p class="wizard__hint wizard__hint--warning">{{ t('writePlan.warning') }}</p>
+    <p v-if="isDisk" class="wizard__error">{{ t('writePlan.disk.warning') }}</p>
+    <p v-else class="wizard__hint wizard__hint--warning">{{ t('writePlan.image.warning') }}</p>
     <label class="wizard__choice">
       <input v-model="isAcknowledged" type="checkbox" :disabled="busy" />
-      <span>{{ t('writePlan.acknowledge', { size: formatBytes(totalBytes) }) }}</span>
+      <span>
+        {{ t(isDisk ? 'writePlan.disk.acknowledge' : 'writePlan.image.acknowledge', { size: formatBytes(totalBytes) }) }}
+      </span>
+    </label>
+    <label v-if="isDisk" class="wizard__choice">
+      <input v-model="isOriginalAcknowledged" type="checkbox" :disabled="busy" />
+      <span>{{ t('writePlan.disk.acknowledgeOriginal') }}</span>
     </label>
     <p v-if="failure" class="wizard__error" role="alert">{{ formatHostError(failure) }}</p>
     <div class="write-plan__actions">
@@ -106,7 +119,7 @@ function position(offset: number): string {
       >
         {{ t('writePlan.cancel') }}
       </button>
-      <button class="wizard__button" type="button" :disabled="!isAcknowledged || busy" @click="emit('confirm')">
+      <button class="wizard__button" type="button" :disabled="!canConfirm" @click="emit('confirm')">
         {{ busy ? t('writePlan.writing') : t('writePlan.confirm') }}
       </button>
     </div>

@@ -12,7 +12,9 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, INFINITE, OpenProcess, PROCESS_DUP_HANDLE, PROCESS_SYNCHRONIZE,
     WaitForSingleObject,
 };
-use yisi_broker::protocol::{DiskOpened, FailureData, OPEN_DISK, OpenDiskParams, SHUTDOWN};
+use yisi_broker::protocol::{
+    DiskOpened, EXECUTE_WRITE, ExecuteWriteParams, FailureData, OPEN_DISK, OpenDiskParams, SHUTDOWN,
+};
 use yisi_io::{BlockDevice, IoError, WindowsDisk, physical_drive_number, volume_letter};
 use yisi_rpc::{
     ErrorObject, FrameError, Message, Response, error_chain, error_code, read_message,
@@ -48,6 +50,9 @@ pub fn run(pipe_name: &str, parent_pid: u32) -> anyhow::Result<()> {
             OPEN_DISK => request
                 .params::<OpenDiskParams>()
                 .and_then(|params| open_disk(&params.path, params.target_pid)),
+            EXECUTE_WRITE => request
+                .params::<ExecuteWriteParams>()
+                .and_then(|params| crate::disk_write::execute_write(&params)),
             SHUTDOWN => Ok(json!({})),
             other => Err(ErrorObject::new(
                 error_code::METHOD_NOT_FOUND,
@@ -149,7 +154,11 @@ fn pipe_server_pid(pipe: &File) -> io::Result<u32> {
 
 fn failed(message: String, os_error: Option<i32>) -> ErrorObject {
     tracing::warn!(%message, ?os_error, "请求失败");
-    let data = serde_json::to_value(FailureData { os_error }).unwrap_or(Value::Null);
+    let data = serde_json::to_value(FailureData {
+        os_error,
+        reason: None,
+    })
+    .unwrap_or(Value::Null);
     ErrorObject::new(error_code::SERVER_ERROR, message).with_data(data)
 }
 

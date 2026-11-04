@@ -869,6 +869,7 @@ fn engine_error_code(code: i64) -> &'static str {
         error_code::IMAGE_MISMATCH => "imageMismatch",
         error_code::PLAN_NOT_APPLICABLE => "planNotApplicable",
         error_code::PLAN_UNAVAILABLE => "planUnavailable",
+        error_code::PLAN_READ_ERRORS => "planReadErrors",
         _ => "engineRejected",
     }
 }
