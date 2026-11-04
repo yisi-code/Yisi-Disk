@@ -59,8 +59,9 @@ pub const CANCEL_SCAN: &str = "repair.cancelScan";
 /// 复制好的文件经 [`COPIED`] 通知分批送达，结果是 [`CopySummary`]。源为物理磁盘时，输出目录必须在另一块盘上，
 /// 否则答复 [`error_code::OUTPUT_ON_SOURCE`]。
 pub const COPY_FILES: &str = "repair.copyFiles";
-/// 搜索丢失的分区（任务，只读，可以暂停）：参数 [`SearchParams`]，立即返回空对象；从头到尾读一遍源，
-/// 进度经 [`PROGRESS`] 送达，结果是 [`SearchSummary`]。
+/// 搜索丢失的分区（任务，只读，可以暂停）：参数 [`SearchParams`]，立即返回空对象；按 [`SearchMode`] 读源，
+/// 进度经 [`PROGRESS`] 送达，找到的分区有变化时经 [`PARTITIONS`] 送达当前的全部候选分区，结果是 [`SearchSummary`]。
+/// 被取消时不答复 [`CANCELLED`]，而是照样以 [`COMPLETED`] 给出停下之前找到的分区（[`SearchSummary::stopped_at`]）。
 pub const SEARCH_PARTITIONS: &str = "repair.search";
 /// 在浏览会话里按位置打开一个分区（不在分区表里，例如搜索找到的）：参数 [`OpenRangeParams`]，
 /// 结果是 [`PartitionInfo`]，编号从 [`RANGE_PARTITION_BASE`] 起，之后像表里的分区一样列目录、预览、扫描、复制。
@@ -113,6 +114,9 @@ pub const FOUND: &str = "job.found";
 pub const COPIED: &str = "job.copied";
 /// 参数 [`JobImaging`]：制作镜像的进展，每秒最多 5 次，结束前总会发出最后一次。
 pub const IMAGING: &str = "job.imaging";
+/// 参数 [`JobPartitions`]：丢失分区搜索到目前为止找到的全部分区，有变化时发出，每秒最多 2 次；
+/// 最后一份在结果里（[`SearchSummary::candidates`]），不保证另发。
+pub const PARTITIONS: &str = "job.partitions";
 /// 参数 [`JobReading`]：任务读源的累计统计，任务运行期间每秒一次（没有变化时不发）。界面据此判断读得慢的原因。
 pub const READING: &str = "job.reading";
 /// 参数 [`JobLog`]。
@@ -663,6 +667,27 @@ pub struct CopySummary {
 pub struct SearchParams {
     pub job_id: String,
     pub source: Source,
+    pub mode: SearchMode,
+}
+
+/// 怎么搜丢失的分区。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SearchMode {
+    /// 只看分区通常开始的位置（1 MiB 边界、柱面边界、分区表里记的起点），找到一个分区就跳到它的末尾。
+    Quick,
+    /// 从头到尾读一遍。
+    Deep,
+}
+
+/// 到目前为止找到的分区（[`PARTITIONS`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobPartitions {
+    pub job_id: String,
+    /// 按起点排序，与结果里的写法相同。
+    pub candidates: Vec<FoundPartition>,
+    pub candidates_truncated: bool,
 }
 
 /// 丢失分区搜索的结果。
@@ -671,6 +696,9 @@ pub struct SearchParams {
 pub struct SearchSummary {
     pub size: u64,
     pub sector_size: u32,
+    pub mode: SearchMode,
+    /// 被停下时搜到的位置（字节）；停下之前找到的分区照样列出。搜完时为空。
+    pub stopped_at: Option<u64>,
     /// 现有分区表：mbr、gpt、none 之一；读不出时为 unreadable。
     pub scheme: String,
     /// 找到的分区，按起点排序。

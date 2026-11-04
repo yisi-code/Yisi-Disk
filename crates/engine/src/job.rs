@@ -144,6 +144,10 @@ impl JobContext {
         self.cancel.load(Ordering::Relaxed)
     }
 
+    pub fn is_paused(&self) -> bool {
+        self.pause.lock().paused
+    }
+
     /// 暂停中就在这里等，直到继续或取消；没暂停时立即返回。
     pub fn wait_while_paused(&self) {
         let mut state = self.pause.lock();

@@ -20,7 +20,7 @@ use yisi_engine::protocol::{
     BrowseOpened, Capabilities, CopyItem, DiskList, ExtractItem, FileListPage, FilePreview,
     FileTypeList, PartitionRef, ScanResult,
 };
-use yisi_engine::protocol::{MftFix, PartitionTableFix};
+use yisi_engine::protocol::{MftFix, PartitionTableFix, SearchMode};
 
 use crate::broker::BrokerSession;
 use crate::engines::{
@@ -326,7 +326,7 @@ fn browse_cancel_scan(
     engines.cancel_scan(job_id, partition)
 }
 
-/// 搜索丢失的分区（只读，可以暂停）。源为物理磁盘时与读取扫描一样，第一次需要时提权启动磁盘代理。
+/// 搜索丢失的分区（只读，可以暂停；快速或深度）。源为物理磁盘时与读取扫描一样，第一次需要时提权启动磁盘代理。
 #[tauri::command(async)]
 fn job_start_partition_search(
     app: AppHandle,
@@ -334,8 +334,9 @@ fn job_start_partition_search(
     broker: State<'_, BrokerSession>,
     job_id: String,
     target: Target,
+    mode: SearchMode,
 ) -> Result<(), HostError> {
-    engines.start_partition_search(app, &broker, job_id, target)
+    engines.start_partition_search(app, &broker, job_id, target, mode)
 }
 
 /// 在浏览会话里按位置打开搜索找到的分区；答复的编号之后用于 `browse_list` 等命令。

@@ -1,8 +1,11 @@
-//! 丢失分区搜索：从头到尾读一遍设备，逐个 512 字节找 FAT12/16/32、exFAT、NTFS 的引导扇区，
-//! 每个引导扇区既当作主引导扇区、也当作备份引导扇区推算分区起点，再核对文件系统的结构，
-//! 合并成候选分区，并与现有分区表比对。只读，不改分区表。
+//! 丢失分区搜索：找 FAT12/16/32、exFAT、NTFS 的引导扇区，每个引导扇区既当作主引导扇区、
+//! 也当作备份引导扇区推算分区起点，再核对文件系统的结构，合并成候选分区，并与现有分区表比对。只读，不改分区表。
+//!
+//! 两种搜法只是读哪些位置不同，认分区、比对分区表用同一套代码（[`Finder`]、[`Search::candidates`]）：
+//! - 深度搜索从头到尾读一遍设备，逐个 512 字节看；
+//! - 快速搜索只看分区通常开始的位置（[`next_start`]），找到一个分区就跳到它的末尾接着找。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -18,6 +21,29 @@ const EXFAT_MEDIA: u8 = 0xF8;
 const SECTOR: usize = 512;
 /// 最多记这么多个候选分区，挡住装满了磁盘镜像文件的盘。
 pub const MAX_CANDIDATES: usize = 1000;
+/// 快速搜索看的起点：Windows Vista 以后与常见分区工具按 1 MiB 对齐。
+const ALIGNMENT: u64 = 1 << 20;
+/// 按柱面分区的旧盘（Windows XP 年代）：分区从柱面边界开始，第一个分区与逻辑分区在柱面之后 63 个扇区。
+const CYLINDER: u64 = 255 * 63 * 512;
+const TRACK: u64 = 63 * 512;
+/// 快速搜索在每个起点读的范围（按扇区数）：起点前一个扇区（到这里结束的 NTFS 卷的备份）、起点上的主引导扇区、
+/// FAT32 第 6 扇区的备份、exFAT 第 12 扇区起的备份引导区。
+const WINDOW_BEFORE: u64 = 1;
+const WINDOW_AFTER: u64 = 13;
+
+/// 怎么搜。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchMode {
+    /// 只看分区通常开始的位置，找到一个分区就跳到它的末尾。起点不对齐、两份引导扇区所在的位置都不在这些地方的分区找不到。
+    Quick,
+    /// 从头到尾读一遍。
+    Deep,
+}
+
+/// 搜索的控制：读盘的取消、暂停与进度之外，找到的分区有变化时交出当前的全部候选分区（按起点排序）。
+pub trait SearchControl: ScanControl {
+    fn found(&self, candidates: &[Candidate], truncated: bool);
+}
 
 /// 候选分区是靠哪个引导扇区找到的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,62 +86,237 @@ pub struct Candidate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchReport {
     pub size: u64,
+    pub mode: SearchMode,
     /// 现有的分区表；读不出时为空。
     pub table: Option<PartitionTable>,
     /// 按起点排序。
     pub candidates: Vec<Candidate>,
     /// 候选分区超过 [`MAX_CANDIDATES`]，后面的没有记。
     pub candidates_truncated: bool,
-    /// 读不出、跳过的字节数（整段 1 MiB 跳过，其中的引导扇区找不到）。
+    /// 读不出、跳过的字节数（深度搜索整段 1 MiB 跳过，快速搜索跳过那一个起点），其中的引导扇区找不到。
     pub unreadable_bytes: u64,
+    /// 被停下时搜到的位置；停下之前找到的分区照样列出。搜完时为空。
+    pub stopped_at: Option<u64>,
     pub elapsed_ms: u64,
 }
 
-/// 搜索整个设备；被取消时返回 `None`。
-pub fn search(device: &Arc<dyn BlockDevice>, control: &dyn ScanControl) -> Option<SearchReport> {
+/// 搜索设备。被停下（`control` 取消）时也给出结果：停下之前找到的分区与停在哪里。
+pub fn search(
+    device: &Arc<dyn BlockDevice>,
+    mode: SearchMode,
+    control: &dyn SearchControl,
+) -> SearchReport {
     let started = Instant::now();
-    let size = device.size();
-    let mut finder = Finder::default();
-    let mut unreadable_bytes = 0u64;
-    let finished = scan_device(device.as_ref(), control, |offset, block| match block {
-        Ok(bytes) => {
-            for (index, sector) in bytes.as_chunks::<SECTOR>().0.iter().enumerate() {
-                let at = offset + (index * SECTOR) as u64;
-                finder.examine(device.as_ref(), at, sector);
-            }
-        }
-        Err((length, error)) => {
-            tracing::warn!(offset, length, %error, "读不出，跳过");
-            unreadable_bytes += length;
-        }
-    });
-    if !finished {
-        return None;
-    }
-
     let table = yisi_part::read_table(device.as_ref())
         .inspect_err(|error| tracing::warn!(%error, "读不出分区表，候选分区都按丢失处理"))
         .ok();
-    let mut candidates = Vec::with_capacity(finder.found.len());
-    for (key, found) in &finder.found {
-        if control.is_cancelled() {
-            return None;
-        }
-        candidates.push(finder.candidate(device, key, found, table.as_ref()));
-    }
-    mark_overlapping(&mut candidates);
-    Some(SearchReport {
-        size,
+    let mut search = Search {
+        device: Arc::clone(device),
         table,
+        finder: Finder::default(),
+        labels: HashMap::new(),
+        unreadable_bytes: 0,
+    };
+    let stopped_at = match mode {
+        SearchMode::Quick => search.quick(control),
+        SearchMode::Deep => search.deep(control),
+    };
+    let candidates = search.candidates();
+    SearchReport {
+        size: device.size(),
+        mode,
+        table: search.table,
         candidates,
-        candidates_truncated: finder.truncated,
-        unreadable_bytes,
+        candidates_truncated: search.finder.truncated,
+        unreadable_bytes: search.unreadable_bytes,
+        stopped_at,
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-    })
+    }
+}
+
+struct Search {
+    device: Arc<dyn BlockDevice>,
+    table: Option<PartitionTable>,
+    finder: Finder,
+    /// 已经取过的卷标，按候选分区与是否按备份引导扇区打开：每次交出候选分区时不再重新打开卷。
+    labels: HashMap<(Key, bool), Option<String>>,
+    unreadable_bytes: u64,
+}
+
+impl Search {
+    /// 从头到尾读一遍；被停下时返回读到的位置。
+    fn deep(&mut self, control: &dyn SearchControl) -> Option<u64> {
+        let device = Arc::clone(&self.device);
+        let mut reached = 0u64;
+        let finished = scan_device(device.as_ref(), control, |offset, block| {
+            let length = match block {
+                Ok(bytes) => {
+                    self.examine(offset, bytes);
+                    bytes.len() as u64
+                }
+                Err((length, error)) => {
+                    tracing::warn!(offset, length, %error, "读不出，跳过");
+                    self.unreadable_bytes += length;
+                    length
+                }
+            };
+            reached = offset + length;
+            self.report_changes(control);
+        });
+        (!finished).then_some(reached)
+    }
+
+    /// 只看可能的起点（[`next_start`]），每处读起点附近的几个扇区；找到的分区跳过，最后看一眼设备的最后一个扇区
+    /// （到设备末尾结束的 NTFS 卷的备份）。被停下时返回停在的起点。
+    fn quick(&mut self, control: &dyn SearchControl) -> Option<u64> {
+        let size = self.device.size();
+        let sector = u64::from(self.device.sector_size()).max(SECTOR as u64);
+        let mut table_starts: Vec<u64> = self
+            .table
+            .iter()
+            .flat_map(|table| table.partitions.iter().map(|partition| partition.offset))
+            .collect();
+        table_starts.sort_unstable();
+        control.progress(0, size);
+        let mut from = 0u64;
+        while let Some(at) = next_start(from, size, &table_starts) {
+            if control.is_cancelled() {
+                return Some(at);
+            }
+            let start = at.saturating_sub(WINDOW_BEFORE * sector);
+            self.examine_range(start, at.saturating_add(WINDOW_AFTER * sector).min(size));
+            from = self.end_of_found_at(at).unwrap_or(0).max(at + 1);
+            self.report_changes(control);
+            control.progress(from.min(size), size);
+        }
+        if size >= sector {
+            self.examine_range(size - sector, size);
+            self.report_changes(control);
+        }
+        control.progress(size, size);
+        None
+    }
+
+    fn examine(&mut self, offset: u64, bytes: &[u8]) {
+        for (index, sector) in bytes.as_chunks::<SECTOR>().0.iter().enumerate() {
+            let at = offset + (index * SECTOR) as u64;
+            self.finder.examine(self.device.as_ref(), at, sector);
+        }
+    }
+
+    fn examine_range(&mut self, start: u64, end: u64) {
+        let Ok(length) = usize::try_from(end.saturating_sub(start)) else {
+            return;
+        };
+        let mut bytes = vec![0u8; length];
+        match self.device.read_exact_at(start, &mut bytes) {
+            Ok(()) => self.examine(start, &bytes),
+            Err(error) => {
+                tracing::warn!(offset = start, length, %error, "读不出，跳过");
+                self.unreadable_bytes += length as u64;
+            }
+        }
+    }
+
+    /// 起点正好在 `at` 的候选分区里最靠后的末尾：快速搜索从那里接着找。
+    fn end_of_found_at(&self, at: u64) -> Option<u64> {
+        let first = Key {
+            offset: at,
+            volume_bytes: 0,
+            kind: 0,
+        };
+        let last = Key {
+            offset: at,
+            volume_bytes: u64::MAX,
+            kind: u8::MAX,
+        };
+        self.finder
+            .found
+            .range(first..=last)
+            .map(|(key, _)| key.offset.saturating_add(key.volume_bytes))
+            .max()
+    }
+
+    fn report_changes(&mut self, control: &dyn SearchControl) {
+        if std::mem::take(&mut self.finder.changed) {
+            let candidates = self.candidates();
+            control.found(&candidates, self.finder.truncated);
+        }
+    }
+
+    /// 当前找到的全部候选分区，按起点排序，标好与分区表、与彼此的关系。
+    fn candidates(&mut self) -> Vec<Candidate> {
+        let size = self.device.size();
+        let mut candidates = Vec::with_capacity(self.finder.found.len());
+        for (key, found) in &self.finder.found {
+            let room = size.saturating_sub(key.offset);
+            let length = key.volume_bytes.min(room);
+            let found_by = match (found.primary, found.backup) {
+                (true, true) => FoundBy::Both,
+                (false, true) => FoundBy::Backup,
+                _ => FoundBy::Primary,
+            };
+            let boot = if found_by == FoundBy::Backup {
+                BootCopy::Backup
+            } else {
+                BootCopy::Primary
+            };
+            let device = &self.device;
+            let label = self
+                .labels
+                .entry((*key, boot == BootCopy::Backup))
+                .or_insert_with(|| {
+                    Volume::open_with(Arc::clone(device), key.offset, length, boot)
+                        .ok()
+                        .and_then(|volume| volume.label().map(str::to_owned))
+                })
+                .clone();
+            candidates.push(Candidate {
+                offset: key.offset,
+                length,
+                kind: found.kind,
+                label,
+                found_by,
+                boot,
+                truncated: key.volume_bytes > room,
+                relation: relation(self.table.as_ref(), key.offset, length),
+                overlaps_candidate: false,
+            });
+        }
+        mark_overlapping(&mut candidates);
+        candidates
+    }
+}
+
+/// 快速搜索的下一个起点：不小于 `from`、在设备之内的最小一个，取自 1 MiB 边界、柱面边界与柱面之后 63 个扇区
+/// （含第 63 扇区）、现有分区表里各分区的起点（表项还在、只是引导扇区坏了时）。第 0 扇区是 1 MiB 边界之一
+/// （不分区直接格式化的 U 盘）。
+fn next_start(from: u64, size: u64, table_starts: &[u64]) -> Option<u64> {
+    // 不小于 from 的 base + k * unit
+    let up = |unit: u64, base: u64| {
+        if from <= base {
+            Some(base)
+        } else {
+            (from - base)
+                .div_ceil(unit)
+                .checked_mul(unit)
+                .and_then(|step| step.checked_add(base))
+        }
+    };
+    [
+        up(ALIGNMENT, 0),
+        up(CYLINDER, 0),
+        up(CYLINDER, TRACK),
+        table_starts.iter().copied().find(|&start| start >= from),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|&at| at < size)
+    .min()
 }
 
 /// 一个假设的分区：起点、卷长度、文件系统。按起点排序。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Key {
     offset: u64,
     volume_bytes: u64,
@@ -133,6 +334,8 @@ struct Found {
 struct Finder {
     found: BTreeMap<Key, Found>,
     truncated: bool,
+    /// 上次交出候选分区之后，有新的候选分区或靠哪份引导扇区找到变了。
+    changed: bool,
 }
 
 impl Finder {
@@ -179,44 +382,12 @@ impl Finder {
             primary: false,
             backup: false,
         });
-        match backup {
-            Some(_) => found.backup = true,
-            None => found.primary = true,
-        }
-    }
-
-    fn candidate(
-        &self,
-        device: &Arc<dyn BlockDevice>,
-        key: &Key,
-        found: &Found,
-        table: Option<&PartitionTable>,
-    ) -> Candidate {
-        let room = device.size().saturating_sub(key.offset);
-        let length = key.volume_bytes.min(room);
-        let found_by = match (found.primary, found.backup) {
-            (true, true) => FoundBy::Both,
-            (false, true) => FoundBy::Backup,
-            _ => FoundBy::Primary,
+        let flag = match backup {
+            Some(_) => &mut found.backup,
+            None => &mut found.primary,
         };
-        let boot = if found_by == FoundBy::Backup {
-            BootCopy::Backup
-        } else {
-            BootCopy::Primary
-        };
-        Candidate {
-            offset: key.offset,
-            length,
-            kind: found.kind,
-            label: Volume::open_with(Arc::clone(device), key.offset, length, boot)
-                .ok()
-                .and_then(|volume| volume.label().map(str::to_owned)),
-            found_by,
-            boot,
-            truncated: key.volume_bytes > room,
-            relation: relation(table, key.offset, length),
-            overlaps_candidate: false,
-        }
+        self.changed |= !*flag;
+        *flag = true;
     }
 }
 
@@ -335,10 +506,11 @@ fn mark_overlapping(candidates: &mut [Candidate]) {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::io;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    use yisi_fs::samples::MemoryDisk;
+    use yisi_fs::samples::{ExfatImage, MemoryDisk};
     use yisi_io::IoError;
 
     use super::*;
@@ -348,6 +520,9 @@ mod tests {
         cancel_after: Option<usize>,
         checks: Cell<usize>,
         last: Cell<(u64, u64)>,
+        /// 最近一次交出的候选分区，与交过几次。
+        found: RefCell<Vec<Candidate>>,
+        found_calls: Cell<usize>,
     }
 
     impl Control {
@@ -356,7 +531,16 @@ mod tests {
                 cancel_after: None,
                 checks: Cell::new(0),
                 last: Cell::new((0, 0)),
+                found: RefCell::new(Vec::new()),
+                found_calls: Cell::new(0),
             }
+        }
+    }
+
+    impl SearchControl for Control {
+        fn found(&self, candidates: &[Candidate], _truncated: bool) {
+            self.found_calls.set(self.found_calls.get() + 1);
+            *self.found.borrow_mut() = candidates.to_vec();
         }
     }
 
@@ -377,10 +561,52 @@ mod tests {
     }
 
     fn run(disk: &SearchDisk) -> SearchReport {
+        run_on(&memory(disk), SearchMode::Deep)
+    }
+
+    fn run_on(device: &Arc<dyn BlockDevice>, mode: SearchMode) -> SearchReport {
         let control = Control::new();
-        let report = search(&memory(disk), &control).unwrap();
+        let report = search(device, mode, &control);
+        assert_eq!(report.stopped_at, None);
         assert_eq!(control.last.get(), (report.size, report.size));
+        // 边搜边交出的最后一份就是结果
+        assert_eq!(*control.found.borrow(), report.candidates);
         report
+    }
+
+    /// 记下读了多少字节的设备。
+    struct Counting {
+        inner: MemoryDisk,
+        bytes: AtomicU64,
+    }
+
+    impl BlockDevice for Counting {
+        fn size(&self) -> u64 {
+            self.inner.size()
+        }
+
+        fn sector_size(&self) -> u32 {
+            512
+        }
+
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, IoError> {
+            self.bytes.fetch_add(buf.len() as u64, Ordering::Relaxed);
+            self.inner.read_at(offset, buf)
+        }
+    }
+
+    fn counting(image: Vec<u8>) -> Arc<Counting> {
+        Arc::new(Counting {
+            inner: MemoryDisk::new(image, 512),
+            bytes: AtomicU64::new(0),
+        })
+    }
+
+    /// 两种搜法对同一个分区的结论相同（与别的候选分区是否重叠除外：快速搜索不看分区里面）。
+    fn same_partition(quick: &Candidate, deep: &Candidate) {
+        let mut deep = deep.clone();
+        deep.overlaps_candidate = quick.overlaps_candidate;
+        assert_eq!(*quick, deep);
     }
 
     fn find(report: &SearchReport, offset: u64) -> &Candidate {
@@ -567,7 +793,7 @@ mod tests {
             inner: MemoryDisk::new(disk.image.clone(), 512),
             bad: (disk.exfat.0, disk.exfat.0 + 512),
         });
-        let report = search(&device, &Control::new()).unwrap();
+        let report = search(&device, SearchMode::Deep, &Control::new());
         assert_eq!(report.unreadable_bytes, 1 << 20);
         let offsets: Vec<u64> = report.candidates.iter().map(|c| c.offset).collect();
         assert!(!offsets.contains(&disk.exfat.0), "{offsets:?}");
@@ -575,13 +801,112 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_stops_the_search() {
+    fn stopping_keeps_what_was_found() {
         let disk = search_disk();
+        // 读完前 3 MiB 停下：第 1 MiB 起的 FAT32 已经找到
         let control = Control {
             cancel_after: Some(3),
             ..Control::new()
         };
-        assert!(search(&memory(&disk), &control).is_none());
+        let report = search(&memory(&disk), SearchMode::Deep, &control);
+        assert_eq!(report.stopped_at, Some(3 << 20));
         assert_eq!(control.last.get().0, 3 << 20);
+        let offsets: Vec<u64> = report.candidates.iter().map(|c| c.offset).collect();
+        assert_eq!(offsets, [disk.fat32.0]);
+        assert_eq!(find(&report, disk.fat32.0).found_by, FoundBy::Both);
+        assert_eq!(*control.found.borrow(), report.candidates);
+
+        // 快速搜索看完第 0 扇区就停：停在下一个起点（第 63 扇区），什么也没找到
+        let control = Control {
+            cancel_after: Some(1),
+            ..Control::new()
+        };
+        let report = search(&memory(&disk), SearchMode::Quick, &control);
+        assert_eq!(report.stopped_at, Some(63 * 512));
+        assert!(report.candidates.is_empty());
+        assert_eq!(control.found_calls.get(), 0);
+    }
+
+    #[test]
+    fn quick_search_skips_over_found_partitions() {
+        let mut disk = search_disk();
+        disk.clear_table();
+        let deep = run(&disk);
+        let device = counting(disk.image.clone());
+        let quick = run_on(
+            &(Arc::clone(&device) as Arc<dyn BlockDevice>),
+            SearchMode::Quick,
+        );
+        assert_eq!(quick.mode, SearchMode::Quick);
+        // NTFS 分区里的 FAT12 镜像文件被跳过了，其余与深度搜索相同
+        let offsets: Vec<u64> = quick.candidates.iter().map(|c| c.offset).collect();
+        assert_eq!(offsets, [disk.fat32.0, disk.ntfs.0, disk.exfat.0]);
+        for candidate in &quick.candidates {
+            same_partition(candidate, find(&deep, candidate.offset));
+        }
+        assert!(!find(&quick, disk.ntfs.0).overlaps_candidate);
+        let read = device.bytes.load(Ordering::Relaxed);
+        assert!(read < quick.size / 8, "读了 {read} 字节");
+    }
+
+    #[test]
+    fn quick_search_finds_partitions_by_their_backups() {
+        let mut disk = search_disk();
+        disk.clear_table();
+        for offset in [disk.fat32.0, disk.ntfs.0, disk.exfat.0] {
+            disk.wipe_primary_boot(offset);
+        }
+        let deep = run(&disk);
+        let quick = run_on(&memory(&disk), SearchMode::Quick);
+        for offset in [disk.fat32.0, disk.ntfs.0, disk.exfat.0] {
+            let candidate = find(&quick, offset);
+            assert_eq!(candidate.found_by, FoundBy::Backup);
+            same_partition(candidate, find(&deep, offset));
+        }
+    }
+
+    #[test]
+    fn a_volume_on_the_whole_device_is_found_at_once() {
+        // 不分区直接格式化的 U 盘：第 0 扇区就是 exFAT 的引导扇区
+        let volume = ExfatImage::new().finish();
+        let size = volume.len() as u64;
+        let device = counting(volume);
+        let report = run_on(
+            &(Arc::clone(&device) as Arc<dyn BlockDevice>),
+            SearchMode::Quick,
+        );
+        assert_eq!(report.candidates.len(), 1);
+        let candidate = &report.candidates[0];
+        assert_eq!((candidate.offset, candidate.kind), (0, FsKind::Exfat));
+        assert_eq!(candidate.length, size);
+        let read = device.bytes.load(Ordering::Relaxed);
+        assert!(read < 1 << 20, "读了 {read} 字节");
+    }
+
+    #[test]
+    fn an_unaligned_partition_needs_the_deep_search() {
+        // 起点既不在 1 MiB 边界、也不在柱面边界上
+        let volume = ExfatImage::new().finish();
+        let at = (3 << 20) + (64 << 10);
+        let mut image = vec![0u8; at + volume.len() + (1 << 20)];
+        image[at..at + volume.len()].copy_from_slice(&volume);
+        let device: Arc<dyn BlockDevice> = Arc::new(MemoryDisk::new(image, 512));
+        assert!(run_on(&device, SearchMode::Quick).candidates.is_empty());
+        let deep = run_on(&device, SearchMode::Deep);
+        let offsets: Vec<u64> = deep.candidates.iter().map(|c| c.offset).collect();
+        assert_eq!(offsets, [at as u64]);
+    }
+
+    #[test]
+    fn quick_search_starts_are_aligned_old_style_or_from_the_table() {
+        let size = 1 << 40;
+        let after = |from: u64| next_start(from, size, &[1000 * 512]).unwrap();
+        assert_eq!(after(0), 0);
+        assert_eq!(after(1), TRACK);
+        assert_eq!(after(TRACK + 1), 1000 * 512);
+        assert_eq!(after(1000 * 512 + 1), ALIGNMENT);
+        assert_eq!(after(7 * ALIGNMENT + 1), CYLINDER);
+        assert_eq!(after(CYLINDER + 1), CYLINDER + TRACK);
+        assert_eq!(next_start(size - 511, size, &[]), None);
     }
 }

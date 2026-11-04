@@ -23,6 +23,8 @@ const enUS: typeof zhCN = {
     next: 'Next',
     cancel: 'Cancel',
     cancelling: 'Cancelling…',
+    stop: 'Stop',
+    stopping: 'Stopping…',
     pause: 'Pause',
     resume: 'Resume',
     unresponsive: 'The engine has not responded for over 10 seconds',
@@ -163,9 +165,9 @@ const enUS: typeof zhCN = {
     },
     findPartitions: {
       name: 'Find lost partitions',
-      summary: 'Searches the whole disk for partitions lost to deletion or a damaged partition table, so you can browse their files and save them to another disk.',
+      summary: 'Searches the whole disk for partitions lost to deletion or a damaged partition table, so you can browse their files, save them to another disk, or write a found partition back to the partition table.',
       suits: 'A drive letter is gone, Disk Management shows "Unallocated", or a partition vanished after partitioning.',
-      limits: 'If the partition still exists but will not open, use "Repair a partition that will not open". This version cannot write found partitions back to the partition table yet.',
+      limits: 'If the partition still exists but will not open, use "Repair a partition that will not open". A partition whose main and backup boot sectors are both damaged cannot be found.',
     },
     repairPartition: {
       name: 'Repair a partition that will not open',
@@ -832,9 +834,21 @@ const enUS: typeof zhCN = {
       results: 'Results',
     },
     intro:
-      'Reads the whole disk or image from start to end, looks at every sector for FAT, exFAT and NTFS boot sectors (including the backup copies partitions keep), checks the file system structures and lists the partitions it finds. You can then browse their files and save them to another disk.',
+      'Looks on the disk or image for FAT, exFAT and NTFS boot sectors (including the backup copies partitions keep), checks the file system structures and lists the partitions it finds. You can then browse their files and save them to another disk.',
     diskHint:
-      'Reading a physical disk needs administrator rights. It is read-only and does not change the disk. The whole disk is read, which can take hours on a large disk; you can pause or cancel. If the disk has reported read errors, make an image first and search the image.',
+      'Reading a physical disk needs administrator rights. It is read-only and does not change the disk. A deep search reads the whole disk, which can take hours on a large disk; you can pause or stop at any time. If the disk has reported read errors, make an image first and search the image.',
+    mode: {
+      legend: 'How to search',
+      quick: 'Quick search (recommended)',
+      quickHint: 'Looks only where partitions usually start (every 1 MiB, cylinder boundaries on old disks, starts recorded in the partition table) and skips to the end of each partition it finds. With one partition on a disk it takes seconds.',
+      deep: 'Deep search',
+      deepHint: 'Reads the whole disk from start to end and looks at every sector. It also finds partitions that start elsewhere and disk images stored inside partitions; it takes hours on a large disk.',
+    },
+    live: {
+      title: 'Partitions found so far ({count})',
+      none: 'No partitions found yet.',
+      hint: 'You can stop at any time: the partitions found so far are listed, and you can browse them, save files and write them back to the partition table as usual.',
+    },
     start: 'Start search',
     restart: 'Search again',
     status: {
@@ -847,6 +861,10 @@ const enUS: typeof zhCN = {
     },
     results: {
       separator: ' ',
+      mode: {
+        quick: 'Quick search:',
+        deep: 'Deep search:',
+      },
       summary: 'Found {count} partition. | Found {count} partitions.',
       none: 'No FAT, exFAT or NTFS partitions were found. You can still try "Recover files by type" for the files.',
       table: 'Current partition table: {scheme}.',
@@ -859,6 +877,9 @@ const enUS: typeof zhCN = {
       elapsed: 'Took {seconds} s.',
       unreadable: '{size} could not be read and was skipped; partitions there cannot be found.',
       truncated: 'Too many partitions were found; only the first {count} are listed.',
+      stopped: 'The search stopped at {position} ({percent}%); only partitions found before that are listed.',
+      deep: 'Deep search',
+      deepHint: 'Did not find the partition you need? A deep search reads the whole disk from start to end; it takes hours on a large disk.',
       readOnly:
         'Searching and browsing are read-only and do not change the disk. Save the files you need to another disk first; afterwards a "lost" partition can be written back to the partition table.',
       opening: 'Opening for browsing…',

@@ -22,10 +22,10 @@ use yisi_engine::protocol::{
     CARVE_EXTRACT, CARVE_START, COMPLETED, COPIED, COPY_FILES, Capabilities, CarveParams,
     CarveStarted, CopyItem, CopyParams, CopyStarted, DiskList, ExtractItem, ExtractParams, FAILED,
     FOUND, FileListPage, FilePreview, FileTypeList, HEARTBEAT, IMAGING, JobRef, LIST_DISKS,
-    LIST_FILE_TYPES, LIST_FILES, LOG, ListFilesParams, PARTIAL_SUFFIX, PAUSE, PREVIEW_FILE,
-    PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS, PartitionRef, PreviewFsParams, PreviewParams,
-    PreviewRangeParams, READ_SCAN, READING, RESUME, ReadScanParams, SCAN_DELETED, ScanParams,
-    ScanResult, Source, error_code,
+    LIST_FILE_TYPES, LIST_FILES, LOG, ListFilesParams, PARTIAL_SUFFIX, PARTITIONS, PAUSE,
+    PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS, PartitionRef, PreviewFsParams,
+    PreviewParams, PreviewRangeParams, READ_SCAN, READING, RESUME, ReadScanParams, SCAN_DELETED,
+    ScanParams, ScanResult, Source, error_code,
 };
 
 use yisi_engine::protocol::{BootCopy, BootDiagnosis, DIAGNOSE_BOOT, DiagnoseBootParams};
@@ -756,6 +756,7 @@ impl EngineProcess {
             FOUND => "found",
             COPIED => "copied",
             IMAGING => "imaging",
+            PARTITIONS => "partitions",
             READING => "reading",
             LOG => "log",
             COMPLETED => "completed",
