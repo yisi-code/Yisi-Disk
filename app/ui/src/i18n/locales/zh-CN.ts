@@ -1117,8 +1117,17 @@ export default {
       flush: '保存到磁盘时出错',
       readBack: '读回比对不一致',
     },
+    device: {
+      named: '{name}（{detail}）',
+      withSerial: '{model}，{size}，序列号 {serial}',
+      noSerial: '{model}，{size}，查不到序列号',
+      unknownModel: '型号不明',
+    },
     history: {
       title: '写盘记录',
+      target: '写到：{target}',
+      indistinct:
+        '这块盘查不到序列号：同厂商、同型号、同容量的另一块盘（例如从同一个镜像复制出来的几个虚拟磁盘）的记录也会列在这里，分不出来。回滚前会逐字节核对盘上的内容，对不上就一个字节也不写。',
       backup: '备份：{path}',
       rollback: '回滚…',
       rolledBack: '已回滚',
@@ -1627,5 +1636,6 @@ export default {
     writeRecordNotFound: '写盘记录里没有这一条',
     rollbackNothing: '那次没有写下任何内容，不用回滚',
     rollbackDone: '这次写入已经回滚过了',
+    rollbackOtherDevice: '这条记录是另一块盘上的（型号、序列号或容量对不上），不能在这块盘上回滚',
   },
 }

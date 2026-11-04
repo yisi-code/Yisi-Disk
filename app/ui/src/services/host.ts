@@ -834,6 +834,8 @@ export interface PlanSummary {
   partitionTable: PartitionTableDetail | null
   mft: MftDetail | null
   fsFix: FsFixDetail | null
+  /** 写到哪块盘（旧记录没有） */
+  device: PlanDevice | null
   rollbackOf: string | null
 }
 
@@ -853,6 +855,24 @@ export interface WriteOutcome {
 }
 
 /** 写盘记录里的一条：执行过的计划（成功或失败） */
+/**
+ * 写到哪块盘：认盘标识、容量、扇区大小与计划里的设备相同；model 是厂商与型号、serial 是序列号（镜像文件、查不到时为空）。
+ * 写盘记录按它认源，不按磁盘编号
+ */
+export interface PlanDevice {
+  identity: string
+  size: number
+  sectorSize: number
+  model: string
+  serial: string
+}
+
+/** 一个源的写盘记录；indistinct：这块盘查不到序列号，同型号、同容量的另一块盘的记录也会列在里面 */
+export interface WriteHistory {
+  records: WriteRecord[]
+  indistinct: boolean
+}
+
 export interface WriteRecord extends PlanSummary {
   planId: string
   backupPath: string
@@ -928,14 +948,17 @@ export function discardWritePlan(planId: string): Promise<void> {
   return invoke<void>('write_plan_discard', { planId })
 }
 
-/** 为写盘记录里的一次写入生成回滚计划，同样要确认后执行 */
-export function planRollback(planId: string): Promise<PlanView> {
-  return invoke<PlanView>('write_plan_rollback', { planId })
+/**
+ * 为写盘记录里的一次写入生成回滚计划，同样要确认后执行。target 是现在查看的源，必须就是当时写的那块盘
+ * （不是时返回 rollbackOtherDevice）
+ */
+export function planRollback(planId: string, target: JobTarget): Promise<PlanView> {
+  return invoke<PlanView>('write_plan_rollback', { planId, target })
 }
 
-/** 写盘记录，最新的在前 */
-export function listWriteHistory(): Promise<WriteRecord[]> {
-  return invoke<WriteRecord[]>('write_history_list')
+/** 这个源（现在这块盘、这个镜像文件）上的写盘记录，最新的在前；宿主按认盘标识认，不按磁盘编号 */
+export function listWriteHistory(target: JobTarget): Promise<WriteHistory> {
+  return invoke<WriteHistory>('write_history_list', { target })
 }
 
 /** 用系统默认程序打开复制出的文件；可执行与脚本类文件宿主不打开（executableBlocked） */

@@ -129,10 +129,8 @@ const lastRecord = computed(() => {
   const record = writePlan.lastRecord.value
   return record !== null && sameTarget(record.target, fsCheck.target.value) ? record : null
 })
-/** 这个源的写盘记录：换了页面再回来也能回滚以前的修复 */
-const targetRecords = computed(() =>
-  writePlan.records.value.filter((record) => sameTarget(record.target, fsCheck.target.value)),
-)
+/** 这个源的写盘记录（宿主按认盘标识筛好）：换了页面再回来也能回滚以前的修复 */
+const targetRecords = computed(() => writePlan.records.value)
 
 const checkStatusText = computed(() => {
   const stage = fsCheck.stage.value
@@ -184,9 +182,17 @@ watch(report, () => {
   fatRatings.value = null
 })
 
+// 换了检查的源就读它的写盘记录
+watch(
+  () => fsCheck.target.value,
+  (source) => {
+    void writePlan.loadRecords(source)
+  },
+  { immediate: true },
+)
+
 onMounted(() => {
   titleElement.value?.focus()
-  void writePlan.loadRecords()
 })
 
 async function handleExit() {
@@ -266,10 +272,11 @@ async function proposeFsFix(fixes: FsFix[], badClusters: ClusterRun[]) {
 }
 
 async function proposeRollback(record: WriteRecord) {
-  if (writePlan.isPreparing.value || fsCheck.isBusy.value) {
+  const source = fsCheck.target.value
+  if (source === null || writePlan.isPreparing.value || fsCheck.isBusy.value) {
     return
   }
-  await writePlan.prepareRollback(record.planId)
+  await writePlan.prepareRollback(record.planId, source)
 }
 
 /** 确认后写入；写下去过内容就重新检查，结果页显示写后的问题清单 */
@@ -775,6 +782,7 @@ function buildReportText(): string {
           <h3 id="fs-check-write-history" class="wizard__section-title">{{ t('writePlan.history.title') }}</h3>
           <WriteHistoryList
             :records="targetRecords"
+            :indistinct="writePlan.indistinct.value"
             :disabled="writePlan.isPreparing.value || fsCheck.isBusy.value || isSavingLost"
             @rollback="proposeRollback"
           />

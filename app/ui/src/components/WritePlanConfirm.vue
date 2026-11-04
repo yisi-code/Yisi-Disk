@@ -22,8 +22,8 @@ const emit = defineEmits<{ confirm: []; cancel: [] }>()
 
 const { t, locale } = useI18n()
 const { formatHostError } = useHostErrorText()
-const { sourceName, filesystemName, bootFieldName, bootFieldValue } = usePartitionText()
-const { writeActionText, tableTypeText } = useWritePlanText()
+const { filesystemName, bootFieldName, bootFieldValue } = usePartitionText()
+const { writeActionText, writeTargetText, tableTypeText } = useWritePlanText()
 
 const isAcknowledged = ref(false)
 const isOriginalAcknowledged = ref(false)
@@ -140,7 +140,7 @@ function position(offset: number): string {
     <h3 id="write-plan-title" class="wizard__section-title">{{ writeActionText(plan) }}</h3>
     <dl class="wizard__details">
       <dt>{{ t('writePlan.target') }}</dt>
-      <dd class="wizard__path-text">{{ sourceName(plan.target) }}</dd>
+      <dd class="wizard__path-text">{{ writeTargetText(plan) }}</dd>
       <template v-if="partitionDetail">
         <dt>{{ t('writePlan.partition') }}</dt>
         <dd>
