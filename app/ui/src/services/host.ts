@@ -484,6 +484,8 @@ export interface FsCheckReport {
   checked: string[]
   skipped: string[]
   elapsedMs: number
+  /** FAT、exFAT 上能修的几类问题与各自多少；坏簇要先读空闲簇，不在里面 */
+  repairs: FsFixCount[]
 }
 
 /** 宿主转发的任务事件；`completed` 的结果随任务种类而定（读取扫描为 ReadScanReport，深度恢复为 CarveSummary） */
@@ -769,13 +771,47 @@ export interface MftDetail {
   to: number
 }
 
-/** 写入计划的摘要；回滚时 bootSector / partitionTable / mft 是原来那次修复的细节，rollbackOf 是它的计划 ID */
 /**
- * 文件系统修复（FAT、exFAT）的一类问题：FSInfo、分配位图里漏标的簇、过长的链、丢失簇（先另存）、未正常卸下的标记
+ * 文件系统修复（FAT、exFAT）的一类问题：FSInfo、分配位图里漏标的簇、过长的链、丢失簇（先另存）、未正常卸下的标记；
+ * 两份 FAT 不一致（以第一份 / 第二份为准，单独做）、断了的链、交叉链接、目录项、读不出的空闲簇（先读一遍空闲簇）
  */
-export type FsFix = 'fsInfo' | 'bitmap' | 'tooLong' | 'lost' | 'dirty'
+export type FsFix =
+  | 'fsInfo'
+  | 'bitmap'
+  | 'tooLong'
+  | 'lost'
+  | 'dirty'
+  | 'fatFromFirst'
+  | 'fatFromSecond'
+  | 'chains'
+  | 'crossLinks'
+  | 'entries'
+  | 'badClusters'
 
-/** 一类修复改了多少：items 是文件数（链过长）或段数，clusters 是簇数 */
+/** 一段连续的簇 */
+export interface ClusterRun {
+  first: number
+  count: number
+}
+
+/** 以某一份 FAT 为准统一之后还剩多少问题 */
+export interface FatRating {
+  fix: 'fatFromFirst' | 'fatFromSecond'
+  totals: Record<FsIssueSeverity, number>
+  /** 要改的扇区数 */
+  sectors: number
+}
+
+/** 读空闲簇的结果：读不出的簇最多列 10000 段，unreadableClusters 含没列出的 */
+export interface FreeScanSummary {
+  clusters: number
+  bytes: number
+  unreadable: ClusterRun[]
+  unreadableClusters: number
+  elapsedMs: number
+}
+
+/** 一类修复改了多少：items 是文件数、段数或处数，clusters 是簇数 */
 export interface FsFixCount {
   fix: FsFix
   items: number
@@ -789,7 +825,7 @@ export interface FsFixDetail {
   filesystem: string
   counts: FsFixCount[]
 }
-
+/** 写入计划的摘要；回滚时 bootSector / partitionTable / mft / fsFix 是原来那次修复的细节，rollbackOf 是它的计划 ID */
 export interface PlanSummary {
   kind: 'bootSector' | 'partitionTable' | 'mft' | 'fsFix' | 'rollback'
   target: JobTarget
@@ -849,8 +885,24 @@ export function planMft(target: JobTarget, partition: PartitionRef, fix: MftFix)
 }
 
 /** 生成文件系统修复（勾选的几类问题）的计划；引擎要把分区检查两遍，大分区要等一会儿 */
-export function planFsFix(target: JobTarget, partition: PartitionRef, fixes: FsFix[]): Promise<PlanView> {
-  return invoke<PlanView>('write_plan_fs_fix', { target, partition, fixes })
+/** 生成文件系统修复的计划；badClusters 是读空闲簇时读不出的簇（只在修坏簇时用，引擎再读一次核对） */
+export function planFsFix(
+  target: JobTarget,
+  partition: PartitionRef,
+  fixes: FsFix[],
+  badClusters: ClusterRun[] = [],
+): Promise<PlanView> {
+  return invoke<PlanView>('write_plan_fs_fix', { target, partition, fixes, badClusters })
+}
+
+/** 两份 FAT 不一致时，以第一份、以第二份为准各自修完还剩多少问题（只读，要把分区检查三遍） */
+export function rateFatCopies(target: JobTarget, partition: PartitionRef): Promise<FatRating[]> {
+  return invoke<FatRating[]>('fs_rate_fat_copies', { target, partition })
+}
+
+/** 把分区里的空闲簇读一遍，找出读不出的（任务，只读）；结果是 FreeScanSummary */
+export function startScanFree(jobId: string, target: JobTarget, partition: PartitionRef): Promise<void> {
+  return invoke<void>('job_start_scan_free', { jobId, target, partition })
 }
 
 /**

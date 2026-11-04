@@ -10,6 +10,7 @@ import {
   planRollback,
   toHostError,
   type BootFix,
+  type ClusterRun,
   type FsFix,
   type HostError,
   type JobTarget,
@@ -73,8 +74,13 @@ export function useWritePlan() {
     return prepare(() => planMft(target, partition, fix))
   }
 
-  function prepareFsFix(target: JobTarget, partition: PartitionRef, fixes: FsFix[]): Promise<boolean> {
-    return prepare(() => planFsFix(target, partition, fixes))
+  function prepareFsFix(
+    target: JobTarget,
+    partition: PartitionRef,
+    fixes: FsFix[],
+    badClusters: ClusterRun[] = [],
+  ): Promise<boolean> {
+    return prepare(() => planFsFix(target, partition, fixes, badClusters))
   }
 
   function prepareRollback(planId: string): Promise<boolean> {

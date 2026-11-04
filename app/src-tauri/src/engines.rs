@@ -31,9 +31,10 @@ use yisi_engine::protocol::{
 use yisi_engine::protocol::{BootCopy, BootDiagnosis, DIAGNOSE_BOOT, DiagnoseBootParams};
 use yisi_engine::protocol::{BootFix, BootSectorPlan, PLAN_BOOT_SECTOR, PlanBootSectorParams};
 use yisi_engine::protocol::{
-    FsFix, FsFixPlan, MftFix, MftPlan, PLAN_FS_FIX, PLAN_MFT, PLAN_PARTITION_TABLE,
-    PartitionTableFix, PartitionTablePlan, PlanFsFixParams, PlanMftParams,
-    PlanPartitionTableParams, SAVE_LOST, SaveLostParams,
+    ClusterRun, FatRating, FsFix, FsFixPlan, MftFix, MftPlan, PLAN_FS_FIX, PLAN_MFT,
+    PLAN_PARTITION_TABLE, PartitionTableFix, PartitionTablePlan, PlanFsFixParams, PlanMftParams,
+    PlanPartitionTableParams, RATE_FAT_COPIES, RateFatCopiesParams, SAVE_LOST, SCAN_FREE,
+    SaveLostParams, ScanFreeParams,
 };
 
 mod fs_check;
@@ -370,20 +371,57 @@ impl Engines {
     }
 
     /// 生成文件系统修复（FAT、exFAT）的写入计划。只读，不写盘；要把分区检查两遍，最多等一小时。
+    /// `bad_clusters` 是读空闲簇时读不出的簇（修坏簇时用，引擎再读一次核对）。
     pub fn plan_fs_fix(
         &self,
         broker: &BrokerSession,
         target: Target,
         partition: PartitionRef,
         fixes: Vec<FsFix>,
+        bad_clusters: Vec<ClusterRun>,
     ) -> Result<FsFixPlan, HostError> {
         query_source_timed(broker, target, PLAN_FS_FIX, FS_FIX_TIMEOUT, |source| {
             PlanFsFixParams {
                 source,
                 partition,
                 fixes,
+                bad_clusters,
             }
         })
+    }
+
+    /// 两份 FAT 不一致时，两种方向各自修完还剩多少问题（只读；要把分区检查三遍）。
+    pub fn rate_fat_copies(
+        &self,
+        broker: &BrokerSession,
+        target: Target,
+        partition: PartitionRef,
+    ) -> Result<Vec<FatRating>, HostError> {
+        query_source_timed(broker, target, RATE_FAT_COPIES, FS_FIX_TIMEOUT, |source| {
+            RateFatCopiesParams { source, partition }
+        })
+    }
+
+    /// 把分区里的空闲簇读一遍，找出读不出的（任务，只读）。结果经任务事件的 completed 送达。
+    pub fn start_scan_free(
+        &self,
+        app: AppHandle,
+        broker: &BrokerSession,
+        job_id: String,
+        target: Target,
+        partition: PartitionRef,
+    ) -> Result<(), HostError> {
+        target.validate()?;
+        validate_job_id(&job_id)?;
+        let params_job_id = job_id.clone();
+        self.start_job_with(app, job_id, SCAN_FREE, FS_FIX_TIMEOUT, |engine_pid| {
+            to_params(&ScanFreeParams {
+                job_id: params_job_id,
+                source: resolve_source(target, broker, engine_pid)?,
+                partition,
+            })
+        })
+        .map(|_| ())
     }
 
     /// 把分区里的丢失簇另存到 `output_dir` 下（任务，只读源）。结果经任务事件的 completed 送达。

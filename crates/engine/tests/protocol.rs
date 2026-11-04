@@ -2437,3 +2437,69 @@ fn lost_clusters_are_saved_then_freed_by_a_fs_fix_plan() {
     assert_eq!(std::fs::read(&image).unwrap(), bytes);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_check_lists_repairs_and_free_clusters_can_be_read() {
+    use yisi_engine::protocol::{
+        FS_CHECK, FreeScanSummary, FsCheckReport, FsFix, RATE_FAT_COPIES, SCAN_FREE,
+    };
+
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-fs-repairs");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (image, partitions) = fs_check_image(&dir);
+    let (_, offset, length) = partitions[1];
+    let partition = json!({"number": 2, "offset": offset, "length": length});
+    let source = json!({"type": "image", "path": image, "sectorSize": 512});
+    let bytes = std::fs::read(&image).unwrap();
+
+    // 检查结果带上能修的几类：exFAT 分区上有丢失簇与未正常卸下的标记
+    let mut checker = Engine::start();
+    checker
+        .call(
+            FS_CHECK,
+            json!({"jobId": "check1", "source": source, "partition": partition}),
+        )
+        .unwrap();
+    let notifications = checker.notifications_until(COMPLETED);
+    assert!(checker.wait_exit().success());
+    let report: FsCheckReport =
+        serde_json::from_value(notifications.last().unwrap().1["result"].clone()).unwrap();
+    let repairs: Vec<(FsFix, u64)> = report
+        .repairs
+        .iter()
+        .map(|repair| (repair.fix, repair.items))
+        .collect();
+    assert_eq!(repairs, [(FsFix::Lost, 1), (FsFix::Dirty, 1)]);
+
+    // 读一遍空闲簇：镜像都读得出
+    let mut scanner = Engine::start();
+    scanner
+        .call(
+            SCAN_FREE,
+            json!({"jobId": "free1", "source": source, "partition": partition}),
+        )
+        .unwrap();
+    let notifications = scanner.notifications_until(COMPLETED);
+    assert!(scanner.wait_exit().success());
+    let scanned: FreeScanSummary =
+        serde_json::from_value(notifications.last().unwrap().1["result"].clone()).unwrap();
+    assert!(scanned.clusters > 1000, "{scanned:?}");
+    assert_eq!(scanned.unreadable_clusters, 0);
+    assert_eq!(scanned.bytes, scanned.clusters * 4096);
+
+    // 两份 FAT 一致（exFAT 只有一份）：没有可统一的
+    let mut engine = Engine::start();
+    let refused = engine
+        .call(
+            RATE_FAT_COPIES,
+            json!({"source": source, "partition": partition}),
+        )
+        .unwrap_err();
+    assert_eq!(refused.code, error_code::PLAN_NOT_APPLICABLE);
+    engine.close_input();
+    assert!(engine.wait_exit().success());
+    // 只读：镜像没被改动
+    assert_eq!(std::fs::read(&image).unwrap(), bytes);
+    let _ = std::fs::remove_dir_all(&dir);
+}

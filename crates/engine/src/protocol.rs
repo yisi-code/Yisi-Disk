@@ -88,9 +88,17 @@ pub const PLAN_PARTITION_TABLE: &str = "repair.planPartitionWrite";
 pub const PLAN_MFT: &str = "repair.planMftRepair";
 /// 生成文件系统修复（FAT12/16/32、exFAT）的写入计划：参数 [`PlanFsFixParams`]，结果是 [`FsFixPlan`]。只读源，
 /// 读完即答复（检查一遍分区，大分区要等一会儿）。没有可以这样修的问题、卷不是 FAT / exFAT、按备份检查的、
-/// 两份 FAT 本来就不一致、还有严重问题时清除卸下标记，答复 [`error_code::PLAN_NOT_APPLICABLE`]；要改的太多、
-/// 预演对不上答复 [`error_code::PLAN_UNAVAILABLE`]。
+/// 两份 FAT 本来就不一致又要改 FAT（或统一两份 FAT 时还勾了别的）、还有严重问题时清除卸下标记，答复
+/// [`error_code::PLAN_NOT_APPLICABLE`]；要改的太多、空闲簇不够、预演对不上答复 [`error_code::PLAN_UNAVAILABLE`]。
 pub const PLAN_FS_FIX: &str = "repair.planFsFix";
+/// 两份 FAT 不一致时，把以第一份为准、以第二份为准各预演一遍（只读，读完即答复）：参数 [`RateFatCopiesParams`]，
+/// 结果是 `Vec<`[`FatRating`]`>`，各给出修完还剩多少问题。卷不是 FAT、按备份检查的答复
+/// [`error_code::PLAN_NOT_APPLICABLE`]。
+pub const RATE_FAT_COPIES: &str = "repair.rateFatCopies";
+/// 把分区里的空闲簇读一遍，找出读不出的（任务，只读）：参数 [`ScanFreeParams`]，立即答复空对象；进度按字节经
+/// [`PROGRESS`] 送达，结果是 [`FreeScanSummary`]。之后可以把读不出的簇交给 [`PLAN_FS_FIX`] 的 `badClusters`
+/// 标成坏簇。卷不是 FAT / exFAT、按备份检查的、没有跟踪认领的答复 [`error_code::PLAN_NOT_APPLICABLE`]。
+pub const SCAN_FREE: &str = "repair.scanFree";
 /// 把分区里的丢失簇另存到别的盘（任务，只读源）：参数 [`SaveLostParams`]，立即返回 [`CopyStarted`]（实际目录）；
 /// 每段连续的丢失簇存成一个 `lost-<起始簇>.bin`，进度按字节经 [`PROGRESS`] 送达，结果是 [`CopySummary`]。
 /// 源为物理磁盘时输出目录必须在另一块盘上（[`error_code::OUTPUT_ON_SOURCE`]）。
@@ -1218,7 +1226,63 @@ pub struct PlanFsFixParams {
     pub partition: PartitionRef,
     /// 修哪几类问题。
     pub fixes: Vec<FsFix>,
+    /// 修坏簇时：读空闲簇时读不出的簇（[`SCAN_FREE`] 的结果），引擎再读一次核对。
+    #[serde(default)]
+    pub bad_clusters: Vec<ClusterRun>,
 }
+
+/// 一段连续的簇。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterRun {
+    pub first: u32,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RateFatCopiesParams {
+    pub source: Source,
+    /// 同 [`FsCheckParams::partition`]。
+    pub partition: PartitionRef,
+}
+
+/// 以某一份 FAT 为准统一之后的样子。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FatRating {
+    /// [`FsFix::FatFromFirst`] 或 [`FsFix::FatFromSecond`]。
+    pub fix: FsFix,
+    /// 修完还剩的问题。
+    pub totals: FsIssueTotals,
+    /// 要改的扇区数。
+    pub sectors: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanFreeParams {
+    pub job_id: String,
+    pub source: Source,
+    /// 同 [`FsCheckParams::partition`]。
+    pub partition: PartitionRef,
+}
+
+/// 读空闲簇的结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FreeScanSummary {
+    /// 读了的空闲簇数与字节数。
+    pub clusters: u64,
+    pub bytes: u64,
+    /// 读不出的簇，按簇号排序；最多 [`MAX_UNREADABLE_RUNS`] 段，再多的只计入 `unreadable_clusters`。
+    pub unreadable: Vec<ClusterRun>,
+    pub unreadable_clusters: u64,
+    pub elapsed_ms: u64,
+}
+
+/// [`FreeScanSummary::unreadable`] 最多列这么多段。
+pub const MAX_UNREADABLE_RUNS: usize = 10_000;
 
 /// 文件系统修复的一类问题。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1234,6 +1298,17 @@ pub enum FsFix {
     Lost,
     /// 未正常卸下：标回正常卸下（别的严重问题都修好时）。
     Dirty,
+    /// 两份 FAT 不一致：以第一份为准、以第二份为准（要单独做，先看 [`RATE_FAT_COPIES`]）。
+    FatFromFirst,
+    FatFromSecond,
+    /// 断了的链：截到最后一个好簇、文件大小跟着改；起始簇就不合法的改为空文件。
+    Chains,
+    /// 交叉链接：后认领的文件把共用的簇复制到空闲簇。
+    CrossLinks,
+    /// 目录项：exFAT 的次项个数、文件名长度与校验和，孤立项与对不上的长文件名项，`.` 与 `..`，有效长度。
+    Entries,
+    /// 读不出的空闲簇标成坏簇（[`PlanFsFixParams::bad_clusters`]）。
+    BadClusters,
 }
 
 /// 一类修复改了多少：`items` 是文件数（链过长）或段数，`clusters` 是簇数（FSInfo 与卸下标志为 0）。
@@ -1321,6 +1396,9 @@ pub struct FsCheckReport {
     pub checked: Vec<String>,
     pub skipped: Vec<String>,
     pub elapsed_ms: u64,
+    /// FAT 与 exFAT 上能修的几类问题与各自多少（[`PLAN_FS_FIX`]）；坏簇要先读空闲簇，不在里面。
+    #[serde(default)]
+    pub repairs: Vec<FsFixCount>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

@@ -9,11 +9,14 @@ use yisi_fs::format::{
 use yisi_fs::{fat_short_checksum as short_checksum, fat_short_display};
 use yisi_part::bytes::le32;
 
-use crate::check::chains::{Layout, MAX_DEPTH, Volume};
+use crate::check::chains::{Layout, MAX_DEPTH, Place, Volume};
 use crate::check::disk::Span;
 use crate::check::issue::{Area, Issue, IssueKind};
 use crate::check::table::{FatTable, Link, Owners, ROOT};
-use crate::check::{CheckItem, Ctx, FatLayout, Stage, Summary, check_backup};
+use crate::check::{
+    CheckItem, Ctx, EntryAt, EntryChange, EntryFix, EntryRef, FatCopies, FatLayout, Stage, Summary,
+    check_backup,
+};
 
 const ENTRY: usize = 32;
 const ATTR_LFN: u8 = 0x0F;
@@ -128,10 +131,12 @@ pub(crate) fn check(ctx: &mut Ctx, sector: &[u8], from_backup: bool) -> Option<S
     let mut volume = checker.volume;
     volume.sweep(
         ctx,
+        // 坏簇按占用算、再由下一条认出来：既不是丢失簇，也不算空闲
         &mut |ctx, fat, cluster| match fat.link(ctx, cluster) {
             Link::Unknown => None,
-            link => Some(link.is_used()),
+            link => Some(link.is_used() || link == Link::Bad),
         },
+        &mut |ctx, fat, cluster| fat.link(ctx, cluster) == Link::Bad,
         false,
     )?;
     Some(Summary {
@@ -190,6 +195,9 @@ fn compare_copies(ctx: &mut Ctx, geometry: &FatBpb, count: u32) -> Option<()> {
         .div_ceil(8)
         .min(geometry.fat_bytes());
     let first_copy = geometry.fat_offset(0);
+    let sector = geometry.bytes_per_sector.max(1);
+    // 两份时记下不同的扇区（相对 FAT 起点），修复时只改这些扇区
+    let mut sectors: Vec<(u64, u64)> = Vec::new();
     for copy in 1..geometry.fats {
         let other_copy = geometry.fat_offset(copy);
         let mut differing = 0u64;
@@ -216,6 +224,12 @@ fn compare_copies(ctx: &mut Ctx, geometry: &FatBpb, count: u32) -> Option<()> {
                 {
                     continue;
                 }
+                let start = (position + at) / sector * sector;
+                match sectors.last_mut() {
+                    Some(last) if last.0 + last.1 == start => last.1 += sector,
+                    Some(last) if last.0 + last.1 > start => {}
+                    _ => sectors.push((start, sector)),
+                }
                 let entry = (position + at) * 8 / bits;
                 if last_entry != Some(entry) {
                     differing += 1;
@@ -234,6 +248,12 @@ fn compare_copies(ctx: &mut Ctx, geometry: &FatBpb, count: u32) -> Option<()> {
             );
             ctx.findings.fat_copies_differ = true;
         }
+    }
+    if geometry.fats == 2 && !sectors.is_empty() {
+        ctx.findings.fat_copies = Some(FatCopies {
+            copies: [first_copy, geometry.fat_offset(1)],
+            differing: sectors,
+        });
     }
     ctx.checked(CheckItem::FatCopies);
     Some(())
@@ -312,6 +332,8 @@ struct DirJob {
     /// 上级目录的起始簇（上级是根目录时为 0），用来核对 `..`。
     parent_cluster: u32,
     depth: usize,
+    /// 这个目录自己的目录项（根目录没有）。
+    entry: Option<EntryRef>,
 }
 
 struct FatChecker {
@@ -329,11 +351,13 @@ impl FatChecker {
             at: root,
             parent_cluster: 0,
             depth: 0,
+            entry: None,
         }];
         while let Some(job) = stack.pop() {
             if !ctx.control.checkpoint() {
                 return None;
             }
+            let mut runs = Vec::new();
             let (data, bad) = match job.at {
                 DirAt::Fixed { offset, length } => {
                     let mut data = vec![0u8; length as usize];
@@ -350,16 +374,22 @@ impl FatChecker {
                         first,
                         Layout::Chain { needed: None },
                         true,
+                        job.entry.as_ref(),
                     )?;
                     if walk.first_taken {
                         // 起始簇是别人的（已记为交叉链接）：不再往下查，免得在目录之间绕圈
                         continue;
                     }
-                    self.volume.read_runs(ctx, &walk.runs, &job.path)
+                    runs = walk.runs;
+                    self.volume.read_runs(ctx, &runs, &job.path)
                 }
             };
+            let place = match job.at {
+                DirAt::Fixed { offset, .. } => Place::Fixed(offset),
+                DirAt::Clusters(_) => self.volume.place(&runs),
+            };
             self.volume.report_progress(ctx);
-            self.directory(ctx, &job, &data, &bad, &mut stack)?;
+            self.directory(ctx, &job, &place, &data, &bad, &mut stack)?;
         }
         Some(())
     }
@@ -369,6 +399,7 @@ impl FatChecker {
         &mut self,
         ctx: &mut Ctx,
         job: &DirJob,
+        place: &Place,
         data: &[u8],
         bad: &[Span],
         stack: &mut Vec<DirJob>,
@@ -378,12 +409,29 @@ impl FatChecker {
             bad.iter()
                 .any(|span| span.overlaps((index * ENTRY) as u64, ENTRY as u64))
         };
+        let place = *place;
+        let at = |index: usize| place.locate((index * ENTRY) as u64);
         if let DirAt::Clusters(first) = job.at
             && job.id != ROOT
         {
-            self.check_dots(ctx, job, first, entries, &unreadable);
+            self.check_dots(ctx, job, first, entries, &unreadable, &at);
         }
-        let mut pending: Vec<&[u8; ENTRY]> = Vec::new();
+        // 长文件名各段（序号、内容）还没等到它的短文件名项
+        let mut pending: Vec<(usize, &[u8; ENTRY])> = Vec::new();
+        // 孤立的长文件名项：标为已删除，短文件名项不受影响
+        let orphans = |ctx: &mut Ctx, indexes: &[usize]| {
+            let offsets: Option<Vec<u64>> = indexes.iter().map(|&index| at(index)).collect();
+            if let Some(offsets) = offsets.filter(|offsets| !offsets.is_empty()) {
+                ctx.findings.entries.push(EntryFix {
+                    kinds: vec![IssueKind::LfnOrder],
+                    path: job.path.clone(),
+                    change: EntryChange::Delete {
+                        at: offsets,
+                        exfat: false,
+                    },
+                });
+            }
+        };
         for (index, raw) in entries.iter().enumerate() {
             if unreadable(index) {
                 pending.clear();
@@ -404,14 +452,17 @@ impl FatChecker {
                     // 上一组长文件名后面没有短文件名项
                     ctx.issues
                         .push(Issue::new(IssueKind::LfnOrder).path(job.path.as_str()));
+                    let indexes: Vec<usize> = pending.iter().map(|part| part.0).collect();
+                    orphans(ctx, &indexes);
                     pending.clear();
                 }
                 if !starts && pending.is_empty() {
                     ctx.issues
                         .push(Issue::new(IssueKind::LfnOrder).path(job.path.as_str()));
+                    orphans(ctx, &[index]);
                     continue;
                 }
-                pending.push(raw);
+                pending.push((index, raw));
                 continue;
             }
             let parts = std::mem::take(&mut pending);
@@ -426,13 +477,39 @@ impl FatChecker {
             let long = if parts.is_empty() {
                 None
             } else {
-                self.long_name(ctx, &job.path, &short_name, &short, &parts)
+                let raws: Vec<&[u8; ENTRY]> = parts.iter().map(|part| part.1).collect();
+                match self.long_name(ctx, &job.path, &short_name, &short, &raws) {
+                    Ok(long) => long,
+                    Err(kind) => {
+                        // 长文件名对不上短文件名项：标为已删除，文件留下短文件名
+                        let offsets: Option<Vec<u64>> =
+                            parts.iter().map(|part| at(part.0)).collect();
+                        if let Some(offsets) = offsets {
+                            ctx.findings.entries.push(EntryFix {
+                                kinds: vec![kind],
+                                path: join(&job.path, &short_name),
+                                change: EntryChange::Delete {
+                                    at: offsets,
+                                    exfat: false,
+                                },
+                            });
+                        }
+                        None
+                    }
+                }
             };
             let name = long.unwrap_or(short_name);
             let path = join(&job.path, &name);
             let first = fat_first_cluster(raw, self.is_fat32);
             let id = self.volume.owners.add(Some(job.id), &name);
-            if attr & ATTR_DIRECTORY != 0 {
+            let directory = attr & ATTR_DIRECTORY != 0;
+            let size = u64::from(le32(raw, 28).unwrap_or(0));
+            let entry = at(index).map(|offset| EntryRef {
+                at: EntryAt::Fat(offset),
+                size: (!directory).then_some(size),
+                directory,
+            });
+            if directory {
                 self.volume.directories += 1;
                 if first == 0 {
                     ctx.issues.push(
@@ -452,11 +529,11 @@ impl FatChecker {
                             _ => 0,
                         },
                         depth: job.depth + 1,
+                        entry,
                     });
                 }
             } else {
                 self.volume.files += 1;
-                let size = u64::from(le32(raw, 28).unwrap_or(0));
                 let needed = self.volume.clusters_for(size);
                 self.volume.walk(
                     ctx,
@@ -467,17 +544,21 @@ impl FatChecker {
                         needed: Some(needed),
                     },
                     false,
+                    entry.as_ref(),
                 )?;
             }
         }
         if !pending.is_empty() {
             ctx.issues
                 .push(Issue::new(IssueKind::LfnOrder).path(job.path.as_str()));
+            let indexes: Vec<usize> = pending.iter().map(|part| part.0).collect();
+            orphans(ctx, &indexes);
         }
         Some(())
     }
 
     /// 子目录开头应是 `.`（指向自己）与 `..`（指向上级，上级是根目录时为 0；FAT32 也接受根目录的簇号）。
+    /// 不对时，这两个位置本来就是 `.`、`..` 或空着才修（重写这两项），放着别的文件就不动。
     fn check_dots(
         &self,
         ctx: &mut Ctx,
@@ -485,6 +566,7 @@ impl FatChecker {
         first: u32,
         entries: &[[u8; ENTRY]],
         unreadable: &dyn Fn(usize) -> bool,
+        at: &dyn Fn(usize) -> Option<u64>,
     ) {
         if unreadable(0) || unreadable(1) {
             return;
@@ -505,11 +587,31 @@ impl FatChecker {
         if !dot_ok || !dotdot_ok {
             ctx.issues
                 .push(Issue::new(IssueKind::DotEntries).path(job.path.as_str()));
+            let slot_ok = |index: usize, name: &[u8; 11]| {
+                entries
+                    .get(index)
+                    .is_some_and(|raw| matches!(raw[0], 0 | DELETED) || raw.starts_with(name))
+            };
+            if slot_ok(0, b".          ")
+                && slot_ok(1, b"..         ")
+                && let (Some(start), Some(second)) = (at(0), at(1))
+                && second == start + ENTRY as u64
+            {
+                ctx.findings.entries.push(EntryFix {
+                    kinds: vec![IssueKind::DotEntries],
+                    path: job.path.clone(),
+                    change: EntryChange::Dots {
+                        at: start,
+                        cluster: first,
+                        parent: job.parent_cluster,
+                    },
+                });
+            }
         }
     }
 
-    /// 核对长文件名各段：序号从 `0x40 | n` 递减到 1、段数合理，校验和与短文件名一致。都对时返回长文件名。
-    /// 规则在 [`yisi_fs::format`]，与浏览共用。
+    /// 核对长文件名各段：序号从 `0x40 | n` 递减到 1、段数合理，校验和与短文件名一致。都对时返回长文件名
+    /// （解不出时为 `None`）；不对时记下问题，返回它的类型。规则在 [`yisi_fs::format`]，与浏览共用。
     fn long_name(
         &self,
         ctx: &mut Ctx,
@@ -517,7 +619,7 @@ impl FatChecker {
         short_name: &str,
         short: &[u8; 11],
         parts: &[&[u8; ENTRY]],
-    ) -> Option<String> {
+    ) -> Result<Option<String>, IssueKind> {
         let path = join(dir, short_name);
         let parts: Vec<LfnPart> = parts
             .iter()
@@ -525,15 +627,15 @@ impl FatChecker {
             .collect();
         if !lfn_ordered(&parts) {
             ctx.issues.push(Issue::new(IssueKind::LfnOrder).path(path));
-            return None;
+            return Err(IssueKind::LfnOrder);
         }
         let checksum = short_checksum(short);
         if parts.iter().any(|part| part.checksum != checksum) {
             ctx.issues
                 .push(Issue::new(IssueKind::LfnChecksum).path(path));
-            return None;
+            return Err(IssueKind::LfnChecksum);
         }
-        lfn_name(&parts)
+        Ok(lfn_name(&parts))
     }
 }
 

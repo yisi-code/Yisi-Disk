@@ -6,6 +6,7 @@ mod browse;
 mod carve_job;
 mod copy_job;
 mod extract_job;
+mod free_scan_job;
 mod fs_check_job;
 mod fs_fix_plan;
 mod image_inspect;

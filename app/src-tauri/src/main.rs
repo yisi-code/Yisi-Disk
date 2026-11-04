@@ -20,7 +20,7 @@ use yisi_engine::protocol::{
     BrowseOpened, Capabilities, CopyItem, DiskList, ExtractItem, FileListPage, FilePreview,
     FileTypeList, PartitionRef, ScanResult,
 };
-use yisi_engine::protocol::{FsFix, MftFix, PartitionTableFix, SearchMode};
+use yisi_engine::protocol::{ClusterRun, FatRating, FsFix, MftFix, PartitionTableFix, SearchMode};
 
 use crate::broker::BrokerSession;
 use crate::engines::{
@@ -263,8 +263,33 @@ fn write_plan_fs_fix(
     target: Target,
     partition: PartitionRef,
     fixes: Vec<FsFix>,
+    bad_clusters: Vec<ClusterRun>,
 ) -> Result<PlanView, HostError> {
-    plans.plan_fs_fix(&engines, &broker, target, partition, fixes)
+    plans.plan_fs_fix(&engines, &broker, target, partition, fixes, bad_clusters)
+}
+
+/// 两份 FAT 不一致时，以第一份、以第二份为准各自修完还剩多少问题。只读。
+#[tauri::command(async)]
+fn fs_rate_fat_copies(
+    engines: State<'_, Engines>,
+    broker: State<'_, BrokerSession>,
+    target: Target,
+    partition: PartitionRef,
+) -> Result<Vec<FatRating>, HostError> {
+    engines.rate_fat_copies(&broker, target, partition)
+}
+
+/// 把分区里的空闲簇读一遍，找出读不出的（任务，只读），之后可以标成坏簇。
+#[tauri::command(async)]
+fn job_start_scan_free(
+    app: AppHandle,
+    engines: State<'_, Engines>,
+    broker: State<'_, BrokerSession>,
+    job_id: String,
+    target: Target,
+    partition: PartitionRef,
+) -> Result<(), HostError> {
+    engines.start_scan_free(app, &broker, job_id, target, partition)
 }
 
 /// 把分区里的丢失簇另存到另一块盘上（任务，只读源）。源为物理磁盘时输出目录不能在这块盘上。
@@ -652,7 +677,9 @@ fn main() -> anyhow::Result<()> {
             write_plan_partition_table,
             write_plan_mft,
             write_plan_fs_fix,
+            fs_rate_fat_copies,
             job_start_save_lost,
+            job_start_scan_free,
             write_plan_execute,
             write_plan_discard,
             write_plan_rollback,

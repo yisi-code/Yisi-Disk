@@ -22,6 +22,10 @@ import {
   sameTarget,
   saveFsCheckReport,
   toHostError,
+  type ClusterRun,
+  type CopySummary,
+  type FatRating,
+  type FreeScanSummary,
   type FsFix,
   type FsIssue,
   type FsIssueSeverity,
@@ -70,6 +74,11 @@ const isExporting = ref(false)
 const finishedAt = ref<Date | null>(null)
 /** 正在另存丢失簇（由 FsFixPanel 给出）：不能返回、离开或重新检查 */
 const isSavingLost = ref(false)
+/** 修复一节的勾选与另存丢失簇的结果：确认页会替换结果面板，放在这里，取消回来后还在 */
+const fsFixSelected = ref<FsFix[]>([])
+const lostSaved = ref<CopySummary | null>(null)
+const freeScan = ref<FreeScanSummary | null>(null)
+const fatRatings = ref<FatRating[] | null>(null)
 
 const stepIndex = computed(() => STEPS.indexOf(step.value))
 
@@ -167,6 +176,13 @@ watch(fsCheck.status, (status) => {
     step.value = 'result'
   }
 })
+// 换了检查结果（重新检查、写完之后）：修复的勾选与另存的结果都作废
+watch(report, () => {
+  fsFixSelected.value = []
+  lostSaved.value = null
+  freeScan.value = null
+  fatRatings.value = null
+})
 
 onMounted(() => {
   titleElement.value?.focus()
@@ -235,7 +251,7 @@ async function proposeMftFix(issue: FsIssue) {
 }
 
 /** 生成文件系统修复（勾选的几类）的计划，之后显示确认内容 */
-async function proposeFsFix(fixes: FsFix[]) {
+async function proposeFsFix(fixes: FsFix[], badClusters: ClusterRun[]) {
   const source = fsCheck.target.value
   const partition = fsCheck.partition.value
   if (source === null || partition === null || writePlan.isPreparing.value || fsCheck.isBusy.value) {
@@ -245,6 +261,7 @@ async function proposeFsFix(fixes: FsFix[]) {
     source,
     { number: partition.number, offset: partition.offset, length: partition.length },
     fixes,
+    badClusters,
   )
 }
 
@@ -694,6 +711,10 @@ function buildReportText(): string {
         <FsFixPanel
           v-if="fsCheck.target.value"
           v-model:saving="isSavingLost"
+          v-model:selected="fsFixSelected"
+          v-model:saved="lostSaved"
+          v-model:free-scan="freeScan"
+          v-model:ratings="fatRatings"
           :report="report"
           :target="fsCheck.target.value"
           :partition="{ number: checkedPartition.number, offset: checkedPartition.offset, length: checkedPartition.length }"

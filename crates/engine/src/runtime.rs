@@ -22,7 +22,8 @@ use yisi_engine::protocol::{
 use yisi_engine::protocol::{
     DIAGNOSE_BOOT, DiagnoseBootParams, PLAN_BOOT_SECTOR, PLAN_FS_FIX, PLAN_MFT,
     PLAN_PARTITION_TABLE, PlanBootSectorParams, PlanFsFixParams, PlanMftParams,
-    PlanPartitionTableParams, SAVE_LOST, SaveLostParams,
+    PlanPartitionTableParams, RATE_FAT_COPIES, RateFatCopiesParams, SAVE_LOST, SCAN_FREE,
+    SaveLostParams, ScanFreeParams,
 };
 #[cfg(windows)]
 use yisi_engine::protocol::{DiskList, DiskSummary, DiskVolume};
@@ -38,8 +39,8 @@ use crate::browse::{self, Session};
 use crate::copy_job::{self, Planned};
 use crate::job::{self, JobContext, JobOutcome, ProgressSender, RunningJob};
 use crate::{
-    boot_check, carve_job, extract_job, fs_check_job, fs_fix_plan, image_inspect, image_job,
-    lost_job, mft_plan, preview, read_scan, reading, search_job, table_plan,
+    boot_check, carve_job, extract_job, free_scan_job, fs_check_job, fs_fix_plan, image_inspect,
+    image_job, lost_job, mft_plan, preview, read_scan, reading, search_job, table_plan,
 };
 
 /// 浏览任务每隔这么久看一次有没有被取消。
@@ -243,7 +244,9 @@ fn dispatch_now(
                 PLAN_PARTITION_TABLE.to_owned(),
                 PLAN_MFT.to_owned(),
                 PLAN_FS_FIX.to_owned(),
+                RATE_FAT_COPIES.to_owned(),
                 SAVE_LOST.to_owned(),
+                SCAN_FREE.to_owned(),
                 FS_CHECK.to_owned(),
             ];
             if cfg!(windows) {
@@ -370,9 +373,32 @@ fn dispatch_now(
             to_result(&plan_without_read_errors(
                 &params.source,
                 |device, identity| {
-                    fs_fix_plan::plan(device, identity, params.partition, &params.fixes)
+                    fs_fix_plan::plan(
+                        device,
+                        identity,
+                        params.partition,
+                        &params.fixes,
+                        &params.bad_clusters,
+                    )
                 },
             )?)
+        }
+        RATE_FAT_COPIES => {
+            let params: RateFatCopiesParams = request.params()?;
+            let device: Arc<dyn BlockDevice> = Arc::from(open_source(&params.source)?);
+            to_result(&fs_fix_plan::rate(&device, params.partition)?)
+        }
+        SCAN_FREE => {
+            state.ensure_idle()?;
+            let params: ScanFreeParams = request.params()?;
+            let device = open_source(&params.source)?;
+            browse::verify_partition(device.as_ref(), params.partition)?;
+            let free = fs_fix_plan::free(device.as_ref(), params.partition)?;
+            let partition = params.partition;
+            state.job = Some(start_job(params.job_id, outbox, events, move |context| {
+                free_scan_job::run(device.as_ref(), partition, &free, context)
+            }));
+            Ok(json!({}))
         }
         SAVE_LOST => {
             state.ensure_idle()?;

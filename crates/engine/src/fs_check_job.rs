@@ -5,8 +5,10 @@ use std::time::Instant;
 use yisi_engine::protocol::{FsCheckReport, FsIssue, FsIssueTotals, PartitionRef};
 use yisi_io::BlockDevice;
 use yisi_repair::check::{self, Control, Issue, Report, Stage};
+use yisi_repair::fs_fix;
 
 use crate::browse::fs_key;
+use crate::fs_fix_plan::to_count;
 use crate::job::{JobContext, JobOutcome};
 
 /// 问题清单编码后最多这么多字节，留出余量，保证整条消息不超过 1 MiB。
@@ -32,7 +34,7 @@ pub fn run(
     context: &JobContext,
 ) -> Result<JobOutcome, String> {
     let started = Instant::now();
-    let Some(report) = check::check(
+    let Some((report, findings)) = check::check_for_repair(
         device,
         partition.offset,
         partition.length,
@@ -42,7 +44,9 @@ pub fn run(
     };
     let elapsed = started.elapsed().saturating_sub(context.paused_total());
     let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
-    serde_json::to_value(to_protocol(report, partition.offset, elapsed_ms))
+    let mut result = to_protocol(report, partition.offset, elapsed_ms);
+    result.repairs = fs_fix::available(&findings).iter().map(to_count).collect();
+    serde_json::to_value(result)
         .map(JobOutcome::Completed)
         .map_err(|error| format!("无法编码检查结果：{error}"))
 }
@@ -89,6 +93,7 @@ fn to_protocol(report: Report, partition_offset: u64, elapsed_ms: u64) -> FsChec
             .map(|item| item.key().to_owned())
             .collect(),
         elapsed_ms,
+        repairs: Vec::new(),
     }
 }
 

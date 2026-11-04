@@ -6,16 +6,20 @@ use yisi_fs::boot::{exfat_boot_checksum, exfat_stored_checksum};
 use yisi_fs::bpb::{self, ExfatBpb as Geometry, Problem};
 use yisi_fs::format::{
     EXFAT_IN_USE, EXFAT_TYPE_BITMAP, EXFAT_TYPE_FILE, EXFAT_TYPE_NAME, EXFAT_TYPE_STREAM,
-    EXFAT_TYPE_UPCASE, ExfatSet, SetProblem, exfat_entry_set, exfat_table_checksum,
+    EXFAT_TYPE_UPCASE, ExfatSet, SetProblem, exfat_entry_set, exfat_set_checksum,
+    exfat_table_checksum,
 };
 use yisi_part::bytes::{le32, le64};
 
-use crate::check::chains::{Layout, MAX_DEPTH, Volume};
+use crate::check::chains::{Layout, MAX_DEPTH, Run, Volume};
 use crate::check::disk::Span;
 use crate::check::fat::join;
 use crate::check::issue::{Area, Issue, IssueKind};
-use crate::check::table::{FatTable, Owners, ROOT, Width};
-use crate::check::{CheckItem, Ctx, FatLayout, Stage, Summary, check_backup};
+use crate::check::table::{FatTable, Link, Owners, ROOT, Width};
+use crate::check::{
+    CheckItem, Ctx, EntryAt, EntryChange, EntryFix, EntryRef, FatLayout, Stage, Summary,
+    check_backup,
+};
 
 const ENTRY: usize = 32;
 const ATTR_DIRECTORY: u16 = 0x10;
@@ -24,6 +28,8 @@ const FLAG_DIRTY: u16 = 0x02;
 const FLAG_MEDIA_FAILURE: u16 = 0x04;
 /// 大写表最多读这么多（规范里的完整大写表不到 6 KiB）。
 const MAX_UPCASE_BYTES: u64 = 1 << 20;
+/// 一组目录项最多 1 个文件项加 18 个次项。
+const MAX_SET_ENTRIES: usize = 19;
 
 /// 解析引导扇区：规则在 [`yisi_fs::bpb`]（与打开卷、引导扇区诊断共用）。有致命问题时参数为 `None`。
 fn parse(sector: &[u8]) -> (Option<Geometry>, Vec<Problem>) {
@@ -139,7 +145,12 @@ pub(crate) fn check(ctx: &mut Ctx, region: &[u8], from_backup: bool) -> Option<S
     let mut volume = checker.volume;
     match &bitmap {
         Some(bitmap) => {
-            volume.sweep(ctx, &mut |_, _, cluster| bitmap.get(cluster), true)?;
+            volume.sweep(
+                ctx,
+                &mut |_, _, cluster| bitmap.get(cluster),
+                &mut |ctx, fat, cluster| fat.link(ctx, cluster) == Link::Bad,
+                true,
+            )?;
         }
         None => {
             ctx.skipped(CheckItem::Bitmap);
@@ -193,6 +204,8 @@ struct DirJob {
     first: u32,
     layout: Layout,
     depth: usize,
+    /// 这个目录自己的目录项（根目录没有）。
+    entry: Option<EntryRef>,
 }
 
 struct ExfatChecker {
@@ -209,14 +222,21 @@ impl ExfatChecker {
             first: root_cluster,
             layout: Layout::Chain { needed: None },
             depth: 0,
+            entry: None,
         }];
         while let Some(job) = stack.pop() {
             if !ctx.control.checkpoint() {
                 return None;
             }
-            let walk = self
-                .volume
-                .walk(ctx, job.id, &job.path, job.first, job.layout, true)?;
+            let walk = self.volume.walk(
+                ctx,
+                job.id,
+                &job.path,
+                job.first,
+                job.layout,
+                true,
+                job.entry.as_ref(),
+            )?;
             if walk.first_taken {
                 continue;
             }
@@ -225,7 +245,7 @@ impl ExfatChecker {
                 self.system_entries(ctx, &data, &bad)?;
             }
             self.volume.report_progress(ctx);
-            self.directory(ctx, &job, &data, &bad, &mut stack)?;
+            self.directory(ctx, &job, &walk.runs, &data, &bad, &mut stack)?;
         }
         Some(())
     }
@@ -281,6 +301,7 @@ impl ExfatChecker {
                 needed: Some(needed),
             },
             true,
+            None,
         )?;
         if length < needed_bytes {
             ctx.issues.push(
@@ -338,6 +359,7 @@ impl ExfatChecker {
                 needed: Some(needed),
             },
             true,
+            None,
         )?;
         let (mut bytes, bad) = self.volume.read_runs(ctx, &walk.runs, "$UpCase");
         let wanted = length.min(MAX_UPCASE_BYTES);
@@ -364,6 +386,7 @@ impl ExfatChecker {
         &mut self,
         ctx: &mut Ctx,
         job: &DirJob,
+        runs: &[Run],
         data: &[u8],
         bad: &[Span],
         stack: &mut Vec<DirJob>,
@@ -373,7 +396,16 @@ impl ExfatChecker {
             bad.iter()
                 .any(|span| span.overlaps((index * ENTRY) as u64, ENTRY as u64))
         };
+        let offsets = |volume: &Volume, from: usize, count: usize| -> Option<Vec<u64>> {
+            (from..from + count)
+                .map(|index| volume.locate(runs, (index * ENTRY) as u64))
+                .collect()
+        };
         let mut orphans = 0u64;
+        // 孤立项里要标为已删除的（属于修好的那组项的不算）
+        let mut orphan_at = Vec::new();
+        // 修好次项个数后归回那组项的位置
+        let mut adopted = 0usize..0usize;
         let mut index = 0;
         while let Some(raw) = entries.get(index) {
             if unreadable(index) {
@@ -392,13 +424,34 @@ impl ExfatChecker {
                 EXFAT_TYPE_FILE => {
                     let (consumed, set) =
                         self.file_set(ctx, &job.path, entries, index, &unreadable);
+                    let at = offsets(&self.volume, index, consumed.max(1));
+                    if let Some((count, fix)) = repair_set(entries, index)
+                        && let Some(at) = offsets(&self.volume, index, count + 1)
+                    {
+                        ctx.findings.entries.push(EntryFix {
+                            kinds: fix.kinds,
+                            path: join(&job.path, &fix.name),
+                            change: EntryChange::ExfatSet {
+                                entries: at,
+                                count: fix.count,
+                                name_length: fix.name_length,
+                                valid_length: None,
+                            },
+                        });
+                        adopted = index + 1..index + count + 1;
+                    }
                     index += consumed;
-                    if let Some(set) = set {
-                        self.entry(ctx, job, set, stack)?;
+                    if let (Some(set), Some(at)) = (set, at) {
+                        self.entry(ctx, job, set, at, stack)?;
                     }
                 }
                 EXFAT_TYPE_STREAM | EXFAT_TYPE_NAME => {
                     orphans += 1;
+                    if !adopted.contains(&index)
+                        && let Some(at) = self.volume.locate(runs, (index * ENTRY) as u64)
+                    {
+                        orphan_at.push(at);
+                    }
                     index += 1;
                 }
                 _ => index += 1,
@@ -410,6 +463,16 @@ impl ExfatChecker {
                     .path(job.path.as_str())
                     .count(orphans),
             );
+            if !orphan_at.is_empty() {
+                ctx.findings.entries.push(EntryFix {
+                    kinds: vec![IssueKind::OrphanEntries],
+                    path: job.path.clone(),
+                    change: EntryChange::Delete {
+                        at: orphan_at,
+                        exfat: true,
+                    },
+                });
+            }
         }
         Some(())
     }
@@ -470,12 +533,13 @@ impl ExfatChecker {
         (set.entries, Some(set))
     }
 
-    /// 认领一个文件或目录的簇；目录压栈。
+    /// 认领一个文件或目录的簇；目录压栈。`at` 是这组项各项在分区里的位置。
     fn entry(
         &mut self,
         ctx: &mut Ctx,
         job: &DirJob,
         set: ExfatSet,
+        at: Vec<u64>,
         stack: &mut Vec<DirJob>,
     ) -> Option<()> {
         let path = join(&job.path, &set.name);
@@ -487,7 +551,24 @@ impl ExfatChecker {
                     .expected(set.data_length)
                     .actual(set.valid_length),
             );
+            // 有效长度不能超过数据长度：改成与数据长度相同
+            ctx.findings.entries.push(EntryFix {
+                kinds: vec![IssueKind::SizeInvalid],
+                path: path.clone(),
+                change: EntryChange::ExfatSet {
+                    entries: at.clone(),
+                    count: None,
+                    name_length: None,
+                    valid_length: Some(set.data_length),
+                },
+            });
         }
+        let directory = set.attributes & ATTR_DIRECTORY != 0;
+        let entry = EntryRef {
+            at: EntryAt::Exfat(at),
+            size: Some(set.data_length),
+            directory,
+        };
         let needed = self.volume.clusters_for(set.data_length);
         let layout = if set.no_fat_chain {
             Layout::Contiguous { needed }
@@ -511,6 +592,7 @@ impl ExfatChecker {
                 first: set.first_cluster,
                 layout,
                 depth: job.depth + 1,
+                entry: Some(entry),
             });
             return Some(());
         }
@@ -519,8 +601,110 @@ impl ExfatChecker {
         if needed == 0 {
             return Some(());
         }
-        self.volume
-            .walk(ctx, id, &path, set.first_cluster, layout, false)?;
+        self.volume.walk(
+            ctx,
+            id,
+            &path,
+            set.first_cluster,
+            layout,
+            false,
+            Some(&entry),
+        )?;
         Some(())
     }
+}
+
+/// 一组目录项能怎么修：次项个数、文件名长度按现有的项重算，再重算校验和。
+struct SetRepair {
+    kinds: Vec<IssueKind>,
+    name: String,
+    count: Option<u8>,
+    name_length: Option<u8>,
+}
+
+/// 从 `entries[index]`（文件项）起的一组项有问题时，试着修：次项个数按后面连着的次项数，文件名长度按文件名项里
+/// 第一个 0 之前的字符数，校验和重算。改完再按同一套规则（[`exfat_entry_set`]）解析一遍，没有问题了才算能修。
+/// 返回改后的次项个数与修法。
+fn repair_set(entries: &[[u8; ENTRY]], index: usize) -> Option<(usize, SetRepair)> {
+    let before = exfat_entry_set(entries, index);
+    if before.problems.is_empty() {
+        return None;
+    }
+    let mut local: Vec<[u8; ENTRY]> = entries
+        .get(index..entries.len().min(index + MAX_SET_ENTRIES))?
+        .to_vec();
+    let primary = *local.first()?;
+    let in_use = primary[0] & EXFAT_IN_USE;
+    let mut kinds = Vec::new();
+    let mut count = usize::from(primary[1]);
+    let mut new_count = None;
+    let mut name_length = None;
+    for problem in &before.problems {
+        match *problem {
+            SetProblem::SecondaryCount { .. } | SetProblem::Missing { .. } => {
+                // 后面连着的次项：使用中标记与文件项相同、类型第 6 位为 1
+                let found = local
+                    .iter()
+                    .skip(1)
+                    .take_while(|raw| raw[0] & EXFAT_IN_USE == in_use && raw[0] & 0x40 != 0)
+                    .count();
+                if found < 2 {
+                    return None;
+                }
+                count = found;
+                new_count = Some(u8::try_from(found).ok()?);
+                if let Some(first) = local.first_mut() {
+                    first[1] = new_count?;
+                }
+                kinds.push(IssueKind::EntrySetCount);
+            }
+            SetProblem::NameLength { .. } => {
+                let names = local
+                    .iter()
+                    .take(count + 1)
+                    .skip(2)
+                    .take_while(|raw| raw[0] | EXFAT_IN_USE == EXFAT_TYPE_NAME)
+                    .count();
+                let length = local
+                    .iter()
+                    .skip(2)
+                    .take(names)
+                    .flat_map(|raw| raw[2..32].as_chunks::<2>().0.iter())
+                    .take_while(|unit| **unit != [0, 0])
+                    .count();
+                if length == 0 {
+                    return None;
+                }
+                let length = u8::try_from(length).ok()?;
+                local.get_mut(1)?[3] = length;
+                name_length = Some(length);
+                kinds.push(IssueKind::EntryNameLength);
+            }
+            SetProblem::Checksum { .. } => kinds.push(IssueKind::EntrySetChecksum),
+        }
+    }
+    let checksum = exfat_set_checksum(local.get(..=count)?);
+    local.first_mut()?[2..4].copy_from_slice(&checksum.to_le_bytes());
+    let after = exfat_entry_set(&local, 0);
+    if !after.problems.is_empty() || after.entries != count + 1 {
+        return None;
+    }
+    // 修次项个数时校验和一定跟着变，也算修好了校验和
+    if !kinds.contains(&IssueKind::EntrySetChecksum)
+        && exfat_entry_set(entries, index)
+            .problems
+            .iter()
+            .any(|problem| matches!(problem, SetProblem::Checksum { .. }))
+    {
+        kinds.push(IssueKind::EntrySetChecksum);
+    }
+    Some((
+        count,
+        SetRepair {
+            kinds,
+            name: after.name,
+            count: new_count,
+            name_length,
+        },
+    ))
 }

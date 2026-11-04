@@ -173,9 +173,9 @@ export default {
     },
     fsCheck: {
       name: '检查文件系统',
-      summary: '检查 FAT（文件分配表）、exFAT（扩展文件分配表）的引导区、FAT 链、分配位图与目录项是否一致，列出问题；丢失簇、分配位图漏标、过长的链、FSInfo（文件系统信息）与未正常卸下的标记可以勾选修复。检查本身只读。',
+      summary: '检查 FAT（文件分配表）、exFAT（扩展文件分配表）的引导区、FAT 链、分配位图与目录项是否一致，列出问题；丢失簇、断链、交叉链接、两份 FAT 不一致、目录项、分配位图漏标、读不出的空闲簇等可以勾选修复。检查本身只读。',
       suits: '分区能打开，但文件乱码、文件夹打不开、容量对不上，或者拔盘后提示要扫描修复。',
-      limits: 'NTFS（新技术文件系统）只检查引导扇区与主文件表；两份 FAT（文件分配表）不一致、交叉链接、断链、目录项损坏这一版只检查、不修复。',
+      limits: 'NTFS（新技术文件系统）只检查引导扇区与主文件表；FAT 与 exFAT 上分配位图、大写表本身坏了，以及读不出的目录，这一版只检查、不修复。',
     },
     image: {
       name: '制作磁盘镜像（能识别坏区）',
@@ -1045,6 +1045,12 @@ export default {
       tooLong: '截短 {items} 个文件的 FAT（文件分配表）链，释放多出的 {clusters} 个簇',
       lost: '释放 {items} 段丢失簇（共 {clusters} 个簇）',
       dirty: '标回「已正常卸下」',
+      fatFromFirst: '以第一份 FAT（文件分配表）为准，改写第二份里不同的 {items} 个扇区',
+      fatFromSecond: '以第二份 FAT（文件分配表）为准，改写第一份里不同的 {items} 个扇区',
+      chains: '截短 {items} 条断了的链，文件大小跟着改',
+      crossLinks: '给 {items} 个交叉链接的文件复制出 {clusters} 个簇',
+      entries: '修复 {items} 处目录项',
+      badClusters: '把 {clusters} 个读不出的空闲簇（{items} 段）标成坏簇',
     },
     fsFixRollbackValue: '把这些位置恢复成修复之前的内容',
     mftTable: '主文件表',
@@ -1178,6 +1184,40 @@ export default {
       intro: '勾选要修的几类问题，生成写入计划，确认后才写：写前存备份、写完读回核对、之后能回滚。建议先制作镜像、在镜像上修好再改原盘。',
       count: '{count} 处',
       lostCount: '{clusters} 个簇',
+      crossCount: '{items} 个文件、{clusters} 个簇',
+      labelWithCount: '{label}（{count}）',
+      fatCopies: {
+        label: '统一两份 FAT（文件分配表）',
+        hint: '两份记的不一样：选一份为准，把另一份里不同的 {sectors} 个扇区改成一样。下面是两种方向各自修完还剩的问题。',
+        fatFromFirst: '以第一份为准',
+        fatFromSecond: '以第二份为准',
+        recommended: '（推荐）',
+        rating: '正在把两种方向各预演一遍，要把分区检查两遍…',
+        left: '修完还剩 {dataLoss} 项会丢数据、{structure} 项结构错误、{minor} 项可以忽略',
+        clean: '修完没有发现问题',
+        alone: '统一两份 FAT 要单独做：写完会重新检查，再修别的问题。',
+      },
+      chains: {
+        label: '修好断了的链',
+        hint: '链在出错的地方结束，文件大小跟着改小；起始簇就不对的文件改为空文件。修之前先把这些文件复制出来，能读多少读多少。',
+      },
+      crossLinks: {
+        label: '分开交叉链接的文件',
+        hint: '两个文件共用了同一段簇：给后一个文件复制一份到空闲簇上，两个文件现有的内容都留着。其中一个的内容本来就是错的，修完自己核对。',
+      },
+      entries: {
+        label: '修复目录项',
+        hint: 'exFAT（扩展文件分配表）目录项的个数、文件名长度与校验和按现有内容重算；孤立的目录项、对不上的长文件名项标为已删除（文件留下短文件名）；子目录开头的 . 与 .. 重写。',
+      },
+      badClusters: {
+        label: '把读不出的空闲簇标成坏簇',
+        hint: '读不出的空闲簇标成坏簇，以后不会再往上写；已属于文件的簇不动。',
+        scan: '读一遍空闲簇…',
+        scanning: '正在读空闲簇：{done} / {total}',
+        scanned: '读了 {size} 空闲空间，有 {count} 个簇读不出。',
+        scannedClean: '读了 {size} 空闲空间，都读得出，没有要标的坏簇。',
+        scanFirst: '只读源盘；空闲空间大时要读很久。',
+      },
       fsInfo: {
         label: '重写 FSInfo（文件系统信息）扇区',
         hint: '空闲簇数记为未知，Windows 挂载时会重新统计。',
@@ -1379,7 +1419,7 @@ export default {
       fatCopiesDiffer: {
         title: '两份 FAT（文件分配表）不一致：从簇 {cluster} 起共 {count} 处不同',
         detail: '两份 FAT（文件分配表）本应完全相同，不一致说明写到一半中断过。检查按第一份 FAT 进行。',
-        fix: '以后可以确认哪一份正确后，用它覆盖另一份。',
+        fix: '可以在上面的「修复」里选一份为准统一两份 FAT（文件分配表），两种方向修完还剩多少问题都会先列出来。',
       },
       fatMediaMismatch: {
         title: 'FAT（文件分配表）第 0 项（{actual}）与引导扇区的介质描述符（{expected}）不符',
@@ -1409,32 +1449,32 @@ export default {
       firstClusterInvalid: {
         title: '{path}：起始簇 {actual} 不合法',
         detail: '这个文件或文件夹记录的数据位置是坏的，内容读不出来。',
-        fix: '以后可以把文件截成 0 字节、删掉坏的文件夹项；内容可以试试「按文件类型深度恢复」。',
+        fix: '文件可以在上面的「修复」里改为空文件；内容可以先试试「按文件类型深度恢复」。',
       },
       chainOutOfRange: {
         title: '{path}：FAT（文件分配表）链在簇 {cluster} 处指向簇区之外（{actual}）',
         detail: '文件在这里之后的内容找不到了。',
-        fix: '以后可以在这里结束链，把文件截短到能读的部分。',
+        fix: '先把文件复制出来，再在上面的「修复」里在这里结束链、把文件截短到能读的部分。',
       },
       chainLoop: {
         title: '{path}：FAT（文件分配表）链在簇 {cluster} 处绕回了已经走过的簇',
         detail: '链成了环：读这个文件的程序可能一直读下去，读出的内容也不对。',
-        fix: '以后可以在环开始之前结束链，把文件截短到能读的部分。',
+        fix: '先把文件复制出来，再在上面的「修复」里在环开始之前结束链。',
       },
       chainFree: {
         title: '{path}：FAT（文件分配表）链在簇 {cluster} 处断开（这个簇在 FAT 里是空闲的）',
         detail: '之后的内容找不到了，而且这个簇随时可能被新文件占用。',
-        fix: '以后可以在这里结束链、把文件截短；断开之后的簇可以另存为孤立文件再看。',
+        fix: '可以在上面的「修复」里在这里结束链、把文件截短；断开之后的簇成了丢失簇，可以先另存再释放。',
       },
       chainBadCluster: {
         title: '{path}：FAT（文件分配表）链经过标记为坏簇的簇 {cluster}',
         detail: '这个簇以前读写出过错，链也在这里断开。',
-        fix: '先做镜像；以后可以把文件截短到坏簇之前。',
+        fix: '先做镜像；可以在上面的「修复」里把文件截短到坏簇之前。',
       },
       chainTooShort: {
         title: '{path}：FAT（文件分配表）链只有 {actual} 个簇，按文件大小需要 {expected} 个',
         detail: '文件末尾有一部分没有分配空间，读出来不完整。',
-        fix: '以后可以把文件大小改成链能装下的长度。',
+        fix: '可以在上面的「修复」里把文件大小改成链能装下的长度。',
       },
       chainTooLong: {
         title: '{path}：FAT（文件分配表）链有 {actual} 个簇，按文件大小只需要 {expected} 个',
@@ -1444,7 +1484,7 @@ export default {
       crossLink: {
         title: '{path} 与 {otherPath} 共用 {count} 个簇（从簇 {cluster} 起）',
         detail: '两个文件占了同一块空间，至少有一个的内容是错的；改其中一个会把另一个也改坏。',
-        fix: '先把两个文件都复制出来核对；以后可以给其中一个复制一份独立的簇。',
+        fix: '先把两个文件都复制出来核对；可以在上面的「修复」里给后一个文件复制一份独立的簇。',
       },
       lostClusters: {
         title: '从簇 {cluster} 起有 {count} 个簇已占用，但没有文件引用',
@@ -1464,42 +1504,42 @@ export default {
       sizeInvalid: {
         title: '{path}：有效数据长度（{actual}）大于文件长度（{expected}）',
         detail: '长度记录自相矛盾，读出的长度可能不对。',
-        fix: '以后可以把有效数据长度改成不超过文件长度。',
+        fix: '可以在上面的「修复」里把有效数据长度改成与文件长度一样。',
       },
       entrySetChecksum: {
         title: '{path}：目录项的校验和不对',
         detail: 'Windows 会把这组目录项当作损坏，文件可能不显示或打不开；检查仍按记录的内容核对了它占用的簇。',
-        fix: '以后可以重新计算校验和。',
+        fix: '可以在上面的「修复」里重新计算校验和。',
       },
       entrySetCount: {
         title: '{path}：目录项登记了 {expected} 个次项，实际连着的只有 {actual} 个',
         detail: '这组目录项不完整，文件名或位置信息可能丢了一部分。',
-        fix: '以后可以按实际有的项改正次项个数，或者删掉这组项。',
+        fix: '可以在上面的「修复」里按实际连着的项改正次项个数。',
       },
       entryNameLength: {
         title: '{path}：文件名长度与文件名项对不上（应有 {expected} 项，实际 {actual} 项）',
         detail: '文件名可能显示不全或乱码。',
-        fix: '以后可以按文件名项改正长度。',
+        fix: '可以在上面的「修复」里按文件名项改正长度。',
       },
       orphanEntries: {
         title: '{path}：有 {count} 个不属于任何文件的目录项',
         detail: '多半是写目录时中断留下的残项，不影响别的文件。',
-        fix: '以后可以清掉这些项。',
+        fix: '可以在上面的「修复」里把这些项标为已删除。',
       },
       lfnChecksum: {
         title: '{path}：长文件名与短文件名对不上',
         detail: '系统会忽略这个长文件名，只显示 8.3 格式的短文件名。',
-        fix: '以后可以重新计算长文件名的校验和。',
+        fix: '可以在上面的「修复」里把对不上的长文件名项标为已删除，文件留下短文件名。',
       },
       lfnOrder: {
         title: '{path}：长文件名的分段序号不对，或者有多余的长文件名项',
         detail: '长文件名可能显示不全，或者被忽略。',
-        fix: '以后可以清掉残缺的长文件名项。',
+        fix: '可以在上面的「修复」里把残缺的长文件名项标为已删除。',
       },
       dotEntries: {
         title: '{path}：开头的「.」「..」项缺失或指向不对',
         detail: '有的程序靠这两项回到上级文件夹，坏了时可能打不开这个文件夹。',
-        fix: '以后可以重写这两项。',
+        fix: '可以在上面的「修复」里重写这两项。',
       },
       tooDeep: {
         title: '{path}：文件夹嵌套太深，没有再往下查',

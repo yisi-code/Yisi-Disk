@@ -19,8 +19,8 @@ use yisi_broker::execute::{self, ImageFile};
 /// 执行的结果：成功，或停在哪一步、失败前已经写下去几段。与磁盘代理的答复同一个类型。
 pub use yisi_broker::protocol::WriteExecuted as WriteOutcome;
 use yisi_engine::protocol::{
-    BootFix, BootSectorPlan, FsFix, FsFixCount, FsFixPlan, MftFix, MftPlan, PartitionRef,
-    PartitionTableFix, PartitionTablePlan, RebuiltBoot, WritePlan, image_identity,
+    BootFix, BootSectorPlan, ClusterRun, FsFix, FsFixCount, FsFixPlan, MftFix, MftPlan,
+    PartitionRef, PartitionTableFix, PartitionTablePlan, RebuiltBoot, WritePlan, image_identity,
 };
 
 use crate::broker::BrokerSession;
@@ -301,9 +301,11 @@ impl WritePlans {
         target: Target,
         partition: PartitionRef,
         fixes: Vec<FsFix>,
+        bad_clusters: Vec<ClusterRun>,
     ) -> Result<PlanView, HostError> {
         let expected = writable(&target, &self.data_dir)?;
-        let planned = engines.plan_fs_fix(broker, target.clone(), partition, fixes)?;
+        let planned =
+            engines.plan_fs_fix(broker, target.clone(), partition, fixes, bad_clusters)?;
         check_fs_fix_plan(&planned, &expected, partition)?;
         let detail = FsFixDetail {
             partition: partition.number,
