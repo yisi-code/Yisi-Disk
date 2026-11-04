@@ -32,6 +32,11 @@ fn main() {
         "image_history_remove",
         "image_history_relocate",
         "boot_diagnose",
+        "write_plan_boot_sector",
+        "write_plan_execute",
+        "write_plan_discard",
+        "write_plan_rollback",
+        "write_history_list",
         "job_start_fs_check",
         "fs_check_save_report",
     ]);

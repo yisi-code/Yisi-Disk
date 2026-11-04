@@ -25,7 +25,7 @@
 | 禁止 `unwrap`、`expect`、直接下标访问（clippy `unwrap_used`、`expect_used`、`indexing_slicing`） | 解析磁盘数据的 crate：`part`、`fs`、`formats`、`carve`、`repair`；测试代码除外（`clippy.toml`） |
 | 来自磁盘的数值做运算时一律用 `checked_*` / `saturating_*` | 同上 |
 | release 构建也开启 `overflow-checks`，作为兜底 | 同上 |
-| 引擎侧的块设备类型不提供写方法；写盘只能通过写入计划 | 全部 |
+| 引擎侧的块设备类型不提供写方法；写盘只能通过写入计划，执行写入计划的代码在 `yisi-broker`，引擎不依赖它 | 全部 |
 
 ### 2.3 格式与检查
 

@@ -8,6 +8,8 @@ use serde_json::Value;
 
 /// 输出目录里写入中途的文件名后缀（写完才改成正式名字）：宿主不打开以它结尾的文件。
 pub use yisi_carve::PARTIAL_SUFFIX;
+/// 写入计划（只是数据）：引擎生成，宿主或磁盘代理执行。
+pub use yisi_io::{DeviceIdentity, SectorWrite, WritePlan, image_identity};
 
 /// 返回 [`Capabilities`]。
 pub const CAPABILITIES: &str = "engine.capabilities";
@@ -68,6 +70,11 @@ pub const OPEN_RANGE: &str = "repair.openRange";
 /// 逐项核对、比较主备，核对分区表里的类型与长度，给出结论。只读，读完即答复（不是任务）；分区表读不出时答复
 /// [`error_code::SOURCE_UNAVAILABLE`]。
 pub const DIAGNOSE_BOOT: &str = "repair.diagnoseBoot";
+/// 生成修复引导扇区的写入计划：参数 [`PlanBootSectorParams`]，结果是 [`BootSectorPlan`]。只读源、不写盘，读完即答复（不是任务）。
+/// 生成前重新诊断，结论必须仍是这种修复要求的（主坏备好、主好备坏），否则答复 [`error_code::PLAN_NOT_APPLICABLE`]；
+/// 把写入叠加在源上预演、重新诊断不是「正常」，或者要写的位置读不出等，答复 [`error_code::PLAN_UNAVAILABLE`]。
+/// 源只能是镜像文件或整块物理盘：卷上的偏移不是盘上的偏移，答复 `INVALID_PARAMS`。
+pub const PLAN_BOOT_SECTOR: &str = "repair.planBootSector";
 /// 制作能识别坏区的镜像（任务）：参数 [`ImageParams`]，建好镜像文件与坏区图后答复 [`ImageStarted`]；
 /// 进展经 [`IMAGING`] 送达，结果是 [`ImageSummary`]。镜像文件或坏区图已经存在时答复 [`error_code::IMAGE_EXISTS`]；
 /// 源为物理磁盘时，镜像必须在另一块盘上，否则答复 [`error_code::OUTPUT_ON_SOURCE`]。取消时保存坏区图，之后可以续做。
@@ -129,6 +136,10 @@ pub mod error_code {
     pub const IMAGE_EXISTS: i64 = -32008;
     /// 要续做的镜像没有坏区图、坏区图读不懂，或者不是这个源做的。
     pub const IMAGE_MISMATCH: i64 = -32009;
+    /// 诊断结论已经不适用要生成的修复（例如诊断之后源被改过）：重新诊断后再来。
+    pub const PLAN_NOT_APPLICABLE: i64 = -32010;
+    /// 生不成写入计划：要写的位置读不出、内容已经相同、预演写入后仍修不好等。
+    pub const PLAN_UNAVAILABLE: i64 = -32011;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1030,6 +1041,42 @@ pub struct BootDifference {
     pub field: String,
     pub primary: u64,
     pub backup: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanBootSectorParams {
+    pub source: Source,
+    /// 分区表里的编号（诊断结果里的 `number`）。
+    pub partition: u32,
+    pub fix: BootFix,
+}
+
+/// 修复引导扇区的方向。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BootFix {
+    /// 主引导扇区坏了、备份可用：把备份复制到分区开头。
+    PrimaryFromBackup,
+    /// 主引导扇区正常、备份坏了：把主引导扇区复制到它记的备份位置。
+    BackupFromPrimary,
+}
+
+/// 修复引导扇区的写入计划。FAT32、NTFS 只复制引导扇区本身，exFAT 复制整个引导区（12 个扇区）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootSectorPlan {
+    pub plan: WritePlan,
+    pub partition: u32,
+    pub partition_offset: u64,
+    pub partition_length: u64,
+    /// 同 [`PartitionBoot::filesystem`]。
+    pub filesystem: String,
+    pub fix: BootFix,
+    /// 从哪里复制、写到哪里（源上的字节偏移），复制多少字节。
+    pub from: u64,
+    pub to: u64,
+    pub length: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

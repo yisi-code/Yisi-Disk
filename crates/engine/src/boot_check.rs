@@ -1,12 +1,15 @@
-//! 引导扇区诊断（`repair.diagnoseBoot`）：调用 `yisi-repair`，把结果换成协议里的形式。只读。
+//! 引导扇区诊断（`repair.diagnoseBoot`）与修复引导扇区的写入计划（`repair.planBootSector`）：调用 `yisi-repair`，
+//! 把结果换成协议里的形式。都只读源。
 
 use std::sync::Arc;
 
 use yisi_engine::protocol::{
-    self, BootCopy, BootCopyReport, BootDiagnosis, BootDifference, BootIssue, PartitionBoot,
+    self, BootCopy, BootCopyReport, BootDiagnosis, BootDifference, BootFix, BootIssue,
+    BootSectorPlan, DeviceIdentity, PartitionBoot, WritePlan,
 };
 use yisi_io::BlockDevice;
 use yisi_repair::boot::{self, CopyReport, Issue, PartitionReport, TableIssue, Verdict};
+use yisi_repair::boot_fix::{self, BootFixError};
 use yisi_rpc::ErrorObject;
 
 use crate::browse::{fs_key, note_key, role_key, scheme_name, table_kind};
@@ -25,6 +28,56 @@ pub fn diagnose(device: &Arc<dyn BlockDevice>) -> Result<BootDiagnosis, ErrorObj
         scheme: scheme_name(report.table.scheme).to_owned(),
         notes: report.table.notes.iter().map(note_key).collect(),
         partitions: report.partitions.iter().map(partition).collect(),
+    })
+}
+
+/// 为一个分区生成修复引导扇区的写入计划。`identity` 是源的标识（镜像文件的规范路径、物理盘的厂商型号序列号），
+/// 执行前与实际打开的设备核对。
+pub fn plan(
+    device: &Arc<dyn BlockDevice>,
+    identity: String,
+    partition: u32,
+    fix: BootFix,
+) -> Result<BootSectorPlan, ErrorObject> {
+    let direction = match fix {
+        BootFix::PrimaryFromBackup => boot_fix::BootFix::PrimaryFromBackup,
+        BootFix::BackupFromPrimary => boot_fix::BootFix::BackupFromPrimary,
+    };
+    let planned = boot_fix::plan_boot_fix(device, partition, direction).map_err(|error| {
+        let code = match error {
+            BootFixError::Table(_) => protocol::error_code::SOURCE_UNAVAILABLE,
+            BootFixError::NoPartition(_) | BootFixError::NotApplicable(_) => {
+                protocol::error_code::PLAN_NOT_APPLICABLE
+            }
+            BootFixError::NoBackupPosition
+            | BootFixError::Unreadable(_)
+            | BootFixError::Unaligned
+            | BootFixError::Unchanged
+            | BootFixError::Rehearsal(_) => protocol::error_code::PLAN_UNAVAILABLE,
+        };
+        ErrorObject::new(code, error_chain(&error))
+    })?;
+    let plan = WritePlan {
+        device: DeviceIdentity {
+            identity,
+            size: device.size(),
+            sector_size: device.sector_size(),
+        },
+        writes: planned.writes,
+    };
+    plan.validate().map_err(|error| {
+        ErrorObject::new(protocol::error_code::PLAN_UNAVAILABLE, error_chain(&error))
+    })?;
+    Ok(BootSectorPlan {
+        plan,
+        partition: planned.partition.number,
+        partition_offset: planned.partition.offset,
+        partition_length: planned.partition.length,
+        filesystem: fs_key(planned.filesystem).to_owned(),
+        fix,
+        from: planned.from,
+        to: planned.to,
+        length: planned.length,
     })
 }
 

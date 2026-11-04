@@ -33,7 +33,7 @@ import { formatBytes, formatSeconds } from '../utils/format'
 
 /** 复制失败的文件最多列出这么多个 */
 const MAX_LISTED_FAILURES = 20
-/** 为打开而复制时，宿主拒绝写程序目录下的 open-cache（例如程序就在源盘上），改请用户选保存位置 */
+/** 为打开而复制时，宿主拒绝写程序文件夹下 data 里的 open-cache（例如程序就在源盘上），改请用户选保存位置 */
 const OPEN_COPY_REFUSED = ['outputOnSource', 'outputUnavailable']
 const FINISHED_STATUSES: string[] = ['completed', 'failed', 'cancelled']
 
@@ -73,7 +73,7 @@ const fileActionNote = ref<string | null>(null)
 const copyPurpose = ref<'saveAs' | 'open'>('saveAs')
 /** 为打开而复制的文件，复制好就打开它 */
 const openingItem = ref<TreeItem | null>(null)
-/** 当前的复制任务写的是程序目录下的 open-cache */
+/** 当前的复制任务写的是程序文件夹下 data 里的 open-cache */
 const isOpenCacheCopy = ref(false)
 
 /** 勾选的项里，上级目录也被勾选的不再单列：目录本来就连同内容一起复制 */
@@ -215,7 +215,7 @@ async function openItem(item: TreeItem) {
   await copyToOpen(item, null)
 }
 
-/** `dir` 为 null 时复制到程序目录下的 open-cache；用户另选了位置时按另存为显示结果，让人知道存在了哪 */
+/** `dir` 为 null 时复制到程序文件夹下 data 里的 open-cache；用户另选了位置时按另存为显示结果，让人知道存在了哪 */
 async function copyToOpen(item: TreeItem, dir: string | null) {
   openingItem.value = item
   await startCopy(

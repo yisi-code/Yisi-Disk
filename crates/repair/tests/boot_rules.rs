@@ -9,37 +9,24 @@ use std::sync::Arc;
 use yisi_fs::FsKind;
 use yisi_fs::bpb::{check_fat, check_ntfs};
 use yisi_fs::samples::{FatImage, FatType, MemoryDisk, Noise, NtfsImage};
-use yisi_io::{BlockDevice, IoError};
+use yisi_io::{BlockDevice, Overlay, SectorWrite};
 use yisi_part::{Partition, PartitionKind};
 use yisi_repair::boot::{Verdict, diagnose_partition};
 use yisi_repair::check::{self, Area, Control, IssueKind, Stage};
 
-/// 共用一份样本，只把 `at` 起的 512 字节换成改过的引导扇区，免得每轮复制几十 MiB。
-struct Patched {
-    base: Arc<MemoryDisk>,
+/// 共用一份样本，只把 `at` 起的 512 字节换成改过的引导扇区（叠加视图），免得每轮复制几十 MiB。
+fn patched(
+    base: &Arc<dyn BlockDevice>,
     at: usize,
+    original: [u8; 512],
     sector: [u8; 512],
-}
-
-impl BlockDevice for Patched {
-    fn size(&self) -> u64 {
-        self.base.size()
-    }
-
-    fn sector_size(&self) -> u32 {
-        512
-    }
-
-    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, IoError> {
-        let read = self.base.read_at(offset, buf)?;
-        for (index, byte) in buf[..read].iter_mut().enumerate() {
-            let position = (offset as usize + index).checked_sub(self.at);
-            if let Some(&patched) = position.and_then(|position| self.sector.get(position)) {
-                *byte = patched;
-            }
-        }
-        Ok(read)
-    }
+) -> Arc<dyn BlockDevice> {
+    let write = SectorWrite {
+        offset: at as u64,
+        before: original.to_vec(),
+        after: sector.to_vec(),
+    };
+    Arc::new(Overlay::new(Arc::clone(base), &[write]))
 }
 
 struct Quiet;
@@ -77,7 +64,7 @@ fn whole(length: u64) -> Partition {
 fn agree(name: &str, image: Vec<u8>, usable: fn(&[u8]) -> bool, rounds: u32) {
     let length = image.len() as u64;
     let original: [u8; 512] = image[..512].try_into().unwrap();
-    let base = Arc::new(MemoryDisk::new(image, 512));
+    let base: Arc<dyn BlockDevice> = Arc::new(MemoryDisk::new(image, 512));
     let partition = whole(length);
     let mut noise = Noise::new(name.len() as u64);
     let mut both = [0u32; 2];
@@ -86,11 +73,7 @@ fn agree(name: &str, image: Vec<u8>, usable: fn(&[u8]) -> bool, rounds: u32) {
         mutate(&mut noise, &mut sector, 11..0x54);
         let expected = usable(&sector);
         both[usize::from(expected)] += 1;
-        let device: Arc<dyn BlockDevice> = Arc::new(Patched {
-            base: Arc::clone(&base),
-            at: 0,
-            sector,
-        });
+        let device = patched(&base, 0, original, sector);
 
         let browsable = yisi_fs::detect(device.as_ref(), 0, length)
             .unwrap()
@@ -146,18 +129,14 @@ fn opening_diagnosis_and_check_agree_on_damaged_boot_sectors() {
 fn agree_on_backup(name: &str, image: Vec<u8>, at: usize, rounds: u32) {
     let length = image.len() as u64;
     let original: [u8; 512] = image[at..at + 512].try_into().unwrap();
-    let base = Arc::new(MemoryDisk::new(image, 512));
+    let base: Arc<dyn BlockDevice> = Arc::new(MemoryDisk::new(image, 512));
     let partition = whole(length);
     let mut noise = Noise::new(name.len() as u64 + 7);
     let mut seen = [0u32; 3];
     for round in 0..rounds {
         let mut sector = original;
         mutate(&mut noise, &mut sector, 11..0x54);
-        let device: Arc<dyn BlockDevice> = Arc::new(Patched {
-            base: Arc::clone(&base),
-            at,
-            sector,
-        });
+        let device = patched(&base, at, original, sector);
         let diagnosis = diagnose_partition(&device, &partition);
         let backup_valid = diagnosis
             .backup

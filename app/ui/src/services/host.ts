@@ -562,7 +562,7 @@ export function previewCarveRange(
 /**
  * 保存只扫描时选中的文件（任务）：回到源上重新读出并校验，与扫描时对不上的不保存。
  * 文件直接存进 outputDir，重名时加序号、不覆盖；outputDir 为 null 时是为打开、复制而保存，
- * 宿主存到程序目录下的 open-cache 并在后台清掉以前的副本。
+ * 宿主存到程序文件夹下 data 里的 open-cache 并在后台清掉以前的副本。
  * 保存好的文件按这个任务的 jobId 加保存成的文件名打开、在文件夹中显示
  */
 export function startExtract(
@@ -670,7 +670,7 @@ export function openBrowseRange(
 /**
  * 把浏览中选中的项复制到 outputDir 下新建的子目录里（另存为）。源为物理磁盘时，
  * 输出目录在源盘上（或无法确认不在）会返回 outputOnSource。
- * outputDir 为 null 时是为打开而复制：宿主存到程序目录下的 open-cache 并在后台清掉以前的副本
+ * outputDir 为 null 时是为打开而复制：宿主存到程序文件夹下 data 里的 open-cache 并在后台清掉以前的副本
  */
 export function startCopy(
   jobId: string,
@@ -689,6 +689,90 @@ export function startCopy(
  */
 export function diagnoseBoot(target: JobTarget): Promise<BootDiagnosis> {
   return invoke<BootDiagnosis>('boot_diagnose', { target })
+}
+
+/** 修复引导扇区的方向：用备份覆盖坏了的主引导扇区，或用主引导扇区重写坏了的备份 */
+export type BootFix = 'primaryFromBackup' | 'backupFromPrimary'
+
+/** 执行写入计划的步骤，失败时停在其中一步 */
+export type WriteStep = 'validate' | 'identity' | 'verify' | 'write' | 'flush' | 'readBack'
+
+/** 要写的一段在源上的位置（字节） */
+export interface WriteRange {
+  offset: number
+  length: number
+}
+
+/** 修复引导扇区的细节：from、to 是源上的字节偏移，length 是复制的字节数 */
+export interface BootSectorDetail {
+  partition: number
+  partitionOffset: number
+  partitionLength: number
+  filesystem: string
+  fix: BootFix
+  from: number
+  to: number
+  length: number
+}
+
+/** 写入计划的摘要；回滚时 bootSector 是原来那次修复的细节，rollbackOf 是它的计划 ID */
+export interface PlanSummary {
+  kind: 'bootSector' | 'rollback'
+  target: JobTarget
+  writes: WriteRange[]
+  bootSector: BootSectorDetail | null
+  rollbackOf: string | null
+}
+
+/** 等确认的写入计划：备份已经存好，确认后按计划 ID 执行（要写的内容存在宿主里） */
+export interface PlanView extends PlanSummary {
+  planId: string
+  backupPath: string
+}
+
+export interface WriteOutcome {
+  done: boolean
+  /** 失败时停在哪一步 */
+  step: WriteStep | null
+  /** 失败前已经写下去的段数；为 0 时源没被改动。成功时是全部段数 */
+  written: number
+  detail: string | null
+}
+
+/** 写盘记录里的一条：执行过的计划（成功或失败） */
+export interface WriteRecord extends PlanSummary {
+  planId: string
+  backupPath: string
+  executedAtMs: number
+  outcome: WriteOutcome
+}
+
+/**
+ * 生成修复引导扇区的写入计划：引擎重新诊断、预演写入，宿主存好备份后返回，不写盘。
+ * 目前只支持镜像文件（物理盘、卷返回 writeTargetUnsupported）；诊断结论已经变了时返回 planNotApplicable
+ */
+export function planBootSector(target: JobTarget, partition: number, fix: BootFix): Promise<PlanView> {
+  return invoke<PlanView>('write_plan_boot_sector', { target, partition, fix })
+}
+
+/** 执行已确认的计划；镜像正被别的程序打开时返回 imageInUse，计划留着可以再试 */
+export function executeWritePlan(planId: string): Promise<WriteRecord> {
+  return invoke<WriteRecord>('write_plan_execute', { planId })
+}
+
+/** 放弃还没执行的计划（删掉它的备份） */
+export function discardWritePlan(planId: string): Promise<void> {
+  return invoke<void>('write_plan_discard', { planId })
+}
+
+/** 为写盘记录里的一次写入生成回滚计划，同样要确认后执行 */
+export function planRollback(planId: string): Promise<PlanView> {
+  return invoke<PlanView>('write_plan_rollback', { planId })
+}
+
+/** 写盘记录，最新的在前 */
+export function listWriteHistory(): Promise<WriteRecord[]> {
+  return invoke<WriteRecord[]>('write_history_list')
 }
 
 /** 用系统默认程序打开复制出的文件；可执行与脚本类文件宿主不打开（executableBlocked） */

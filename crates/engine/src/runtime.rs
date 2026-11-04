@@ -19,7 +19,9 @@ use yisi_engine::protocol::{
     PREVIEW_RANGE, PreviewFsParams, PreviewParams, PreviewRangeParams, READ_SCAN, RESUME,
     ReadScanParams, SCAN_DELETED, ScanParams, Source,
 };
-use yisi_engine::protocol::{DIAGNOSE_BOOT, DiagnoseBootParams};
+use yisi_engine::protocol::{
+    DIAGNOSE_BOOT, DiagnoseBootParams, PLAN_BOOT_SECTOR, PlanBootSectorParams,
+};
 #[cfg(windows)]
 use yisi_engine::protocol::{DiskList, DiskSummary, DiskVolume};
 use yisi_engine::protocol::{OPEN_RANGE, OpenRangeParams, SEARCH_PARTITIONS, SearchParams};
@@ -235,6 +237,7 @@ fn dispatch_now(
                 SEARCH_PARTITIONS.to_owned(),
                 OPEN_RANGE.to_owned(),
                 DIAGNOSE_BOOT.to_owned(),
+                PLAN_BOOT_SECTOR.to_owned(),
                 FS_CHECK.to_owned(),
             ];
             if cfg!(windows) {
@@ -340,6 +343,17 @@ fn dispatch_now(
             let params: DiagnoseBootParams = request.params()?;
             let device: Arc<dyn BlockDevice> = Arc::from(open_source(&params.source)?);
             to_result(&boot_check::diagnose(&device)?)
+        }
+        PLAN_BOOT_SECTOR => {
+            let params: PlanBootSectorParams = request.params()?;
+            let (device, identity) = open_plan_source(&params.source)?;
+            let device: Arc<dyn BlockDevice> = Arc::from(device);
+            to_result(&boot_check::plan(
+                &device,
+                identity,
+                params.partition,
+                params.fix,
+            )?)
         }
         PREVIEW_RANGE => {
             let params: PreviewRangeParams = request.params()?;
@@ -589,7 +603,7 @@ fn open_image_source(
                     format!("镜像不能写到来源文件 {path} 上"),
                 ));
             }
-            Ok((device, format!("image {}", real_source.display())))
+            Ok((device, yisi_io::image_identity(&real_source)))
         }
         #[cfg(windows)]
         Source::Disk { handle } => {
@@ -618,6 +632,35 @@ fn open_image_source(
         Source::Disk { .. } | Source::Volume { .. } => {
             open_source(source).map(|device| (device, "disk".to_owned()))
         }
+    }
+}
+
+/// 打开要生成写入计划的源，给出计划里记的设备标识（与坏区图里的来源相同）。写入计划只写镜像文件与整块物理盘：
+/// 卷上的偏移不是盘上的偏移，执行时也只按物理盘打开。
+fn open_plan_source(source: &Source) -> Result<(Box<dyn BlockDevice>, String), ErrorObject> {
+    match source {
+        Source::Image { path, .. } => {
+            let device = open_source(source)?;
+            let real = std::fs::canonicalize(path).map_err(|error| {
+                ErrorObject::new(
+                    protocol::error_code::SOURCE_UNAVAILABLE,
+                    format!("无法确认镜像文件 {path} 的位置：{error}"),
+                )
+            })?;
+            Ok((device, yisi_io::image_identity(&real)))
+        }
+        #[cfg(windows)]
+        Source::Disk { handle } => {
+            let disk = adopt_disk(*handle)?;
+            let identity = disk_identity(&disk);
+            Ok((reading::metered(Box::new(disk)), identity))
+        }
+        #[cfg(not(windows))]
+        Source::Disk { .. } => open_source(source).map(|device| (device, "disk".to_owned())),
+        Source::Volume { .. } => Err(ErrorObject::new(
+            error_code::INVALID_PARAMS,
+            "写入计划只能针对镜像文件或整块物理盘，不能针对一个卷",
+        )),
     }
 }
 

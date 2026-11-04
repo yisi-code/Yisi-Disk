@@ -4888,6 +4888,7 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.21",
  "tracing",
  "tracing-subscriber",
@@ -4943,6 +4944,8 @@ dependencies = [
 name = "yisi-io"
 version = "0.1.1"
 dependencies = [
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "windows-sys 0.61.2",
 ]
@@ -4959,6 +4962,7 @@ dependencies = [
 name = "yisi-repair"
 version = "0.1.1"
 dependencies = [
+ "thiserror 2.0.21",
  "tracing",
  "yisi-fs",
  "yisi-io",

@@ -1997,3 +1997,76 @@ fn image_inspect_partial_image_change_check_and_describe() {
     assert!(engine.wait_exit().success());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn boot_sector_plans_restore_the_primary_from_the_backup() {
+    use yisi_engine::protocol::{
+        BootDiagnosis, BootFix, BootSectorPlan, DIAGNOSE_BOOT, PLAN_BOOT_SECTOR,
+    };
+
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-boot-plan");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (image, _) = damaged_boot_image(&dir);
+    let source = json!({"type": "image", "path": image, "sectorSize": 512});
+    let mut engine = Engine::start();
+    let diagnose = |engine: &mut Engine| -> BootDiagnosis {
+        serde_json::from_value(
+            engine
+                .call(DIAGNOSE_BOOT, json!({"source": source}))
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let before = diagnose(&mut engine);
+    let ntfs = &before.partitions[2];
+    let backup = ntfs.backup.as_ref().unwrap();
+
+    let plan: BootSectorPlan = serde_json::from_value(
+        engine
+            .call(
+                PLAN_BOOT_SECTOR,
+                json!({"source": source, "partition": 3, "fix": "primaryFromBackup"}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(plan.fix, BootFix::PrimaryFromBackup);
+    assert_eq!(plan.filesystem, "ntfs");
+    assert_eq!(
+        (plan.from, plan.to, plan.length),
+        (backup.offset, ntfs.offset, 512)
+    );
+    let real = std::fs::canonicalize(&image).unwrap();
+    assert_eq!(plan.plan.device.identity, yisi_io::image_identity(&real));
+    assert_eq!(plan.plan.device.size, before.size);
+    assert_eq!(plan.plan.device.sector_size, 512);
+    let bytes = std::fs::read(&image).unwrap();
+    let write = &plan.plan.writes[0];
+    assert_eq!(write.offset, ntfs.offset);
+    assert!(write.before.iter().all(|&byte| byte == 0));
+    assert_eq!(
+        write.after.as_slice(),
+        &bytes[backup.offset as usize..][..512]
+    );
+
+    // 结论不适用的方向与分区都拒绝，并且什么都没写
+    for params in [
+        json!({"source": source, "partition": 2, "fix": "primaryFromBackup"}),
+        json!({"source": source, "partition": 3, "fix": "backupFromPrimary"}),
+        json!({"source": source, "partition": 9, "fix": "primaryFromBackup"}),
+    ] {
+        let refused = engine.call(PLAN_BOOT_SECTOR, params).unwrap_err();
+        assert_eq!(refused.code, error_code::PLAN_NOT_APPLICABLE);
+    }
+    assert_eq!(std::fs::read(&image).unwrap(), bytes);
+
+    // 按计划写下去之后（执行在宿主，这里直接改文件），这个分区诊断为正常
+    let mut patched = bytes;
+    patched[write.offset as usize..][..write.after.len()].copy_from_slice(&write.after);
+    std::fs::write(&image, &patched).unwrap();
+    let after = diagnose(&mut engine);
+    assert_eq!(after.partitions[2].verdict, "healthy");
+    engine.close_input();
+    assert!(engine.wait_exit().success());
+}

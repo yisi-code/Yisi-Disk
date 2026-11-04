@@ -465,3 +465,46 @@
   padding: var(--space-xs) 0;
   cursor: pointer;
 }
+
+/* 记录清单：做过的镜像、写盘记录。每行左边几行文字，右边几个按钮 */
+.record-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.record-list__item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+}
+
+.record-list__item--current {
+  border-color: var(--color-accent);
+}
+
+.record-list__text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.record-list__title {
+  font-weight: 600;
+}
+
+.record-list__actions {
+  display: flex;
+  flex: none;
+  gap: var(--space-xs);
+}
