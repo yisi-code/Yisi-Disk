@@ -117,6 +117,12 @@ pub fn mft_self_record_ok(bytes: &[u8]) -> bool {
     Record::parse(bytes.to_vec(), MFT_RECORD).is_some_and(|record| is_mft_self(&record))
 }
 
+/// 第 `number` 条 MFT 记录本身完整：签名 `FILE`、更新序列对得上、记录头合理、记的记录号（有的话）就是它。
+/// 修复 `$MFT` 与 `$MFTMirr` 时逐条判断哪一份可信。
+pub fn mft_record_ok(bytes: &[u8], number: u64) -> bool {
+    Record::parse(bytes.to_vec(), number).is_some()
+}
+
 fn is_mft_self(record: &Record) -> bool {
     record.in_use() && record.is_base()
 }

@@ -37,6 +37,7 @@ fn summary(image: &Path) -> PlanSummary {
         writes: Vec::new(),
         boot_sector: None,
         partition_table: None,
+        mft: None,
         rollback_of: None,
     }
 }

@@ -4,12 +4,15 @@ import {
   executeWritePlan,
   listWriteHistory,
   planBootSector,
+  planMft,
   planPartitionTable,
   planRollback,
   toHostError,
   type BootFix,
   type HostError,
   type JobTarget,
+  type MftFix,
+  type PartitionRef,
   type PartitionTableFix,
   type PlanView,
   type WriteRecord,
@@ -62,6 +65,10 @@ export function useWritePlan() {
 
   function prepareTableFix(target: JobTarget, fix: PartitionTableFix): Promise<boolean> {
     return prepare(() => planPartitionTable(target, fix))
+  }
+
+  function prepareMftFix(target: JobTarget, partition: PartitionRef, fix: MftFix): Promise<boolean> {
+    return prepare(() => planMft(target, partition, fix))
   }
 
   function prepareRollback(planId: string): Promise<boolean> {
@@ -117,6 +124,7 @@ export function useWritePlan() {
     loadRecords,
     prepareBootSector,
     prepareTableFix,
+    prepareMftFix,
     prepareRollback,
     execute,
     discard,

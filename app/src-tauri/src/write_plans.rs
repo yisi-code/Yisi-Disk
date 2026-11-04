@@ -19,7 +19,8 @@ use yisi_broker::execute::{self, ImageFile};
 /// 执行的结果：成功，或停在哪一步、失败前已经写下去几段。与磁盘代理的答复同一个类型。
 pub use yisi_broker::protocol::WriteExecuted as WriteOutcome;
 use yisi_engine::protocol::{
-    BootFix, BootSectorPlan, PartitionTableFix, PartitionTablePlan, WritePlan, image_identity,
+    BootFix, BootSectorPlan, MftFix, MftPlan, PartitionRef, PartitionTableFix, PartitionTablePlan,
+    WritePlan, image_identity,
 };
 
 use crate::broker::BrokerSession;
@@ -36,12 +37,17 @@ const MAX_BOOT_SECTOR_BYTES: u64 = 12 * 4096;
 /// （128 项 × 128 字节的表项区，按 512 或 4096 字节扇区都在 64 KiB 之内）。
 const TABLE_AREA: u64 = 64 * 1024;
 
+/// `$MFT` 与 `$MFTMirr` 互修最多改 4 条记录，每条最大 4 KiB。
+const MAX_MFT_RECORDS: usize = 4;
+const MAX_MFT_RECORD_BYTES: u64 = 4096;
+
 /// 计划做什么。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PlanKind {
     BootSector,
     PartitionTable,
+    Mft,
     Rollback,
 }
 
@@ -81,6 +87,19 @@ pub struct PartitionTableDetail {
     pub role: Option<String>,
 }
 
+/// `$MFT` 与 `$MFTMirr` 互修的细节，同引擎答复的 [`MftPlan`]（不含要写的内容）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MftDetail {
+    pub fix: MftFix,
+    pub partition: u32,
+    pub partition_offset: u64,
+    pub partition_length: u64,
+    pub records: Vec<u64>,
+    pub from: u64,
+    pub to: u64,
+}
+
 /// 计划的摘要：给界面确认用，也记进写盘记录。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -93,6 +112,9 @@ pub struct PlanSummary {
     /// 改写分区表的计划（以及回滚它时）的细节。
     #[serde(default)]
     pub partition_table: Option<PartitionTableDetail>,
+    /// `$MFT` 与 `$MFTMirr` 互修的计划（以及回滚它时）的细节。
+    #[serde(default)]
+    pub mft: Option<MftDetail>,
     /// 回滚的是哪一次写入（计划 ID）。
     pub rollback_of: Option<String>,
 }
@@ -173,6 +195,7 @@ impl WritePlans {
                 writes: Vec::new(),
                 boot_sector: Some(detail),
                 partition_table: None,
+                mft: None,
                 rollback_of: None,
             },
         )
@@ -207,6 +230,42 @@ impl WritePlans {
                 writes: Vec::new(),
                 boot_sector: None,
                 partition_table: Some(detail),
+                mft: None,
+                rollback_of: None,
+            },
+        )
+    }
+
+    /// 请引擎生成 `$MFT` 与 `$MFTMirr` 互相修复的计划，存好备份后交给界面确认。只读源。
+    pub fn plan_mft(
+        &self,
+        engines: &Engines,
+        broker: &BrokerSession,
+        target: Target,
+        partition: PartitionRef,
+        fix: MftFix,
+    ) -> Result<PlanView, HostError> {
+        let expected = writable(&target, &self.data_dir)?;
+        let planned = engines.plan_mft(broker, target.clone(), partition, fix)?;
+        check_mft_plan(&planned, &expected, partition)?;
+        let detail = MftDetail {
+            fix: planned.fix,
+            partition: partition.number,
+            partition_offset: partition.offset,
+            partition_length: partition.length,
+            records: planned.records,
+            from: planned.from,
+            to: planned.to,
+        };
+        self.propose(
+            planned.plan,
+            PlanSummary {
+                kind: PlanKind::Mft,
+                target,
+                writes: Vec::new(),
+                boot_sector: None,
+                partition_table: None,
+                mft: Some(detail),
                 rollback_of: None,
             },
         )
@@ -242,6 +301,7 @@ impl WritePlans {
                 writes: Vec::new(),
                 boot_sector: record.summary.boot_sector.clone(),
                 partition_table: record.summary.partition_table.clone(),
+                mft: record.summary.mft.clone(),
                 rollback_of: Some(record.plan_id.clone()),
             },
         )
@@ -463,6 +523,33 @@ fn check_table_plan(planned: &PartitionTablePlan, expected: &Writable) -> Result
         return Err(HostError::new(
             "planMismatch",
             "计划要写的位置不在分区表所在的区域",
+        ));
+    }
+    Ok(())
+}
+
+/// `$MFT` 与 `$MFTMirr` 互修的计划最多 4 段、每段不超过一条记录的最大长度，都落在请求的分区里
+/// （按宿主自己请求的位置核对，不按引擎回传的）。
+fn check_mft_plan(
+    planned: &MftPlan,
+    expected: &Writable,
+    partition: PartitionRef,
+) -> Result<(), HostError> {
+    let plan = &planned.plan;
+    check_device(plan, expected)?;
+    let end = partition.offset.saturating_add(partition.length);
+    let inside = |offset: u64, length: u64| {
+        offset >= partition.offset && offset.saturating_add(length) <= end
+    };
+    if plan.writes.len() > MAX_MFT_RECORDS
+        || plan
+            .writes
+            .iter()
+            .any(|write| write.len() > MAX_MFT_RECORD_BYTES || !inside(write.offset, write.len()))
+    {
+        return Err(HostError::new(
+            "planMismatch",
+            "计划要写的位置不在这个分区的主文件表或它的副本上",
         ));
     }
     Ok(())

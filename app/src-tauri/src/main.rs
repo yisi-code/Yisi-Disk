@@ -15,12 +15,12 @@ use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Manager, State, WebviewWindowBuilder};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use yisi_engine::protocol::PartitionInfo;
-use yisi_engine::protocol::PartitionTableFix;
 use yisi_engine::protocol::{BootCopy, BootDiagnosis, BootFix, ImageDescription, ImageInspection};
 use yisi_engine::protocol::{
     BrowseOpened, Capabilities, CopyItem, DiskList, ExtractItem, FileListPage, FilePreview,
     FileTypeList, PartitionRef, ScanResult,
 };
+use yisi_engine::protocol::{MftFix, PartitionTableFix};
 
 use crate::broker::BrokerSession;
 use crate::engines::{
@@ -239,6 +239,19 @@ fn write_plan_partition_table(
     fix: PartitionTableFix,
 ) -> Result<PlanView, HostError> {
     plans.plan_partition_table(&engines, &broker, target, fix)
+}
+
+/// 生成 NTFS `$MFT` 与 `$MFTMirr` 互相修复的写入计划（分区与检查文件系统时相同），存好备份后交给界面确认。只读，不写盘。
+#[tauri::command(async)]
+fn write_plan_mft(
+    engines: State<'_, Engines>,
+    broker: State<'_, BrokerSession>,
+    plans: State<'_, WritePlans>,
+    target: Target,
+    partition: PartitionRef,
+    fix: MftFix,
+) -> Result<PlanView, HostError> {
+    plans.plan_mft(&engines, &broker, target, partition, fix)
 }
 
 /// 执行界面已确认的计划（只接受计划 ID，写的内容是宿主存着的那份），结果记进写盘记录。物理盘交给磁盘代理。
@@ -609,6 +622,7 @@ fn main() -> anyhow::Result<()> {
             boot_diagnose,
             write_plan_boot_sector,
             write_plan_partition_table,
+            write_plan_mft,
             write_plan_execute,
             write_plan_discard,
             write_plan_rollback,

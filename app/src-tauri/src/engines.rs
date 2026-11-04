@@ -31,7 +31,8 @@ use yisi_engine::protocol::{
 use yisi_engine::protocol::{BootCopy, BootDiagnosis, DIAGNOSE_BOOT, DiagnoseBootParams};
 use yisi_engine::protocol::{BootFix, BootSectorPlan, PLAN_BOOT_SECTOR, PlanBootSectorParams};
 use yisi_engine::protocol::{
-    PLAN_PARTITION_TABLE, PartitionTableFix, PartitionTablePlan, PlanPartitionTableParams,
+    MftFix, MftPlan, PLAN_MFT, PLAN_PARTITION_TABLE, PartitionTableFix, PartitionTablePlan,
+    PlanMftParams, PlanPartitionTableParams,
 };
 
 mod fs_check;
@@ -344,6 +345,21 @@ impl Engines {
     ) -> Result<PartitionTablePlan, HostError> {
         query_source(broker, target, PLAN_PARTITION_TABLE, |source| {
             PlanPartitionTableParams { source, fix }
+        })
+    }
+
+    /// 生成 `$MFT` 与 `$MFTMirr` 互相修复的写入计划。只读，不写盘。
+    pub fn plan_mft(
+        &self,
+        broker: &BrokerSession,
+        target: Target,
+        partition: PartitionRef,
+        fix: MftFix,
+    ) -> Result<MftPlan, HostError> {
+        query_source(broker, target, PLAN_MFT, |source| PlanMftParams {
+            source,
+            partition,
+            fix,
         })
     }
 

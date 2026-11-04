@@ -20,7 +20,7 @@ pub(crate) const ENTRY_SIZE_AT: usize = 84;
 pub(crate) const ENTRIES_CRC_AT: usize = 88;
 /// 规范里表头的大小。
 pub(crate) const HEADER_SIZE: usize = 92;
-const MIN_HEADER_SIZE: u32 = 92;
+const MIN_HEADER_SIZE: u32 = HEADER_SIZE as u32;
 const MIN_ENTRY_SIZE: u32 = 128;
 /// 表项区最多读这么多字节（规范的默认是 128 项 × 128 字节 = 16 KiB），挡住构造出来的巨大表项数。
 const MAX_ENTRIES_BYTES: u64 = 1 << 20;
@@ -102,7 +102,7 @@ fn header_at(device: &dyn BlockDevice, sector: u64, lba: u64) -> Result<Option<H
     if bytes.get(..8) != Some(SIGNATURE.as_slice()) {
         return Ok(None);
     }
-    let Some(header_size) = le32(&bytes, 12) else {
+    let Some(header_size) = le32(&bytes, HEADER_SIZE_AT) else {
         return Ok(None);
     };
     if header_size < MIN_HEADER_SIZE || u64::from(header_size) > sector {
@@ -111,20 +111,20 @@ fn header_at(device: &dyn BlockDevice, sector: u64, lba: u64) -> Result<Option<H
     let Some(mut checked) = bytes.get(..header_size as usize).map(<[u8]>::to_vec) else {
         return Ok(None);
     };
-    let stored_crc = le32(&checked, 16);
-    if let Some(field) = checked.get_mut(16..20) {
+    let stored_crc = le32(&checked, HEADER_CRC_AT);
+    if let Some(field) = checked.get_mut(HEADER_CRC_AT..HEADER_CRC_AT + 4) {
         field.fill(0);
     }
-    if stored_crc != Some(crc32(&[&checked])) || le64(&bytes, 24) != Some(lba) {
+    if stored_crc != Some(crc32(&[&checked])) || le64(&bytes, MY_LBA_AT) != Some(lba) {
         return Ok(None);
     }
     let header = (|| {
         Some(Header {
-            alternate_lba: le64(&bytes, 32)?,
-            entries_lba: le64(&bytes, 72)?,
-            entry_count: le32(&bytes, 80)?,
-            entry_size: le32(&bytes, 84)?,
-            entries_crc: le32(&bytes, 88)?,
+            alternate_lba: le64(&bytes, ALTERNATE_LBA_AT)?,
+            entries_lba: le64(&bytes, ENTRIES_LBA_AT)?,
+            entry_count: le32(&bytes, ENTRY_COUNT_AT)?,
+            entry_size: le32(&bytes, ENTRY_SIZE_AT)?,
+            entries_crc: le32(&bytes, ENTRIES_CRC_AT)?,
         })
     })();
     Ok(header.filter(|header| {

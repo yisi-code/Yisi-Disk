@@ -2135,3 +2135,60 @@ fn partition_table_plans_add_a_lost_partition_and_refuse_what_does_not_apply() {
     engine.close_input();
     assert!(engine.wait_exit().success());
 }
+
+#[test]
+fn mft_plans_rewrite_a_stale_mirror_record() {
+    use yisi_engine::protocol::{MftPlan, PLAN_MFT};
+
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-mft-plan");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let disk = yisi_repair::samples::search_disk();
+    let (offset, length) = disk.ntfs;
+    let start = offset as usize;
+    let geometry = yisi_fs::bpb::check_ntfs(&disk.image[start..start + 512])
+        .geometry
+        .unwrap();
+    let record = geometry.record_size as usize;
+    let mirror = start + (geometry.mirror_lcn * geometry.cluster_size) as usize;
+    let healthy = dir.join("healthy.img");
+    std::fs::write(&healthy, &disk.image).unwrap();
+    let mut image = disk.image.clone();
+    image[mirror + 3 * record + 300] ^= 0xFF;
+    let stale = dir.join("stale-mirror.img");
+    std::fs::write(&stale, &image).unwrap();
+    let source = |path: &Path| json!({"type": "image", "path": path, "sectorSize": 512});
+    let partition = json!({"number": 2, "offset": offset, "length": length});
+
+    let mut engine = Engine::start();
+    let plan: MftPlan = serde_json::from_value(
+        engine
+            .call(
+                PLAN_MFT,
+                json!({"source": source(&stale), "partition": partition, "fix": "mirrorFromMft"}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(plan.records, [3]);
+    assert_eq!(plan.plan.writes.len(), 1);
+    assert_eq!(plan.plan.writes[0].offset, (mirror + 3 * record) as u64);
+
+    let refused = engine
+        .call(
+            PLAN_MFT,
+            json!({"source": source(&healthy), "partition": partition, "fix": "mirrorFromMft"}),
+        )
+        .unwrap_err();
+    assert_eq!(refused.code, error_code::PLAN_NOT_APPLICABLE);
+    let moved = json!({"number": 2, "offset": offset + 512, "length": length});
+    let refused = engine
+        .call(
+            PLAN_MFT,
+            json!({"source": source(&stale), "partition": moved, "fix": "mirrorFromMft"}),
+        )
+        .unwrap_err();
+    assert_eq!(refused.code, error_code::FS_UNAVAILABLE);
+    engine.close_input();
+    assert!(engine.wait_exit().success());
+}

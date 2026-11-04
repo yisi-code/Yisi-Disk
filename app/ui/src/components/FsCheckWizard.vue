@@ -6,19 +6,24 @@ import SourcePicker from './SourcePicker.vue'
 import WizardSteps from './WizardSteps.vue'
 import JobControls from './JobControls.vue'
 import ReadHealthHint from './ReadHealthHint.vue'
+import WritePlanConfirm from './WritePlanConfirm.vue'
 import { useBrowse } from '../composables/useBrowse'
 import { useFsCheck } from '../composables/useFsCheck'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { usePartitionText } from '../composables/usePartitionText'
 import { useSourceSelection } from '../composables/useSourceSelection'
+import { useWritePlan } from '../composables/useWritePlan'
+import { useWritePlanText } from '../composables/useWritePlanText'
 import {
   isDeviceKind,
   pickSaveFile,
+  sameTarget,
   saveFsCheckReport,
   toHostError,
   type FsIssue,
   type FsIssueSeverity,
   type HostError,
+  type MftFix,
   type PartitionInfo,
 } from '../services/host'
 import { formatBytes, formatDateTime, formatHex, formatSeconds } from '../utils/format'
@@ -30,6 +35,13 @@ const SEVERITIES: FsIssueSeverity[] = ['dataLoss', 'structure', 'minor']
 const CHECKABLE = ['fat12', 'fat16', 'fat32', 'exfat', 'ntfs', 'unknown', 'unreadable']
 /** 期望值、实际值是字节数或校验和的问题，换成好读的写法 */
 const BYTE_VALUES = ['volumeTruncated', 'bitmapInvalid']
+/** 能写入计划修复的问题与修法：$MFTMirr 与 $MFT 不一致时用 $MFT 重写镜像，$MFT 自己的记录坏了时用镜像修复 */
+const MFT_FIXES: Partial<Record<string, MftFix>> = { mftMirrorMismatch: 'mirrorFromMft', mftInvalid: 'mftFromMirror' }
+
+/** 这类问题能用写入计划修的话，用哪种修法 */
+function mftFixFor(issue: FsIssue): MftFix | null {
+  return MFT_FIXES[issue.kind] ?? null
+}
 /** 按十六进制显示的值与补到几位：目录项集合校验和 16 位、大写表校验和 32 位，介质描述符 8 位 */
 const HEX_DIGITS: Record<string, number> = { entrySetChecksum: 4, upcaseChecksum: 8, fatMediaMismatch: 2 }
 
@@ -40,6 +52,8 @@ const { formatHostError } = useHostErrorText()
 const { filesystemName, sourceName, partitionLine, bootFieldName, bootFieldValue } = usePartitionText()
 const browse = useBrowse()
 const fsCheck = useFsCheck()
+const writePlan = useWritePlan()
+const { writeActionText, writeOutcomeText } = useWritePlanText()
 
 const titleElement = ref<HTMLHeadingElement | null>(null)
 const step = ref<WizardStep>('source')
@@ -83,6 +97,25 @@ const canRecheck = computed(
 )
 
 const sourceText = computed(() => sourceName(browse.target.value ?? fsCheck.target.value))
+
+/** 镜像文件与整块磁盘可以写入计划修复；卷上的偏移不是盘上的偏移 */
+const canWrite = computed(() => {
+  const kind = fsCheck.target.value?.kind
+  return kind === 'image' || kind === 'disk'
+})
+/** 结果页上正在确认一份写入计划 */
+const isConfirming = computed(() => step.value === 'result' && writePlan.plan.value !== null)
+/** 源的扇区大小，确认页按它换算扇区号；读分区表时得到 */
+const sectorSize = computed(() => browse.opened.value?.sectorSize ?? 512)
+/** 刚执行的那次写入（同一个源时才显示）；写下去过、还没回滚的可以回滚 */
+const lastRecord = computed(() => {
+  const record = writePlan.lastRecord.value
+  return record !== null && sameTarget(record.target, fsCheck.target.value) ? record : null
+})
+const canRollbackLast = computed(() => {
+  const record = lastRecord.value
+  return record !== null && record.kind !== 'rollback' && record.outcome.written > 0
+})
 
 const checkStatusText = computed(() => {
   const stage = fsCheck.stage.value
@@ -132,9 +165,10 @@ onMounted(() => {
 })
 
 async function handleExit() {
-  if (fsCheck.isBusy.value) {
+  if (fsCheck.isBusy.value || writePlan.isExecuting.value) {
     return
   }
+  await writePlan.discard()
   if (browse.isOpen.value) {
     await browse.close()
   }
@@ -174,6 +208,37 @@ async function startCheck() {
   resetExport()
   step.value = 'check'
   await fsCheck.start(source, partition)
+}
+
+/** 生成修 $MFT / $MFTMirr 的计划（宿主先存好备份），之后显示确认内容 */
+async function proposeMftFix(issue: FsIssue) {
+  const source = fsCheck.target.value
+  const partition = fsCheck.partition.value
+  const fix = mftFixFor(issue)
+  if (source === null || partition === null || fix === null || writePlan.isPreparing.value || fsCheck.isBusy.value) {
+    return
+  }
+  await writePlan.prepareMftFix(
+    source,
+    { number: partition.number, offset: partition.offset, length: partition.length },
+    fix,
+  )
+}
+
+async function proposeRollback() {
+  const record = lastRecord.value
+  if (record === null || writePlan.isPreparing.value || fsCheck.isBusy.value) {
+    return
+  }
+  await writePlan.prepareRollback(record.planId)
+}
+
+/** 确认后写入；写下去过内容就重新检查，结果页显示写后的问题清单 */
+async function confirmWrite() {
+  const record = await writePlan.execute()
+  if (record !== null && record.outcome.written > 0) {
+    await recheck()
+  }
 }
 
 async function recheck() {
@@ -564,6 +629,17 @@ function buildReportText(): string {
         <p class="wizard__hint">{{ t('fsCheck.notes.readOnly') }}</p>
       </div>
 
+      <div v-else-if="isConfirming && writePlan.plan.value" class="wizard__panel">
+        <WritePlanConfirm
+          :plan="writePlan.plan.value"
+          :sector-size="sectorSize"
+          :busy="writePlan.isExecuting.value"
+          :failure="writePlan.failure.value"
+          @confirm="confirmWrite"
+          @cancel="writePlan.discard"
+        />
+      </div>
+
       <div v-else-if="report && checkedPartition" class="wizard__panel wizard__fill fs-check__result">
         <dl class="wizard__details">
           <dt>{{ t('common.source') }}</dt>
@@ -584,6 +660,23 @@ function buildReportText(): string {
             <dd>{{ checksText(report.skipped) }}</dd>
           </template>
         </dl>
+        <div v-if="lastRecord" class="fs-check__repair">
+          <p :class="lastRecord.outcome.done ? 'wizard__note' : 'wizard__error'" role="status">
+            {{ t('fsCheck.repair.outcome', { action: writeActionText(lastRecord), outcome: writeOutcomeText(lastRecord) }) }}
+          </p>
+          <button
+            v-if="canRollbackLast"
+            class="wizard__button wizard__button--secondary"
+            type="button"
+            :disabled="writePlan.isPreparing.value || fsCheck.isBusy.value"
+            @click="proposeRollback"
+          >
+            {{ t('writePlan.history.rollback') }}
+          </button>
+        </div>
+        <p v-if="writePlan.failure.value" class="wizard__error" role="alert">
+          {{ formatHostError(writePlan.failure.value) }}
+        </p>
         <p v-if="report.unreadableBytes > 0" class="wizard__hint wizard__hint--warning">
           {{ t('fsCheck.result.unreadable', { bytes: formatBytes(report.unreadableBytes) }) }}
         </p>
@@ -610,6 +703,21 @@ function buildReportText(): string {
                     <p v-if="issueText(issue, 'fix')" class="fs-check__text">
                       <strong>{{ t('fsCheck.labelValue', { label: t('fsCheck.facts.fix'), value: '' }) }}</strong>{{ issueText(issue, 'fix') }}
                     </p>
+                    <div v-if="mftFixFor(issue)" class="fs-check__repair">
+                      <button
+                        v-if="canWrite"
+                        class="wizard__button wizard__button--secondary"
+                        type="button"
+                        :disabled="writePlan.isPreparing.value || fsCheck.isBusy.value"
+                        @click="proposeMftFix(issue)"
+                      >
+                        {{ t(`fsCheck.repair.${mftFixFor(issue)}`) }}
+                      </button>
+                      <p v-else class="wizard__hint">{{ t('fsCheck.repair.volumeUnsupported') }}</p>
+                      <p v-if="writePlan.isPreparing.value" class="wizard__note" aria-live="polite">
+                        {{ t('fsCheck.repair.preparing') }}
+                      </p>
+                    </div>
                   </div>
                 </details>
               </li>
@@ -701,5 +809,12 @@ function buildReportText(): string {
 
 .fs-check__text {
   margin: 0;
+}
+
+.fs-check__repair {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
 }
 </style>
