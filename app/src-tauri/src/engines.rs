@@ -29,6 +29,7 @@ use yisi_engine::protocol::{
 };
 
 use yisi_engine::protocol::{BootCopy, BootDiagnosis, DIAGNOSE_BOOT, DiagnoseBootParams};
+use yisi_engine::protocol::{BootFix, BootSectorPlan, PLAN_BOOT_SECTOR, PlanBootSectorParams};
 
 mod fs_check;
 
@@ -50,7 +51,7 @@ const UNRESPONSIVE_AFTER: Duration = Duration::from_secs(10);
 /// 发出取消后等这么久，引擎还没退出就强制结束它。
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
 /// 镜像文件不记录扇区大小，按最常见的 512 字节处理。
-const IMAGE_SECTOR_SIZE: u32 = 512;
+pub(crate) const IMAGE_SECTOR_SIZE: u32 = 512;
 /// 磁盘代理只接受 1 到 3 位数字的磁盘编号。
 /// Windows 的 `CREATE_NO_WINDOW`：引擎是控制台程序，不弹出控制台窗口。
 #[cfg(windows)]
@@ -318,6 +319,29 @@ impl Engines {
         from_value(result?)
     }
 
+    /// 生成修复引导扇区的写入计划：另起一个引擎读源、重新诊断并预演写入，答复后退出。只读，不写盘。
+    pub fn plan_boot_sector(
+        &self,
+        broker: &BrokerSession,
+        target: Target,
+        partition: u32,
+        fix: BootFix,
+    ) -> Result<BootSectorPlan, HostError> {
+        target.validate()?;
+        let process = EngineProcess::spawn(None, || {})?;
+        let result = resolve_source(target, broker, process.pid)
+            .and_then(|source| {
+                to_params(&PlanBootSectorParams {
+                    source,
+                    partition,
+                    fix,
+                })
+            })
+            .and_then(|params| process.request(PLAN_BOOT_SECTOR, params, BROWSE_TIMEOUT));
+        process.abandon();
+        from_value(result?)
+    }
+
     /// 浏览分区：引擎读出分区表后一直运行，直到取消（关闭浏览）。物理盘与扫描一样，第一次需要时提权启动磁盘代理。
     /// `boot` 为备份时各分区按备份引导扇区打开。
     pub fn open_browse(
@@ -405,7 +429,7 @@ impl Engines {
     }
 
     /// 把分区里选中的项复制到另一块盘。源为物理磁盘时，引擎在开始前核对输出目录不在这块盘上。
-    /// 不给输出目录时是为打开而复制：存到程序目录下的 `open-cache`，同时在后台清掉以前的副本。
+    /// 不给输出目录时是为打开而复制：存到程序文件夹下 `data` 里的 `open-cache`，同时在后台清掉以前的副本。
     #[expect(clippy::too_many_arguments, reason = "与界面命令的参数一一对应")]
     pub fn start_copy(
         &self,
@@ -843,6 +867,8 @@ fn engine_error_code(code: i64) -> &'static str {
         error_code::FS_UNAVAILABLE => "fsUnavailable",
         error_code::IMAGE_EXISTS => "imageExists",
         error_code::IMAGE_MISMATCH => "imageMismatch",
+        error_code::PLAN_NOT_APPLICABLE => "planNotApplicable",
+        error_code::PLAN_UNAVAILABLE => "planUnavailable",
         _ => "engineRejected",
     }
 }
@@ -917,14 +943,27 @@ fn is_executable_type(path: &Path) -> bool {
         .is_some_and(|extension| EXECUTABLE.contains(&extension.to_ascii_lowercase().as_str()))
 }
 
+/// 程序所在的文件夹：引擎、代理与宿主放在一起。
+fn program_dir() -> std::io::Result<PathBuf> {
+    let host = std::env::current_exe()?;
+    host.parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| std::io::Error::other(format!("{} 没有上一级目录", host.display())))
+}
+
+/// 程序写的东西只放在程序文件夹下的 `data` 里：做过的镜像、写盘记录与备份、为打开存的副本、界面（WebView2）的缓存。
+/// 不往系统的 AppData 写，写不进去时也不换地方。
+pub(crate) fn data_dir() -> std::io::Result<PathBuf> {
+    Ok(program_dir()?.join("data"))
+}
+
 /// 引擎、代理与宿主程序放在同一目录；找不到时返回错误码 `missing_code`。
 pub(crate) fn sibling_program(
     stem: &str,
     missing_code: &'static str,
 ) -> Result<PathBuf, HostError> {
-    let host =
-        std::env::current_exe().map_err(|error| HostError::new(missing_code, error.to_string()))?;
-    let path = host.with_file_name(format!("{stem}{}", std::env::consts::EXE_SUFFIX));
+    let dir = program_dir().map_err(|error| HostError::new(missing_code, error.to_string()))?;
+    let path = dir.join(format!("{stem}{}", std::env::consts::EXE_SUFFIX));
     if path.is_file() {
         Ok(path)
     } else {
@@ -1003,13 +1042,11 @@ fn file_in_output(
     }
 }
 
-/// 为打开、复制而保存的副本放在程序目录下的 `open-cache` 里，每次一个以任务 ID 命名的子目录。
+/// 为打开、复制而保存的副本放在 [`data_dir`] 下的 `open-cache` 里，每次一个以任务 ID 命名的子目录。
 pub(crate) fn open_cache_root() -> Result<PathBuf, HostError> {
-    let host = std::env::current_exe()
-        .map_err(|error| HostError::new("outputUnavailable", error.to_string()))?;
-    host.parent()
+    data_dir()
         .map(|dir| dir.join("open-cache"))
-        .ok_or_else(|| HostError::new("outputUnavailable", host.display().to_string()))
+        .map_err(|error| HostError::new("outputUnavailable", error.to_string()))
 }
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

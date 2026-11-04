@@ -1,14 +1,14 @@
 //! 做过的镜像记在哪：每次开始制作镜像时记下镜像的位置与来源，下次直接从列表里选。镜像被删除、移走后，
 //! 由界面提示，可以重新指定位置（核对是同一个镜像才改）或从列表移除——都只改这份记录，不碰镜像文件。
-//! 记录存在程序数据目录的 `image-history.json`，先写临时文件再改名替换。
+//! 记录存在程序文件夹下 `data` 里的 `image-history.json`（读写规则见 [`record_file`]）。
 
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 use crate::engines::{HostError, Target, lock};
+use crate::record_file::{self, now_ms};
 
 /// 最多记这么多个，按最近使用排在前面，多出来的丢掉最久没用的。
 const MAX_RECORDS: usize = 30;
@@ -29,14 +29,13 @@ pub struct ImageRecord {
 }
 
 pub struct ImageHistory {
-    /// 查不到程序数据目录时为空：不记，列表一直是空的。
-    file: Option<PathBuf>,
+    file: PathBuf,
     /// 读改写之间不让别的命令插进来。
     guard: Mutex<()>,
 }
 
 impl ImageHistory {
-    pub fn new(file: Option<PathBuf>) -> Self {
+    pub fn new(file: PathBuf) -> Self {
         Self {
             file,
             guard: Mutex::new(()),
@@ -91,40 +90,13 @@ impl ImageHistory {
     }
 
     fn load(&self) -> Vec<ImageRecord> {
-        let Some(file) = &self.file else {
-            return Vec::new();
-        };
-        let text = match std::fs::read_to_string(file) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
-            Err(error) => {
-                tracing::warn!(%error, path = %file.display(), "读不到镜像记录");
-                return Vec::new();
-            }
-        };
-        serde_json::from_str(&text).unwrap_or_else(|error| {
-            tracing::warn!(%error, path = %file.display(), "镜像记录读不懂，按空处理");
-            Vec::new()
-        })
+        record_file::load(&self.file, "镜像记录")
     }
 
     fn save(&self, mut records: Vec<ImageRecord>) -> Result<(), HostError> {
-        let Some(file) = &self.file else {
-            return Err(HostError::new("historyUnavailable", ""));
-        };
         records.truncate(MAX_RECORDS);
-        let unavailable = |error: &dyn std::fmt::Display| {
-            HostError::new("historyUnavailable", format!("{}：{error}", file.display()))
-        };
-        if let Some(dir) = file.parent() {
-            std::fs::create_dir_all(dir).map_err(|error| unavailable(&error))?;
-        }
-        let text = serde_json::to_string_pretty(&records).map_err(|error| unavailable(&error))?;
-        let mut temp = file.clone().into_os_string();
-        temp.push(".tmp");
-        let temp = PathBuf::from(temp);
-        std::fs::write(&temp, text).map_err(|error| unavailable(&error))?;
-        std::fs::rename(&temp, file).map_err(|error| unavailable(&error))
+        record_file::save(&self.file, &records)
+            .map_err(|detail| HostError::new("historyUnavailable", detail))
     }
 }
 
@@ -135,14 +107,6 @@ fn same_path(a: &str, b: &str) -> bool {
     } else {
         a == b
     }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|since| u64::try_from(since.as_millis()).ok())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -165,7 +129,7 @@ mod tests {
             std::env::temp_dir().join(format!("yisi-image-history-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let file = dir.join("image-history.json");
-        (ImageHistory::new(Some(file.clone())), file)
+        (ImageHistory::new(file.clone()), file)
     }
 
     fn paths(history: &ImageHistory) -> Vec<String> {

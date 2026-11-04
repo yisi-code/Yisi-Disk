@@ -101,25 +101,14 @@ pub fn backup_candidates(primary: &[u8], device_sector: u32, length: u64) -> Vec
             match family {
                 BackupFamily::Fat32 => {
                     if hinted == Some(family) && hinted_size == Some(size) {
-                        let recorded = le16(primary, 50).map(u64::from);
-                        let reserved = le16(primary, 14).map_or(0, u64::from);
-                        if let Some(sector) =
-                            recorded.filter(|&sector| sector > 0 && sector < reserved)
-                        {
-                            push(family, sector.checked_mul(size), size);
-                        }
+                        push(family, recorded_backup(primary, family, size), size);
                     }
                     push(family, FAT32_BACKUP_SECTOR.checked_mul(size), size);
                 }
-                BackupFamily::Exfat => push(family, EXFAT_BACKUP_SECTOR.checked_mul(size), size),
+                BackupFamily::Exfat => push(family, recorded_backup(primary, family, size), size),
                 BackupFamily::Ntfs => {
                     if hinted == Some(family) && hinted_size == Some(size) {
-                        let total = le64(primary, 0x28).filter(|&total| total > 0);
-                        push(
-                            family,
-                            total.and_then(|total| total.checked_mul(size)),
-                            size,
-                        );
+                        push(family, recorded_backup(primary, family, size), size);
                     }
                     push(
                         family,
@@ -131,6 +120,22 @@ pub fn backup_candidates(primary: &[u8], device_sector: u32, length: u64) -> Vec
         }
     }
     candidates
+}
+
+/// 引导扇区自己记的备份位置（分区内的字节偏移），`sector_size` 是它记的扇区大小：FAT32 是第 50 字节记的扇区
+/// （大于 0、在保留区里才算），exFAT 固定是第 12 扇区，NTFS 是卷的扇区数（卷之后紧挨着的那个扇区）。
+/// 找备份时先找这里；用主引导扇区重写备份时就写到这里。
+pub fn recorded_backup(boot: &[u8], family: BackupFamily, sector_size: u64) -> Option<u64> {
+    let sector = match family {
+        BackupFamily::Fat32 => {
+            let recorded = u64::from(le16(boot, 50)?);
+            let reserved = u64::from(le16(boot, 14)?);
+            (recorded > 0 && recorded < reserved).then_some(recorded)?
+        }
+        BackupFamily::Exfat => EXFAT_BACKUP_SECTOR,
+        BackupFamily::Ntfs => le64(boot, 0x28).filter(|&total| total > 0)?,
+    };
+    sector.checked_mul(sector_size)
 }
 
 /// `sector` 是不是 `candidate` 那种文件系统的有效备份引导扇区：参数自洽，且记的扇区大小与它的位置相符。

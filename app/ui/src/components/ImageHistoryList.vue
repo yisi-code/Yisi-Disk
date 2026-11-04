@@ -57,15 +57,15 @@ function canRelocate(item: ImageHistoryItem): boolean {
 </script>
 
 <template>
-  <ul class="image-history">
+  <ul class="record-list">
     <li
       v-for="item in items"
       :key="item.record.imagePath"
-      class="image-history__item"
-      :class="{ 'image-history__item--current': item.record.imagePath === currentPath }"
+      class="record-list__item"
+      :class="{ 'record-list__item--current': item.record.imagePath === currentPath }"
     >
-      <div class="image-history__text">
-        <span class="image-history__path wizard__path-text">{{ item.record.imagePath }}</span>
+      <div class="record-list__text">
+        <span class="record-list__title wizard__path-text">{{ item.record.imagePath }}</span>
         <span class="wizard__note">
           {{ t('diskImage.history.source', { source: item.record.sourceLabel || item.record.sourceIdentity }) }}
           <template v-if="savedText(item)"> · {{ savedText(item) }}</template>
@@ -74,7 +74,7 @@ function canRelocate(item: ImageHistoryItem): boolean {
           {{ statusText(item) }}
         </span>
       </div>
-      <div class="image-history__actions">
+      <div class="record-list__actions">
         <button
           v-if="canUse(item)"
           class="wizard__button wizard__button--secondary"
@@ -106,47 +106,3 @@ function canRelocate(item: ImageHistoryItem): boolean {
     </li>
   </ul>
 </template>
-
-<style scoped>
-.image-history {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
-  width: 100%;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.image-history__item {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-sm);
-  padding: var(--space-xs) var(--space-sm);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-control);
-}
-
-.image-history__item--current {
-  border-color: var(--color-accent);
-}
-
-.image-history__text {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.image-history__path {
-  font-weight: 600;
-}
-
-.image-history__actions {
-  display: flex;
-  flex: none;
-  gap: var(--space-xs);
-}
-</style>

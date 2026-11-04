@@ -13,6 +13,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "yisi-磁盘工具",
         "width": 1200,
         "height": 800,

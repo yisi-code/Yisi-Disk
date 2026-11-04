@@ -1,5 +1,5 @@
 //! 块设备抽象：Windows / macOS / Linux 后端，raw、分段 raw、E01 镜像，读缓存，
-//! 坏扇区读取策略，能识别坏区的镜像，读取计数，已挂载的卷的属性与稀疏文件。
+//! 坏扇区读取策略，能识别坏区的镜像，读取计数，已挂载的卷的属性与稀疏文件，写入计划（只有数据，不能写）。
 //!
 //! 允许 `unsafe`，仅用于平台系统调用，每处都要写 `// SAFETY:` 说明。
 
@@ -12,6 +12,7 @@ mod imaging;
 #[cfg(windows)]
 mod ioctl;
 mod metered;
+mod plan;
 mod raw;
 mod read;
 mod scan;
@@ -38,6 +39,10 @@ pub use imaging::{
     RecordedPartition, Round, Scope, Segment, SegmentState, run_imaging,
 };
 pub use metered::{MeteredDevice, ReadMeter, ReadStats, SLOW_READ};
+pub use plan::{
+    DeviceIdentity, MAX_PLAN_BYTES, MAX_WRITES, Overlay, PlanError, SectorWrite, WritePlan,
+    image_identity,
+};
 pub use raw::RawImage;
 pub use scan::{SCAN_BLOCK, ScanControl, scan_device};
 #[cfg(windows)]

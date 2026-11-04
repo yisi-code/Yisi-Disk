@@ -6,13 +6,16 @@
 mod broker;
 mod engines;
 mod image_history;
+mod record_file;
 mod shell;
+mod write_plans;
 
 use serde::Serialize;
 use tauri::webview::PageLoadEvent;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, State, WebviewWindowBuilder};
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use yisi_engine::protocol::PartitionInfo;
-use yisi_engine::protocol::{BootCopy, BootDiagnosis, ImageDescription, ImageInspection};
+use yisi_engine::protocol::{BootCopy, BootDiagnosis, BootFix, ImageDescription, ImageInspection};
 use yisi_engine::protocol::{
     BrowseOpened, Capabilities, CopyItem, DiskList, ExtractItem, FileListPage, FilePreview,
     FileTypeList, PartitionRef, ScanResult,
@@ -23,6 +26,13 @@ use crate::engines::{
     Engines, HostError, ImagePlan, Target, refuse_executable, save_fs_check_report,
 };
 use crate::image_history::{ImageHistory, ImageRecord};
+use crate::write_plans::{PlanView, WritePlans, WriteRecord};
+
+/// 程序文件夹里建不了 `data` 时的提示（界面还没加载，中英文一起给出）。
+const DATA_DIR_UNWRITABLE: &str = "程序要在自己所在的文件夹里建 data 文件夹，存放做过的镜像、写盘记录与备份、界面缓存，但建不出来。\
+请把整个程序文件夹放到可以写入的位置（不要放在要恢复数据的那块盘上），再重新打开。\n\n\
+The program keeps its data in a data folder next to it, but cannot create it. Move the whole program folder \
+to a writable location (not on the disk you are recovering from) and open it again.";
 
 #[derive(Serialize)]
 struct AppInfo {
@@ -91,7 +101,7 @@ fn carve_preview_range(
     engines.preview_range(&broker, &scan_job_id, offset, length)
 }
 
-/// 保存只扫描时选中的文件（另存为）。不给输出目录时是为打开、复制而保存：存到程序目录下的 `open-cache`，
+/// 保存只扫描时选中的文件（另存为）。不给输出目录时是为打开、复制而保存：存到程序文件夹下 `data` 里的 `open-cache`，
 /// 同时在后台清掉以前的副本。
 #[tauri::command(async)]
 fn job_start_extract(
@@ -203,6 +213,49 @@ fn boot_diagnose(
     engines.diagnose_boot(&broker, target)
 }
 
+/// 生成修复引导扇区的写入计划：引擎重新诊断并预演，宿主存好备份后交给界面确认。只读，不写盘。目前只支持镜像文件。
+#[tauri::command(async)]
+fn write_plan_boot_sector(
+    engines: State<'_, Engines>,
+    broker: State<'_, BrokerSession>,
+    plans: State<'_, WritePlans>,
+    target: Target,
+    partition: u32,
+    fix: BootFix,
+) -> Result<PlanView, HostError> {
+    plans.plan_boot_sector(&engines, &broker, target, partition, fix)
+}
+
+/// 执行界面已确认的计划（只接受计划 ID，写的内容是宿主存着的那份），结果记进写盘记录。
+#[tauri::command(async)]
+fn write_plan_execute(
+    plans: State<'_, WritePlans>,
+    plan_id: String,
+) -> Result<WriteRecord, HostError> {
+    plans.execute(&plan_id)
+}
+
+/// 放弃还没执行的计划，删掉它的备份。
+#[tauri::command(async)]
+fn write_plan_discard(plans: State<'_, WritePlans>, plan_id: String) -> Result<(), HostError> {
+    plans.discard(&plan_id)
+}
+
+/// 为写盘记录里的一次写入生成回滚计划，交给界面确认。
+#[tauri::command(async)]
+fn write_plan_rollback(
+    plans: State<'_, WritePlans>,
+    plan_id: String,
+) -> Result<PlanView, HostError> {
+    plans.rollback(&plan_id)
+}
+
+/// 写盘记录，最新的在前。
+#[tauri::command(async)]
+fn write_history_list(plans: State<'_, WritePlans>) -> Vec<WriteRecord> {
+    plans.records()
+}
+
 #[tauri::command(async)]
 fn browse_list(
     engines: State<'_, Engines>,
@@ -269,7 +322,7 @@ fn browse_open_range(
     engines.open_range(job_id, offset, length, boot.unwrap_or_default())
 }
 
-/// 把浏览中选中的项复制到另一块盘（另存为）。不给输出目录时是为打开而复制：存到程序目录下的 `open-cache`，
+/// 把浏览中选中的项复制到另一块盘（另存为）。不给输出目录时是为打开而复制：存到程序文件夹下 `data` 里的 `open-cache`，
 /// 同时在后台清掉以前的副本。`boot` 与浏览时一致。
 #[tauri::command(async)]
 #[expect(clippy::too_many_arguments, reason = "与界面传来的参数一一对应")]
@@ -466,14 +519,38 @@ fn main() -> anyhow::Result<()> {
         .manage(Engines::default())
         .manage(BrokerSession::default())
         .setup(|app| {
-            let file = app
-                .path()
-                .app_data_dir()
-                .map(|dir| dir.join("image-history.json"));
-            if let Err(error) = &file {
-                tracing::warn!(%error, "查不到程序数据目录，不记做过的镜像");
-            }
-            app.manage(ImageHistory::new(file.ok()));
+            // 程序写的东西只放在程序文件夹下的 data 里，界面（WebView2）的缓存也是；建不出来就提示后退出，不换地方
+            let webview_dir = engines::data_dir().and_then(|dir| {
+                let webview = dir.join("webview");
+                std::fs::create_dir_all(&webview)?;
+                Ok((dir, webview))
+            });
+            let (data_dir, webview_dir) = match webview_dir {
+                Ok(dirs) => dirs,
+                Err(error) => {
+                    tracing::error!(%error, "程序文件夹里建不了 data");
+                    let handle = app.handle().clone();
+                    app.dialog()
+                        .message(format!("{DATA_DIR_UNWRITABLE}\n\n{error}"))
+                        .kind(MessageDialogKind::Error)
+                        .title("yisi-磁盘工具")
+                        .show(move |_| handle.exit(1));
+                    return Ok(());
+                }
+            };
+            app.manage(ImageHistory::new(data_dir.join("image-history.json")));
+            app.manage(WritePlans::new(data_dir));
+            // 主窗口不由配置自动创建（tauri.conf.json 里 create 为 false），在这里按配置建，数据目录指到 data 下
+            let window = app
+                .config()
+                .app
+                .windows
+                .first()
+                .cloned()
+                .ok_or("tauri.conf.json 里没有主窗口的配置")?;
+            WebviewWindowBuilder::from_config(app.handle(), &window)?
+                .data_directory(webview_dir)
+                .build()?;
             Ok(())
         })
         // 页面开始（重新）加载时，旧页面发起的任务已经没人管了：全部取消，引擎随之退出
@@ -514,6 +591,11 @@ fn main() -> anyhow::Result<()> {
             image_history_remove,
             image_history_relocate,
             boot_diagnose,
+            write_plan_boot_sector,
+            write_plan_execute,
+            write_plan_discard,
+            write_plan_rollback,
+            write_history_list,
             job_start_fs_check,
             fs_check_save_report
         ])

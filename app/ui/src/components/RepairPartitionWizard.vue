@@ -4,21 +4,28 @@ import { useI18n } from 'vue-i18n'
 import PartitionFiles from './PartitionFiles.vue'
 import SourcePicker from './SourcePicker.vue'
 import WizardSteps from './WizardSteps.vue'
+import WriteHistoryList from './WriteHistoryList.vue'
+import WritePlanConfirm from './WritePlanConfirm.vue'
 import { useBrowse } from '../composables/useBrowse'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { usePartitionText } from '../composables/usePartitionText'
 import { useSourceSelection } from '../composables/useSourceSelection'
+import { useWritePlan } from '../composables/useWritePlan'
+import { useWritePlanText } from '../composables/useWritePlanText'
 import {
   isDeviceKind,
   diagnoseBoot,
+  sameTarget,
   toHostError,
   type BootCopyReport,
   type BootDiagnosis,
+  type BootFix,
   type BootIssue,
   type HostError,
   type JobTarget,
   type PartitionBoot,
   type PartitionRef,
+  type WriteRecord,
 } from '../services/host'
 import { formatBytes, formatHex } from '../utils/format'
 
@@ -32,6 +39,8 @@ const { formatHostError } = useHostErrorText()
 const { filesystemName, tableNote, sourceName, partitionLabel, partitionLine, bootFieldName, bootFieldValue } =
   usePartitionText()
 const browse = useBrowse()
+const writePlan = useWritePlan()
+const { writeActionText, writeOutcomeText } = useWritePlanText()
 
 const titleElement = ref<HTMLHeadingElement | null>(null)
 const step = ref<WizardStep>('source')
@@ -47,6 +56,8 @@ const browsingNumber = ref<number | null>(null)
 const openingNumber = ref<number | null>(null)
 const browseError = ref<{ number: number; text: string } | null>(null)
 const isCopying = ref(false)
+/** 正在为哪个分区生成修复计划 */
+const fixingNumber = ref<number | null>(null)
 
 const stepIndex = computed(() => STEPS.indexOf(step.value))
 
@@ -67,8 +78,31 @@ const browsingRef = computed<PartitionRef | null>(() => {
 })
 
 const isBusy = computed(
-  () => isDiagnosing.value || isCopying.value || openingNumber.value !== null || browse.isTransitioning.value,
+  () =>
+    isDiagnosing.value ||
+    isCopying.value ||
+    openingNumber.value !== null ||
+    browse.isTransitioning.value ||
+    writePlan.isPreparing.value ||
+    writePlan.isExecuting.value,
 )
+
+/** 结果页上正在确认一份写入计划：这时只显示确认内容 */
+const isConfirming = computed(() => step.value === 'result' && !isBrowsing.value && writePlan.plan.value !== null)
+
+/** 只写镜像文件；物理盘、卷要先做镜像 */
+const canWrite = computed(() => diagnosedTarget.value?.kind === 'image')
+
+/** 诊断的这个源的写盘记录 */
+const targetRecords = computed(() =>
+  writePlan.records.value.filter((record) => sameTarget(record.target, diagnosedTarget.value)),
+)
+
+/** 刚执行的那次写入（同一个源时才显示） */
+const lastRecord = computed(() => {
+  const record = writePlan.lastRecord.value
+  return record !== null && sameTarget(record.target, diagnosedTarget.value) ? record : null
+})
 
 const canGoNext = computed(() => step.value === 'source' && target.value !== null && !isBusy.value)
 
@@ -80,18 +114,24 @@ const diagnosingText = computed(() =>
 
 onMounted(() => {
   titleElement.value?.focus()
+  void writePlan.loadRecords()
 })
 
 async function handleExit() {
-  if (isCopying.value) {
+  if (isCopying.value || writePlan.isExecuting.value) {
     return
   }
+  await writePlan.discard()
   await closeBrowse()
   emit('exit')
 }
 
 async function goBack() {
   if (isBusy.value) {
+    return
+  }
+  if (isConfirming.value) {
+    await writePlan.discard()
     return
   }
   if (isBrowsing.value) {
@@ -153,6 +193,39 @@ async function browseWithBackup(partition: PartitionBoot) {
     await closeBrowse()
   } finally {
     openingNumber.value = null
+  }
+}
+
+/** 生成修复引导扇区的计划（宿主先存好备份），之后显示确认内容 */
+async function proposeFix(partition: PartitionBoot) {
+  const source = diagnosedTarget.value
+  const fix = fixDirection(partition)
+  if (source === null || fix === null || isBusy.value) {
+    return
+  }
+  fixingNumber.value = partition.number
+  try {
+    await closeBrowse()
+    await writePlan.prepareBootSector(source, partition.number, fix)
+  } finally {
+    fixingNumber.value = null
+  }
+}
+
+async function proposeRollback(record: WriteRecord) {
+  if (isBusy.value) {
+    return
+  }
+  await closeBrowse()
+  await writePlan.prepareRollback(record.planId)
+}
+
+/** 确认后写入；写下去过内容（成功或写了一部分）就重新诊断，结果页显示写后的结论 */
+async function confirmWrite() {
+  await closeBrowse()
+  const record = await writePlan.execute()
+  if (record !== null && record.outcome.written > 0) {
+    await runDiagnosis()
   }
 }
 
@@ -246,6 +319,14 @@ function openFailure(partition: PartitionBoot): string | null {
   )
   const first = copies[0]
   return first === undefined ? null : t('repair.result.openFailed', { reason: first.openError })
+}
+
+/** 能修的方向：主坏备好时用备份修主引导扇区，主好备坏时用主引导扇区修备份 */
+function fixDirection(partition: PartitionBoot): BootFix | null {
+  if (partition.verdict === 'primaryDamaged' && partition.backup?.issues.length === 0) {
+    return 'primaryFromBackup'
+  }
+  return partition.verdict === 'backupDamaged' ? 'backupFromPrimary' : null
 }
 
 /** 主引导扇区坏了、备份核对通过并且打得开：可以用备份浏览 */
@@ -356,6 +437,17 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
         </div>
       </div>
 
+      <div v-else-if="isConfirming && writePlan.plan.value" class="wizard__panel">
+        <WritePlanConfirm
+          :plan="writePlan.plan.value"
+          :sector-size="diagnosis?.sectorSize ?? 512"
+          :busy="writePlan.isExecuting.value"
+          :failure="writePlan.failure.value"
+          @confirm="confirmWrite"
+          @cancel="writePlan.discard"
+        />
+      </div>
+
       <div v-else-if="diagnosis" class="wizard__panel">
         <p class="wizard__note">
           {{
@@ -367,6 +459,16 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
           }}
         </p>
         <p class="wizard__hint wizard__hint--warning">{{ t('repair.readOnly') }}</p>
+        <p
+          v-if="lastRecord"
+          :class="lastRecord.outcome.done ? 'wizard__note' : 'wizard__error'"
+          role="status"
+        >
+          {{ t('repair.fix.outcome', { action: writeActionText(lastRecord), outcome: writeOutcomeText(lastRecord) }) }}
+        </p>
+        <p v-if="writePlan.failure.value" class="wizard__error" role="alert">
+          {{ formatHostError(writePlan.failure.value) }}
+        </p>
         <ul v-if="diagnosis.notes.length" class="wizard__list">
           <li v-for="note in diagnosis.notes" :key="note">{{ tableNote(note) }}</li>
         </ul>
@@ -461,8 +563,12 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
             {{ t(`repair.next.${partition.verdict}`) }}
           </p>
 
-          <div v-if="canBrowseBackup(partition)" class="repair-wizard__actions">
+          <div
+            v-if="canBrowseBackup(partition) || (canWrite && fixDirection(partition))"
+            class="repair-wizard__actions"
+          >
             <button
+              v-if="canBrowseBackup(partition)"
               class="wizard__button"
               type="button"
               :disabled="isBusy"
@@ -470,13 +576,37 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
             >
               {{ t('repair.browse.start') }}
             </button>
+            <button
+              v-if="canWrite && fixDirection(partition)"
+              class="wizard__button wizard__button--secondary"
+              type="button"
+              :disabled="isBusy"
+              @click="proposeFix(partition)"
+            >
+              {{ t(`repair.fix.${fixDirection(partition)}`) }}
+            </button>
             <span v-if="openingNumber === partition.number" class="wizard__note" aria-live="polite">
               {{ t('repair.browse.opening') }}
             </span>
+            <span v-if="fixingNumber === partition.number" class="wizard__note" aria-live="polite">
+              {{ t('repair.fix.preparing') }}
+            </span>
           </div>
+          <p v-if="!canWrite && fixDirection(partition)" class="wizard__hint">{{ t('repair.fix.imageOnly') }}</p>
           <p v-if="browseError?.number === partition.number" class="wizard__error" role="alert">
             {{ t('repair.browse.failed', { reason: browseError.text }) }}
           </p>
+        </section>
+
+        <section
+          v-if="targetRecords.length"
+          class="repair-wizard__partition"
+          aria-labelledby="repair-write-history"
+        >
+          <h3 id="repair-write-history" class="repair-wizard__partition-title">
+            {{ t('writePlan.history.title') }}
+          </h3>
+          <WriteHistoryList :records="targetRecords" :disabled="isBusy" @rollback="proposeRollback" />
         </section>
       </div>
     </form>

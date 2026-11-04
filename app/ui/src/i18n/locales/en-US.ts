@@ -169,9 +169,9 @@ const enUS: typeof zhCN = {
     },
     repairPartition: {
       name: 'Repair a partition that will not open',
-      summary: 'Diagnoses each partition\'s boot sector and its backup; if the boot sector is damaged but the backup is intact, browses with the backup and saves files to another disk. Read-only; the disk is not changed.',
+      summary: 'Diagnoses each partition\'s boot sector and its backup; if the boot sector is damaged but the backup is intact, browses with the backup and saves files to another disk. Diagnosis is read-only; on an image you can also repair the boot sector from the backup (a backup is saved first and you can roll back).',
       suits: 'The partition is still there but asks to be formatted or shows up as RAW (FAT32, exFAT and NTFS keep a backup boot sector).',
-      limits: 'If the partition is gone entirely, use "Find lost partitions"; this version cannot write the backup back yet, and if both copies are damaged use "Deep recovery by file type".',
+      limits: 'If the partition is gone entirely, use "Find lost partitions"; repairs are made on an image only and this version does not write to physical disks; if both copies are damaged use "Deep recovery by file type".',
     },
     fsCheck: {
       name: 'Check a file system',
@@ -577,7 +577,7 @@ const enUS: typeof zhCN = {
     },
     preview: {
       notSavedHint:
-        'Not saved yet: the preview is read from the source. Opening or copying first stores a temporary copy under the program folder (open-cache), which is cleared the next time.',
+        'Not saved yet: the preview is read from the source. Opening or copying first stores a temporary copy in the data folder inside the program folder, which is cleared the next time.',
       title: 'File details',
       placeholder: 'Select a file on the left to see its details and preview.',
       name: 'Name',
@@ -803,7 +803,7 @@ const enUS: typeof zhCN = {
       storage: 'Storage',
       utcTime: '{time} (UTC)',
       open: 'Open with default app',
-      openHint: 'Before opening, a temporary copy is made under the program folder (open-cache); it is cleared the next time.',
+      openHint: 'Before opening, a temporary copy is made in the data folder inside the program folder; it is cleared the next time.',
       executableRevealed: 'This is an executable or script file; for safety it was not opened but shown in its folder.',
     },
     copy: {
@@ -899,7 +899,7 @@ const enUS: typeof zhCN = {
     diskHint:
       'Reading a physical disk needs administrator rights; it is read-only and does not change the disk. If the disk has already reported read errors, create an image first and diagnose the image.',
     readOnly:
-      'This stage only diagnoses and does not write to the disk: the backup is not written back to the boot sector. If the backup is usable, first use it to save your files to another disk; the actual repair comes in a later version and will be done on an image first.',
+      'Diagnosis is read-only. When you diagnose an image file, a damaged primary boot sector or backup can be repaired in the image: a backup is saved first, nothing is written until you confirm, the result is read back and checked, and you can roll it back. This version does not write to physical disks: create an image and repair the image.',
     diagnose: {
       start: 'Start diagnosis',
       again: 'Diagnose again',
@@ -953,8 +953,8 @@ const enUS: typeof zhCN = {
     },
     next: {
       healthy: 'If the partition still will not open, the problem is not the boot sector: try "Recover deleted files" or "Deep recovery by file type".',
-      backupDamaged: 'No need to act now; a later version can write the boot sector back over the backup.',
-      primaryDamaged: 'Browse with the backup first and save your important files to another disk.',
+      backupDamaged: 'No need to act now; when diagnosing an image, you can rewrite the backup from the primary boot sector.',
+      primaryDamaged: 'Browse with the backup first and save your important files to another disk; when diagnosing an image, you can repair the primary boot sector from the backup.',
       bothDamaged: 'This version cannot browse without a usable boot sector: use "Deep recovery by file type", which does not depend on it.',
       unrecognized: 'If the partition does hold data, use "Deep recovery by file type".',
     },
@@ -964,7 +964,15 @@ const enUS: typeof zhCN = {
       notBrowsable: 'The partition still cannot be opened for browsing',
       failed: 'Could not open with the backup: {reason}',
       backToResult: 'Back to the results',
-      intro: 'Browsing with the backup boot sector, read-only. Tick the files to recover and use "Save as…" to put them on another disk; this version does not write the backup back to the boot sector.',
+      intro: 'Browsing with the backup boot sector, read-only. Tick the files to recover and use "Save as…" to put them on another disk; browsing does not change the boot sector.',
+    },
+    fix: {
+      primaryFromBackup: 'Repair the primary boot sector from the backup…',
+      backupFromPrimary: 'Repair the backup from the primary boot sector…',
+      preparing: 'Preparing the repair plan…',
+      imageOnly:
+        'Repairs are done on an image only: use "Create disk image" to image this disk, then diagnose and repair the image. This version does not write to physical disks.',
+      outcome: '{action}: {outcome}',
     },
     issue: {
       unreadable: 'Cannot be read.',
@@ -995,6 +1003,55 @@ const enUS: typeof zhCN = {
       typeMismatch: 'The partition table says {type}, which does not match the boot sector ({filesystem}).',
       volumeLarger: 'The boot sector records a volume ({value}) longer than the partition ({expected}): the partition table may have been shrunk, and the part beyond its end cannot be read.',
       volumeSmaller: 'The partition ({expected}) is considerably longer than the volume recorded in the boot sector ({value}): the partition table may have been enlarged.',
+    },
+  },
+  writePlan: {
+    target: 'Writes to',
+    partition: 'Partition',
+    partitionValue: 'Partition {number} · {filesystem}',
+    what: 'What it does',
+    copyValue: 'Copies {size} from {from} to {to}',
+    rollbackValue: 'Restores {size} at {to} to what it was before the last write',
+    writes: 'Locations to overwrite',
+    range: '{position}, {size}',
+    position: 'sector {sector} (offset {offset} bytes)',
+    backup: 'Backup taken before writing',
+    safety: {
+      verify: 'Before writing, the current content at these locations is checked against the plan; if anything differs (the image was changed since), not a single byte is written.',
+      readBack: 'After writing, the data is read back and compared with the plan.',
+      rollback: 'The content being overwritten is saved in the backup file above, so you can roll back later from the write history.',
+      backupKept: 'The content being overwritten is also saved in the backup file above.',
+    },
+    warning:
+      'Only this image file is changed, never the original disk. A window browsing this image is closed first; the write fails while another program (a virtual machine, for example) has the image open.',
+    acknowledge: 'I understand: confirming will overwrite {size} in this image file.',
+    cancel: 'Cancel',
+    confirm: 'Write',
+    writing: 'Writing…',
+    action: {
+      primaryFromBackup: 'Partition {number}: repair the primary boot sector from the backup',
+      backupFromPrimary: 'Partition {number}: repair the backup from the primary boot sector',
+      rollback: 'Roll back ({action})',
+      unknown: 'Write',
+    },
+    outcome: {
+      done: 'Written; reading it back matched.',
+      untouched: 'Nothing was written: {step}. The image is unchanged.',
+      partial: 'Failed partway: {step}. {written} location(s) were overwritten; you can roll back from the write history.',
+    },
+    step: {
+      validate: 'the plan itself is invalid',
+      identity: 'the image file differs from when the plan was made (moved or resized)',
+      verify: 'the content at these locations differs from when the plan was made, so the image was changed since',
+      write: 'writing failed',
+      flush: 'saving to disk failed',
+      readBack: 'the data read back did not match',
+    },
+    history: {
+      title: 'Write history',
+      backup: 'Backup: {path}',
+      rollback: 'Roll back…',
+      rolledBack: 'Rolled back',
     },
   },
   bootField: {
@@ -1407,6 +1464,18 @@ const enUS: typeof zhCN = {
     imageRelocateMismatch: 'The chosen image was made from another source (source or size differs), so the entry was not changed',
     historyUnavailable: 'Could not save the list of previous images',
     invalidReportPath: 'The problem list can only be saved as a .txt file',
+    planNotApplicable: 'The diagnosis has changed and this repair no longer applies: diagnose again and retry',
+    planUnavailable: 'Could not prepare the repair plan',
+    planMismatch: 'The repair plan does not match the request and was rejected',
+    planNotFound: 'This plan has already been carried out or discarded',
+    backupFailed: 'Could not save the backup, so nothing was written',
+    backupUnreadable: 'The backup file cannot be read or is damaged, so it cannot be rolled back',
+    writeTargetUnsupported: 'This version can only write to image files; create an image of a physical disk first',
+    writeTargetUnavailable: 'Cannot open the image file to write to it',
+    imageInUse: 'The image is open in another program (a virtual machine or another window, for example): close it and click "Write" again',
+    writeRecordNotFound: 'This entry is not in the write history',
+    rollbackNothing: 'Nothing was written that time, so there is nothing to roll back',
+    rollbackDone: 'This write has already been rolled back',
   },
 }
 

@@ -165,9 +165,9 @@ export default {
     },
     repairPartition: {
       name: '修复打不开的分区',
-      summary: '诊断各分区的引导扇区和它的备份；主引导扇区坏了、备份完好时，用备份浏览并把文件另存到别的盘。只读，不改动磁盘。',
+      summary: '诊断各分区的引导扇区和它的备份；主引导扇区坏了、备份完好时，用备份浏览并把文件另存到别的盘。诊断只读；在镜像上还能用备份修复引导扇区（写前存备份，可以回滚）。',
       suits: '分区还在，但打开时提示要格式化、显示为 RAW（FAT32（32 位文件分配表）、exFAT（扩展文件分配表）、NTFS（新技术文件系统）带有备份引导扇区）。',
-      limits: '分区整个不见了时用「找回丢失的分区」；这一版还不能把备份写回去，主备都坏了时用「按文件类型深度恢复」。',
+      limits: '分区整个不见了时用「找回丢失的分区」；修复只能在镜像上做，这一版不改写物理磁盘；主备都坏了时用「按文件类型深度恢复」。',
     },
     fsCheck: {
       name: '检查文件系统',
@@ -579,7 +579,7 @@ export default {
       open: '打开',
       saveAs: '另存为…',
       notSavedHint:
-        '还没保存：预览直接从源上读。打开、复制时先在程序目录下的 open-cache 里存一份临时副本，下次打开或复制时清掉。',
+        '还没保存：预览直接从源上读。打开、复制时先在程序文件夹的 data 目录里存一份临时副本，下次打开或复制时清掉。',
     },
     menu: {
       label: '{name} 的操作',
@@ -795,7 +795,7 @@ export default {
       storage: '存放方式',
       utcTime: '{time}（UTC）',
       open: '用默认程序打开',
-      openHint: '打开前先在程序目录下的 open-cache 里复制一份临时副本，下次打开时清掉。',
+      openHint: '打开前先在程序文件夹的 data 目录里复制一份临时副本，下次打开时清掉。',
       executableRevealed: '这是可执行或脚本类文件，为安全起见不直接打开，已在文件夹中显示。',
     },
     copy: {
@@ -891,7 +891,7 @@ export default {
     diskHint:
       '读取物理磁盘需要管理员权限，只读、不会改动这块盘。已经报过读错误的盘，请先制作镜像，再诊断镜像。',
     readOnly:
-      '这一阶段只诊断、不写盘：不会把备份写回引导扇区。备份可用时，先用备份把文件另存到别的盘；真正的修复要等后续版本，届时会先在镜像上做。',
+      '诊断只读，不写盘。诊断的是镜像文件时，主引导扇区或备份坏了可以在镜像上修复：先存写前备份，确认后才写，写完读回核对，之后还能回滚。物理磁盘这一版不改写：先制作镜像，在镜像上修复。',
     diagnose: {
       start: '开始诊断',
       again: '重新诊断',
@@ -945,8 +945,8 @@ export default {
     },
     next: {
       healthy: '分区仍然打不开时，问题不在引导扇区：试试「找回删除的文件」或「按文件类型深度恢复」。',
-      backupDamaged: '不必急着处理；之后的版本能把主引导扇区写回备份的位置。',
-      primaryDamaged: '先用备份浏览，把重要文件另存到别的盘。',
+      backupDamaged: '不必急着处理；诊断的是镜像时，可以用主引导扇区把备份重写一遍。',
+      primaryDamaged: '先用备份浏览，把重要文件另存到别的盘；诊断的是镜像时，可以用备份修复主引导扇区。',
       bothDamaged: '这一版没法用引导扇区浏览：请用「按文件类型深度恢复」，它不依赖引导扇区。',
       unrecognized: '分区里确实有数据的话，用「按文件类型深度恢复」。',
     },
@@ -956,7 +956,15 @@ export default {
       notBrowsable: '浏览时这个分区仍然打不开',
       failed: '没能用备份打开：{reason}',
       backToResult: '返回诊断结果',
-      intro: '正在按备份引导扇区浏览，只读。勾选要找回的文件，用「另存为…」存到另一块盘上；这一版不会把备份写回引导扇区。',
+      intro: '正在按备份引导扇区浏览，只读。勾选要找回的文件，用「另存为…」存到另一块盘上；浏览不改动引导扇区。',
+    },
+    fix: {
+      primaryFromBackup: '用备份修复主引导扇区…',
+      backupFromPrimary: '用主引导扇区修复备份…',
+      preparing: '正在生成修复计划…',
+      imageOnly:
+        '修复只能在镜像上做：先用「制作磁盘镜像」把这块盘做成镜像，再诊断镜像、在镜像上修复。这一版不改写物理磁盘。',
+      outcome: '{action}：{outcome}',
     },
     issue: {
       unreadable: '读不出来。',
@@ -987,6 +995,55 @@ export default {
       typeMismatch: '分区表里的类型是 {type}，与引导扇区（{filesystem}）不符。',
       volumeLarger: '引导扇区记的卷（{value}）比分区（{expected}）长：分区表的长度可能被改小了，超出的部分读不到。',
       volumeSmaller: '分区（{expected}）比引导扇区记的卷（{value}）长出不少：分区表的长度可能被改大了。',
+    },
+  },
+  writePlan: {
+    target: '写到',
+    partition: '分区',
+    partitionValue: '分区 {number} · {filesystem}',
+    what: '做什么',
+    copyValue: '把{from}处的 {size} 复制到{to}',
+    rollbackValue: '把{to}处的 {size} 恢复成上次写入之前的内容',
+    writes: '要改写的位置',
+    range: '{position}，{size}',
+    position: '第 {sector} 扇区（偏移 {offset} 字节）',
+    backup: '写前备份',
+    safety: {
+      verify: '写之前先核对这些位置现在的内容与生成计划时一致；对不上（镜像在这之后被改过）就一个字节也不写。',
+      readBack: '写完读回比对，确认写下去的就是计划里的内容。',
+      rollback: '改写之前的内容已经存进上面的备份文件，之后可以在「写盘记录」里回滚。',
+      backupKept: '改写之前的内容同样存进了上面的备份文件。',
+    },
+    warning:
+      '只改写这个镜像文件，不碰原来的磁盘。正在浏览这个镜像的窗口会先关闭；别的程序（例如虚拟机）开着它时写不了。',
+    acknowledge: '我已了解：确认后会改写这个镜像文件里的 {size}。',
+    cancel: '取消',
+    confirm: '写入',
+    writing: '正在写入…',
+    action: {
+      primaryFromBackup: '分区 {number}：用备份修复主引导扇区',
+      backupFromPrimary: '分区 {number}：用主引导扇区修复备份',
+      rollback: '回滚（{action}）',
+      unknown: '写入',
+    },
+    outcome: {
+      done: '已写入，读回核对一致。',
+      untouched: '没有写入：{step}。镜像保持原样。',
+      partial: '写到一半失败：{step}。已改写 {written} 段，可以在写盘记录里回滚。',
+    },
+    step: {
+      validate: '计划本身不合法',
+      identity: '镜像文件与生成计划时不同（位置或大小变了）',
+      verify: '这些位置的内容与生成计划时不同，镜像在这之后被改过',
+      write: '写入出错',
+      flush: '保存到磁盘时出错',
+      readBack: '读回比对不一致',
+    },
+    history: {
+      title: '写盘记录',
+      backup: '备份：{path}',
+      rollback: '回滚…',
+      rolledBack: '已回滚',
     },
   },
   bootField: {
@@ -1399,5 +1456,17 @@ export default {
     imageRelocateMismatch: '选的镜像不是原来那个源做的（来源或容量对不上），没有改记录',
     historyUnavailable: '没能保存做过的镜像列表',
     invalidReportPath: '问题清单只能存成 .txt 文件',
+    planNotApplicable: '诊断结论已经变了，这项修复不再适用：请重新诊断后再试',
+    planUnavailable: '没能生成修复计划',
+    planMismatch: '修复计划与请求对不上，已拒绝',
+    planNotFound: '这份计划已经执行或放弃了',
+    backupFailed: '没能存下写前备份，没有写入',
+    backupUnreadable: '备份文件读不出或已损坏，不能回滚',
+    writeTargetUnsupported: '这一版只能改写镜像文件；物理磁盘请先制作镜像',
+    writeTargetUnavailable: '打不开要改写的镜像文件',
+    imageInUse: '镜像正被别的程序打开（例如虚拟机或另一个窗口）：关掉它再点「写入」',
+    writeRecordNotFound: '写盘记录里没有这一条',
+    rollbackNothing: '那次没有写下任何内容，不用回滚',
+    rollbackDone: '这次写入已经回滚过了',
   },
 }
