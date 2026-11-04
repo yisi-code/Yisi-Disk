@@ -13,7 +13,7 @@ use crate::check::chains::{Layout, MAX_DEPTH, Volume};
 use crate::check::disk::Span;
 use crate::check::issue::{Area, Issue, IssueKind};
 use crate::check::table::{FatTable, Link, Owners, ROOT};
-use crate::check::{CheckItem, Ctx, Stage, Summary, check_backup};
+use crate::check::{CheckItem, Ctx, FatLayout, Stage, Summary, check_backup};
 
 const ENTRY: usize = 32;
 const ATTR_LFN: u8 = 0x0F;
@@ -67,6 +67,25 @@ pub(crate) fn check(ctx: &mut Ctx, sector: &[u8], from_backup: bool) -> Option<S
         check_fs_info(ctx, &geometry);
     }
 
+    let fs_info = (is_fat32 && geometry.fs_info != 0 && geometry.fs_info < geometry.reserved)
+        .then(|| geometry.fs_info * geometry.bytes_per_sector);
+    ctx.findings.from_backup = from_backup;
+    ctx.findings.layout = Some(FatLayout {
+        kind: fs,
+        width: geometry.width(),
+        bytes_per_sector: geometry.bytes_per_sector,
+        fats: match geometry.active_fat {
+            Some(copy) => vec![geometry.fat_offset(copy)],
+            None => (0..geometry.fats)
+                .map(|copy| geometry.fat_offset(copy))
+                .collect(),
+        },
+        cluster_count: count,
+        cluster_size,
+        heap_offset: geometry.heap_offset(),
+        fs_info,
+        bitmap: Vec::new(),
+    });
     let fat = FatTable::new(
         geometry.active_fat_offset(),
         geometry.fat_bytes(),
@@ -158,6 +177,7 @@ fn check_fs_info(ctx: &mut Ctx, geometry: &FatBpb) -> Option<()> {
     {
         ctx.issues
             .push(Issue::new(IssueKind::FsInfoInvalid).area(Area::FsInfo));
+        ctx.findings.fs_info_invalid = true;
     }
     Some(())
 }
@@ -212,6 +232,7 @@ fn compare_copies(ctx: &mut Ctx, geometry: &FatBpb, count: u32) -> Option<()> {
                     .cluster(entry)
                     .count(differing),
             );
+            ctx.findings.fat_copies_differ = true;
         }
     }
     ctx.checked(CheckItem::FatCopies);
@@ -242,6 +263,7 @@ fn scan_table(ctx: &mut Ctx, volume: &mut Volume, geometry: &FatBpb) -> Option<(
         if clean != 0 && entry1 & clean == 0 {
             ctx.issues
                 .push(Issue::new(IssueKind::VolumeDirty).area(Area::Fat));
+            ctx.findings.dirty = true;
         }
         if no_error != 0 && entry1 & no_error == 0 {
             ctx.issues

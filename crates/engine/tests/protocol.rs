@@ -2370,3 +2370,70 @@ fn rebuilt_boot_sectors_are_planned_and_browsed_without_writing() {
     assert!(browser.wait_exit().success());
     assert_eq!(std::fs::read(&image).unwrap(), bytes);
 }
+
+#[test]
+fn lost_clusters_are_saved_then_freed_by_a_fs_fix_plan() {
+    use yisi_engine::protocol::{
+        CopyStarted, CopySummary, FsFix, FsFixPlan, PLAN_FS_FIX, SAVE_LOST,
+    };
+
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-fs-fix");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (image, partitions) = fs_check_image(&dir);
+    let (_, offset, length) = partitions[1];
+    let partition = json!({"number": 2, "offset": offset, "length": length});
+    let source = json!({"type": "image", "path": image, "sectorSize": 512});
+
+    // 先另存：exFAT 分区里第 1500 簇是丢失簇，存成 lost-1500.bin
+    let output = dir.join("saved");
+    let mut saver = Engine::start();
+    let started: CopyStarted = serde_json::from_value(
+        saver
+            .call(
+                SAVE_LOST,
+                json!({"jobId": "lost1", "source": source, "partition": partition, "outputDir": output}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let notifications = saver.notifications_until(COMPLETED);
+    assert!(saver.wait_exit().success());
+    let summary: CopySummary =
+        serde_json::from_value(notifications.last().unwrap().1["result"].clone()).unwrap();
+    assert_eq!((summary.files, summary.bytes, summary.failed), (1, 4096, 0));
+    let saved = std::fs::read(Path::new(&started.output_dir).join("lost-1500.bin")).unwrap();
+    assert_eq!(saved.len(), 4096);
+
+    // 再生成计划：释放丢失簇、清掉未正常卸下的标记
+    let bytes = std::fs::read(&image).unwrap();
+    let mut engine = Engine::start();
+    let plan: FsFixPlan = serde_json::from_value(
+        engine
+            .call(
+                PLAN_FS_FIX,
+                json!({"source": source, "partition": partition, "fixes": ["lost", "dirty"]}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(plan.filesystem, "exfat");
+    let fixes: Vec<FsFix> = plan.counts.iter().map(|count| count.fix).collect();
+    assert_eq!(fixes, [FsFix::Lost, FsFix::Dirty]);
+    assert!(plan.plan.writes.iter().all(|write| {
+        write.offset >= offset && write.offset + write.after.len() as u64 <= offset + length
+    }));
+    // 没有的问题不修；FAT 分区上没有丢失簇
+    let refused = engine
+        .call(
+            PLAN_FS_FIX,
+            json!({"source": source, "partition": {"number": 1, "offset": partitions[0].1, "length": partitions[0].2}, "fixes": ["lost"]}),
+        )
+        .unwrap_err();
+    assert_eq!(refused.code, error_code::PLAN_NOT_APPLICABLE);
+    engine.close_input();
+    assert!(engine.wait_exit().success());
+    // 只读：镜像没被改动
+    assert_eq!(std::fs::read(&image).unwrap(), bytes);
+    let _ = std::fs::remove_dir_all(&dir);
+}

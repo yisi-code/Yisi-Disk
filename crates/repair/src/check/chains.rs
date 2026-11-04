@@ -9,7 +9,7 @@ pub(crate) use yisi_fs::format::{Run, push_run};
 use crate::check::disk::Span;
 use crate::check::issue::{Area, Issue, IssueKind};
 use crate::check::table::{FatTable, Link, Owners};
-use crate::check::{CheckItem, Ctx, Stage};
+use crate::check::{CheckItem, Ctx, LongChain, Stage};
 
 /// 一个目录最多读这么多字节（FAT 规范的上限是 2 MiB，exFAT 是 256 MiB）。
 pub(crate) const MAX_DIR_BYTES: u64 = 256 << 20;
@@ -105,10 +105,15 @@ impl Volume {
         let mut claim = Claim::new(id);
         let mut steps = 0u64;
         let mut cluster = first;
+        // 链过长时修复要用：按大小应保留的最后一簇，以及之后只属于这个文件的簇
+        let mut last_kept = None;
+        let mut extra = Vec::new();
         // 链中途出了问题（已记下）：链长就不再另算
         let mut broken = false;
         loop {
-            match claim.take(self, ctx, path, cluster) {
+            let taken = claim.take(self, ctx, path, cluster);
+            let mine = matches!(taken, Taken::Mine);
+            match taken {
                 Taken::Mine => {}
                 Taken::Shared => {
                     if steps == 0 {
@@ -118,6 +123,16 @@ impl Volume {
                 Taken::Loop => broken = true,
             }
             steps += 1;
+            if let Layout::Chain {
+                needed: Some(needed),
+            } = layout
+            {
+                if steps == needed {
+                    last_kept = Some(cluster);
+                } else if steps > needed && mine {
+                    extra.push(cluster);
+                }
+            }
             self.claimed = self.claimed.saturating_add(1);
             if keep_runs {
                 push_run(&mut walk.runs, cluster);
@@ -200,6 +215,13 @@ impl Volume {
                         .expected(needed)
                         .actual(steps),
                 );
+                if let (Some(last), Layout::Chain { .. }) = (last_kept, layout) {
+                    ctx.findings.too_long.push(LongChain {
+                        path: path.to_owned(),
+                        last,
+                        extra,
+                    });
+                }
             }
         }
         Some(walk)
@@ -273,21 +295,26 @@ impl Volume {
             };
             match (used, self.owners.owner(cluster)) {
                 (true, None) => push_run(&mut lost, cluster),
-                (false, Some(owner)) if check_bitmap => match missing_at.get(&owner) {
-                    Some(&at) => {
-                        if let Some(entry) = missing.get_mut(at) {
-                            entry.2 += 1;
+                (false, Some(owner)) if check_bitmap => {
+                    push_run(&mut ctx.findings.not_in_bitmap, cluster);
+                    match missing_at.get(&owner) {
+                        Some(&at) => {
+                            if let Some(entry) = missing.get_mut(at) {
+                                entry.2 += 1;
+                            }
+                        }
+                        None => {
+                            missing_at.insert(owner, missing.len());
+                            missing.push((owner, cluster, 1));
                         }
                     }
-                    None => {
-                        missing_at.insert(owner, missing.len());
-                        missing.push((owner, cluster, 1));
-                    }
-                },
+                }
                 _ => {}
             }
         }
         ctx.control.progress(Stage::Clusters, total, total);
+        ctx.findings.tracked = true;
+        ctx.findings.lost = lost.clone();
         for (owner, cluster, count) in missing {
             ctx.issues.push(
                 Issue::new(IssueKind::NotInBitmap)

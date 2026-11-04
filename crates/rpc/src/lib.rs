@@ -4,10 +4,10 @@
 pub mod frame;
 mod message;
 
-pub use frame::{FrameError, MAX_FRAME_LEN};
+pub use frame::{FrameError, MAX_ENGINE_OUTPUT_LEN, MAX_FRAME_LEN};
 pub use message::{
     ErrorObject, Id, JSONRPC_VERSION, Message, Notification, Request, Response, error_code,
-    read_message, write_message,
+    read_message, read_message_limited, write_message, write_message_limited,
 };
 
 /// 把错误及其来源串成一句话（以「：」相连），放进答复或界面看到的错误细节里。宿主、引擎、磁盘代理共用。

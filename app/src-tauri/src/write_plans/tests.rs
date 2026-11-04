@@ -38,6 +38,7 @@ fn summary(image: &Path) -> PlanSummary {
         boot_sector: None,
         partition_table: None,
         mft: None,
+        fs_fix: None,
         rollback_of: None,
     }
 }
@@ -309,5 +310,51 @@ fn partition_table_plans_only_touch_the_table_areas() {
     );
     big.plan.writes[0].offset = (1 << 30) - 512;
     assert!(check_table_plan(&big, &big_expected).is_ok());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn fs_fix_plans_stay_inside_the_partition() {
+    let (_, dir, image) = setup("fsfix");
+    let real = std::fs::canonicalize(&image).unwrap();
+    let expected = Writable {
+        identity: image_identity(&real),
+        sector_size: IMAGE_SECTOR_SIZE,
+    };
+    let partition = PartitionRef {
+        number: 1,
+        offset: 1024,
+        length: 4096,
+    };
+    let planned = || FsFixPlan {
+        plan: plan_for(&image),
+        partition: 1,
+        partition_offset: 1024,
+        partition_length: 4096,
+        filesystem: "fat16".to_owned(),
+        counts: Vec::new(),
+    };
+    assert!(check_fs_fix_plan(&planned(), &expected, partition).is_ok());
+    // 引擎回传的分区位置不算数：按宿主请求的位置核对
+    let mut before = planned();
+    before.partition_offset = 0;
+    before.plan.writes[0].offset = 512;
+    let mut after = planned();
+    after.plan.writes.push(SectorWrite {
+        offset: 1024 + 4096,
+        before: vec![0; 512],
+        after: vec![1; 512],
+    });
+    let mut empty = planned();
+    empty.plan.writes.clear();
+    for (name, bad) in [("before", before), ("after", after), ("empty", empty)] {
+        assert_eq!(
+            check_fs_fix_plan(&bad, &expected, partition)
+                .unwrap_err()
+                .code,
+            "planMismatch",
+            "{name}"
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -15,7 +15,7 @@ use crate::check::disk::Span;
 use crate::check::fat::join;
 use crate::check::issue::{Area, Issue, IssueKind};
 use crate::check::table::{FatTable, Owners, ROOT, Width};
-use crate::check::{CheckItem, Ctx, Stage, Summary, check_backup};
+use crate::check::{CheckItem, Ctx, FatLayout, Stage, Summary, check_backup};
 
 const ENTRY: usize = 32;
 const ATTR_DIRECTORY: u16 = 0x10;
@@ -90,6 +90,7 @@ pub(crate) fn check(ctx: &mut Ctx, region: &[u8], from_backup: bool) -> Option<S
     if geometry.flags & FLAG_DIRTY != 0 {
         ctx.issues
             .push(Issue::new(IssueKind::VolumeDirty).area(area));
+        ctx.findings.dirty = true;
     }
     if geometry.flags & FLAG_MEDIA_FAILURE != 0 {
         ctx.issues
@@ -98,6 +99,18 @@ pub(crate) fn check(ctx: &mut Ctx, region: &[u8], from_backup: bool) -> Option<S
 
     // 簇数、要用的那份 FAT、簇区位置与打开卷时算的相同（`ExfatBpb` 的方法）
     let count = u32::try_from(geometry.usable_clusters(length)).unwrap_or(u32::MAX);
+    ctx.findings.from_backup = from_backup;
+    ctx.findings.layout = Some(FatLayout {
+        kind: FsKind::Exfat,
+        width: Width::Exfat,
+        bytes_per_sector: bps,
+        fats: vec![geometry.active_fat_offset()],
+        cluster_count: count,
+        cluster_size,
+        heap_offset: geometry.heap_offset_bytes(),
+        fs_info: None,
+        bitmap: Vec::new(),
+    });
     let volume = Volume {
         fat: FatTable::new(
             geometry.active_fat_offset(),
@@ -289,6 +302,9 @@ impl ExfatChecker {
             return Some(());
         }
         bytes.truncate(needed_bytes as usize);
+        if let Some(layout) = ctx.findings.layout.as_mut() {
+            layout.bitmap = walk.runs.clone();
+        }
         let bitmap = Bitmap { bytes, bad };
         let total = u64::from(self.volume.fat.count);
         let mut used = 0u64;

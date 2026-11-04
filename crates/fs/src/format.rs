@@ -25,6 +25,16 @@ impl FatWidth {
         }
     }
 
+    /// 写链尾时用的值（全部位为 1）。
+    pub fn end_of_chain(self) -> u32 {
+        match self {
+            Self::Fat12 => 0xFFF,
+            Self::Fat16 => 0xFFFF,
+            Self::Fat32 => 0x0FFF_FFFF,
+            Self::Exfat => 0xFFFF_FFFF,
+        }
+    }
+
     /// 坏簇标记与链尾标记（不小于它的都是链尾）。
     fn markers(self) -> (u32, u32) {
         match self {
@@ -71,6 +81,41 @@ pub fn fat_entry_raw(width: FatWidth, cluster: u32, bytes: &[u8]) -> Option<u32>
         FatWidth::Fat16 => u32::from(le16(bytes, 0)?),
         FatWidth::Fat32 | FatWidth::Exfat => le32(bytes, 0)?,
     })
+}
+
+/// 把表项 `cluster` 改成 `value`：`bytes` 是 [`fat_entry_span`] 给出的那几个字节，原地改。FAT12 只改自己那 12 位
+/// （同一对字节的另一半属于相邻的表项），FAT32 保留高 4 位（规范要求写时不动）。字节不够时什么也不改。
+pub fn put_fat_entry(width: FatWidth, cluster: u32, value: u32, bytes: &mut [u8]) {
+    let (word, keep): (u32, u32) = match width {
+        FatWidth::Fat12 => {
+            let Some(pair) = le16(bytes, 0) else {
+                return;
+            };
+            let value = value & 0x0FFF;
+            let pair = u32::from(pair);
+            let word = if cluster % 2 == 1 {
+                (pair & 0x000F) | (value << 4)
+            } else {
+                (pair & 0xF000) | value
+            };
+            (word, 0)
+        }
+        FatWidth::Fat16 => (value & 0xFFFF, 0),
+        FatWidth::Fat32 => (value & 0x0FFF_FFFF, 0xF000_0000),
+        FatWidth::Exfat => (value, 0),
+    };
+    let len = fat_entry_span(width, cluster).1;
+    let Some(slot) = bytes.get_mut(..len) else {
+        return;
+    };
+    let old = slot
+        .iter()
+        .rev()
+        .fold(0u32, |acc, &byte| (acc << 8) | u32::from(byte));
+    let word = (old & keep) | word;
+    for (index, byte) in slot.iter_mut().enumerate() {
+        *byte = (word >> (8 * index)) as u8;
+    }
 }
 
 /// 表项的含义。`count` 是簇数，合法的簇号是 2 到 `count + 1`。FAT32 只看低 28 位。

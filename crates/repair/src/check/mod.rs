@@ -16,6 +16,7 @@ mod tests;
 use yisi_fs::FsKind;
 use yisi_fs::boot::{BackupFamily, backup_candidates, backup_kind, remnant_kind, usable_kind};
 use yisi_fs::bpb::{self, Problem, Rule};
+use yisi_fs::format::{FatWidth, Run};
 use yisi_io::BlockDevice;
 
 pub use issue::{Area, Issue, IssueKind, Severity, Totals};
@@ -133,6 +134,54 @@ pub struct Report {
     pub skipped: Vec<CheckItem>,
 }
 
+/// 修复要用、检查顺带得出的结论（FAT / exFAT；其他文件系统为空）。修复只按这些结论生成写入，
+/// 与检查用同一套规则，不另判一遍。卷太大、不跟踪认领时（`tracked` 为 `false`）丢失簇、位图漏标、
+/// 链过长多出来的簇这几项为空。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Findings {
+    /// 按备份引导扇区检查的（主引导扇区不能用）。
+    pub from_backup: bool,
+    pub layout: Option<FatLayout>,
+    pub tracked: bool,
+    /// 全部丢失簇（已占用却没人认领），按簇号排序。
+    pub lost: Vec<Run>,
+    /// exFAT：有人认领、分配位图里却是空闲的簇。
+    pub not_in_bitmap: Vec<Run>,
+    pub too_long: Vec<LongChain>,
+    /// 卷标记为未正常卸下。
+    pub dirty: bool,
+    /// FAT32 的 FSInfo 签名不对。
+    pub fs_info_invalid: bool,
+    /// 各份 FAT 不一致。
+    pub fat_copies_differ: bool,
+}
+
+/// FAT / exFAT 的结构在分区里的位置（字节偏移）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FatLayout {
+    pub kind: FsKind,
+    pub width: FatWidth,
+    pub bytes_per_sector: u64,
+    /// 要一起改的各份 FAT 的起点：镜像时是全部几份，不镜像时只有在用的那份。
+    pub fats: Vec<u64>,
+    pub cluster_count: u32,
+    pub cluster_size: u64,
+    /// 2 号簇的位置。
+    pub heap_offset: u64,
+    /// FAT32 的 FSInfo 扇区。
+    pub fs_info: Option<u64>,
+    /// exFAT 分配位图所在的簇。
+    pub bitmap: Vec<Run>,
+}
+
+/// 链比文件大小需要的长：保留到 `last` 为止，`extra` 是多出来、只属于这个文件的簇（被别的文件认领的不在里面）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LongChain {
+    pub path: String,
+    pub last: u32,
+    pub extra: Vec<u32>,
+}
+
 /// 检查设备上 `offset` 起 `length` 字节的分区。被取消时返回 `None`。
 pub fn check(
     device: &dyn BlockDevice,
@@ -140,12 +189,23 @@ pub fn check(
     length: u64,
     control: &dyn Control,
 ) -> Option<Report> {
+    check_for_repair(device, offset, length, control).map(|(report, _)| report)
+}
+
+/// 同 [`check`]，另外交出修复要用的结论。
+pub fn check_for_repair(
+    device: &dyn BlockDevice,
+    offset: u64,
+    length: u64,
+    control: &dyn Control,
+) -> Option<(Report, Findings)> {
     let mut ctx = Ctx {
         disk: Disk::new(device, offset, length),
         issues: Issues::default(),
         control,
         checked: Vec::new(),
         skipped: Vec::new(),
+        findings: Findings::default(),
     };
     control.progress(Stage::Boot, 0, 1);
     let detected = detect(&mut ctx);
@@ -174,6 +234,7 @@ pub fn check(
         issues,
         mut checked,
         mut skipped,
+        findings,
         ..
     } = ctx;
     checked.sort_unstable();
@@ -182,7 +243,7 @@ pub fn check(
     skipped.dedup();
     skipped.retain(|item| !checked.contains(item));
     let (issues, omitted, totals) = issues.finish();
-    Some(Report {
+    let report = Report {
         fs: summary.fs,
         cluster_size: summary.cluster_size,
         cluster_count: summary.cluster_count,
@@ -195,7 +256,8 @@ pub fn check(
         unreadable_bytes: disk.unreadable_bytes(),
         checked,
         skipped,
-    })
+    };
+    Some((report, findings))
 }
 
 /// 各文件系统的检查交回的概况。
@@ -228,6 +290,7 @@ pub(crate) struct Ctx<'a> {
     pub control: &'a dyn Control,
     pub checked: Vec<CheckItem>,
     pub skipped: Vec<CheckItem>,
+    pub findings: Findings,
 }
 
 impl Ctx<'_> {

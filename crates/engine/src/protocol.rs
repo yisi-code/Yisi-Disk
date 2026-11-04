@@ -86,6 +86,15 @@ pub const PLAN_PARTITION_TABLE: &str = "repair.planPartitionWrite";
 /// 读完即答复。只看前 4 条记录，逐条判断哪一份可信；分区先按文件系统检查的规则核对（对不上答复 `FS_UNAVAILABLE`）。
 /// 没有可以这样修的记录、或主引导扇区不能用时答复 [`error_code::PLAN_NOT_APPLICABLE`]；其余错误码同 [`PLAN_BOOT_SECTOR`]。
 pub const PLAN_MFT: &str = "repair.planMftRepair";
+/// 生成文件系统修复（FAT12/16/32、exFAT）的写入计划：参数 [`PlanFsFixParams`]，结果是 [`FsFixPlan`]。只读源，
+/// 读完即答复（检查一遍分区，大分区要等一会儿）。没有可以这样修的问题、卷不是 FAT / exFAT、按备份检查的、
+/// 两份 FAT 本来就不一致、还有严重问题时清除卸下标记，答复 [`error_code::PLAN_NOT_APPLICABLE`]；要改的太多、
+/// 预演对不上答复 [`error_code::PLAN_UNAVAILABLE`]。
+pub const PLAN_FS_FIX: &str = "repair.planFsFix";
+/// 把分区里的丢失簇另存到别的盘（任务，只读源）：参数 [`SaveLostParams`]，立即返回 [`CopyStarted`]（实际目录）；
+/// 每段连续的丢失簇存成一个 `lost-<起始簇>.bin`，进度按字节经 [`PROGRESS`] 送达，结果是 [`CopySummary`]。
+/// 源为物理磁盘时输出目录必须在另一块盘上（[`error_code::OUTPUT_ON_SOURCE`]）。
+pub const SAVE_LOST: &str = "repair.saveLost";
 /// 制作能识别坏区的镜像（任务）：参数 [`ImageParams`]，建好镜像文件与坏区图后答复 [`ImageStarted`]；
 /// 进展经 [`IMAGING`] 送达，结果是 [`ImageSummary`]。镜像文件或坏区图已经存在时答复 [`error_code::IMAGE_EXISTS`]；
 /// 源为物理磁盘时，镜像必须在另一块盘上，否则答复 [`error_code::OUTPUT_ON_SOURCE`]。取消时保存坏区图，之后可以续做。
@@ -1199,6 +1208,65 @@ pub enum MftFix {
     MirrorFromMft,
     /// 用 `$MFTMirr` 修复 `$MFT`（`$MFT` 里坏了、镜像里可信的记录）。
     MftFromMirror,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanFsFixParams {
+    pub source: Source,
+    /// 检查时的分区编号、偏移与长度（同 [`FsCheckParams::partition`]）。
+    pub partition: PartitionRef,
+    /// 修哪几类问题。
+    pub fixes: Vec<FsFix>,
+}
+
+/// 文件系统修复的一类问题。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FsFix {
+    /// FAT32 的 FSInfo 签名不对：换成新的。
+    FsInfo,
+    /// exFAT 文件占用的簇在分配位图里是空闲的：标成已占用。
+    Bitmap,
+    /// 链比文件大小需要的长：截短，多出来、只属于这个文件的簇释放。
+    TooLong,
+    /// 丢失簇：释放（先另存，[`SAVE_LOST`]）。
+    Lost,
+    /// 未正常卸下：标回正常卸下（别的严重问题都修好时）。
+    Dirty,
+}
+
+/// 一类修复改了多少：`items` 是文件数（链过长）或段数，`clusters` 是簇数（FSInfo 与卸下标志为 0）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsFixCount {
+    pub fix: FsFix,
+    pub items: u64,
+    pub clusters: u64,
+}
+
+/// 文件系统修复的写入计划。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsFixPlan {
+    pub plan: WritePlan,
+    pub partition: u32,
+    pub partition_offset: u64,
+    pub partition_length: u64,
+    /// 同 [`PartitionBoot::filesystem`]。
+    pub filesystem: String,
+    pub counts: Vec<FsFixCount>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveLostParams {
+    pub job_id: String,
+    pub source: Source,
+    /// 同 [`FsCheckParams::partition`]。
+    pub partition: PartitionRef,
+    /// 在这个目录下新建 `lost-<任务 ID 前 8 位>` 子目录存放结果。
+    pub output_dir: String,
 }
 
 /// `$MFT` 与 `$MFTMirr` 互相修复的写入计划。

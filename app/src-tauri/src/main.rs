@@ -20,7 +20,7 @@ use yisi_engine::protocol::{
     BrowseOpened, Capabilities, CopyItem, DiskList, ExtractItem, FileListPage, FilePreview,
     FileTypeList, PartitionRef, ScanResult,
 };
-use yisi_engine::protocol::{MftFix, PartitionTableFix, SearchMode};
+use yisi_engine::protocol::{FsFix, MftFix, PartitionTableFix, SearchMode};
 
 use crate::broker::BrokerSession;
 use crate::engines::{
@@ -252,6 +252,33 @@ fn write_plan_mft(
     fix: MftFix,
 ) -> Result<PlanView, HostError> {
     plans.plan_mft(&engines, &broker, target, partition, fix)
+}
+
+/// 生成文件系统修复（FAT、exFAT，按勾选的几类问题）的写入计划，存好备份后交给界面确认。只读，不写盘。
+#[tauri::command(async)]
+fn write_plan_fs_fix(
+    engines: State<'_, Engines>,
+    broker: State<'_, BrokerSession>,
+    plans: State<'_, WritePlans>,
+    target: Target,
+    partition: PartitionRef,
+    fixes: Vec<FsFix>,
+) -> Result<PlanView, HostError> {
+    plans.plan_fs_fix(&engines, &broker, target, partition, fixes)
+}
+
+/// 把分区里的丢失簇另存到另一块盘上（任务，只读源）。源为物理磁盘时输出目录不能在这块盘上。
+#[tauri::command(async)]
+fn job_start_save_lost(
+    app: AppHandle,
+    engines: State<'_, Engines>,
+    broker: State<'_, BrokerSession>,
+    job_id: String,
+    target: Target,
+    partition: PartitionRef,
+    output_dir: String,
+) -> Result<(), HostError> {
+    engines.start_save_lost(app, &broker, job_id, target, partition, output_dir)
 }
 
 /// 执行界面已确认的计划（只接受计划 ID，写的内容是宿主存着的那份），结果记进写盘记录。物理盘交给磁盘代理。
@@ -624,6 +651,8 @@ fn main() -> anyhow::Result<()> {
             write_plan_boot_sector,
             write_plan_partition_table,
             write_plan_mft,
+            write_plan_fs_fix,
+            job_start_save_lost,
             write_plan_execute,
             write_plan_discard,
             write_plan_rollback,

@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import FsFixPanel from './FsFixPanel.vue'
 import PartitionPicker from './PartitionPicker.vue'
 import SourcePicker from './SourcePicker.vue'
 import WizardSteps from './WizardSteps.vue'
 import JobControls from './JobControls.vue'
 import ReadHealthHint from './ReadHealthHint.vue'
+import WriteHistoryList from './WriteHistoryList.vue'
 import WritePlanConfirm from './WritePlanConfirm.vue'
 import { useBrowse } from '../composables/useBrowse'
 import { useFsCheck } from '../composables/useFsCheck'
@@ -20,11 +22,13 @@ import {
   sameTarget,
   saveFsCheckReport,
   toHostError,
+  type FsFix,
   type FsIssue,
   type FsIssueSeverity,
   type HostError,
   type MftFix,
   type PartitionInfo,
+  type WriteRecord,
 } from '../services/host'
 import { formatBytes, formatDateTime, formatHex, formatSeconds } from '../utils/format'
 
@@ -64,6 +68,8 @@ const exportedPath = ref<string | null>(null)
 const isExporting = ref(false)
 /** 检查完成的时刻，写进导出的清单 */
 const finishedAt = ref<Date | null>(null)
+/** 正在另存丢失簇（由 FsFixPanel 给出）：不能返回、离开或重新检查 */
+const isSavingLost = ref(false)
 
 const stepIndex = computed(() => STEPS.indexOf(step.value))
 
@@ -86,12 +92,14 @@ const canGoNext = computed(() => {
   }
 })
 const canGoBack = computed(
-  () => stepIndex.value > 0 && !fsCheck.isBusy.value && !browse.isTransitioning.value,
+  () =>
+    stepIndex.value > 0 && !fsCheck.isBusy.value && !browse.isTransitioning.value && !isSavingLost.value,
 )
 const canRecheck = computed(
   () =>
     (step.value === 'check' || step.value === 'result') &&
     !fsCheck.isBusy.value &&
+    !isSavingLost.value &&
     fsCheck.target.value !== null &&
     fsCheck.partition.value !== null,
 )
@@ -107,15 +115,15 @@ const canWrite = computed(() => {
 const isConfirming = computed(() => step.value === 'result' && writePlan.plan.value !== null)
 /** 源的扇区大小，确认页按它换算扇区号；读分区表时得到 */
 const sectorSize = computed(() => browse.opened.value?.sectorSize ?? 512)
-/** 刚执行的那次写入（同一个源时才显示）；写下去过、还没回滚的可以回滚 */
+/** 刚执行的那次写入（同一个源时才显示结果；回滚在写盘记录里） */
 const lastRecord = computed(() => {
   const record = writePlan.lastRecord.value
   return record !== null && sameTarget(record.target, fsCheck.target.value) ? record : null
 })
-const canRollbackLast = computed(() => {
-  const record = lastRecord.value
-  return record !== null && record.kind !== 'rollback' && record.outcome.written > 0
-})
+/** 这个源的写盘记录：换了页面再回来也能回滚以前的修复 */
+const targetRecords = computed(() =>
+  writePlan.records.value.filter((record) => sameTarget(record.target, fsCheck.target.value)),
+)
 
 const checkStatusText = computed(() => {
   const stage = fsCheck.stage.value
@@ -162,10 +170,11 @@ watch(fsCheck.status, (status) => {
 
 onMounted(() => {
   titleElement.value?.focus()
+  void writePlan.loadRecords()
 })
 
 async function handleExit() {
-  if (fsCheck.isBusy.value || writePlan.isExecuting.value) {
+  if (fsCheck.isBusy.value || writePlan.isExecuting.value || isSavingLost.value) {
     return
   }
   await writePlan.discard()
@@ -225,9 +234,22 @@ async function proposeMftFix(issue: FsIssue) {
   )
 }
 
-async function proposeRollback() {
-  const record = lastRecord.value
-  if (record === null || writePlan.isPreparing.value || fsCheck.isBusy.value) {
+/** 生成文件系统修复（勾选的几类）的计划，之后显示确认内容 */
+async function proposeFsFix(fixes: FsFix[]) {
+  const source = fsCheck.target.value
+  const partition = fsCheck.partition.value
+  if (source === null || partition === null || writePlan.isPreparing.value || fsCheck.isBusy.value) {
+    return
+  }
+  await writePlan.prepareFsFix(
+    source,
+    { number: partition.number, offset: partition.offset, length: partition.length },
+    fixes,
+  )
+}
+
+async function proposeRollback(record: WriteRecord) {
+  if (writePlan.isPreparing.value || fsCheck.isBusy.value) {
     return
   }
   await writePlan.prepareRollback(record.planId)
@@ -660,26 +682,26 @@ function buildReportText(): string {
             <dd>{{ checksText(report.skipped) }}</dd>
           </template>
         </dl>
-        <div v-if="lastRecord" class="fs-check__repair">
-          <p :class="lastRecord.outcome.done ? 'wizard__note' : 'wizard__error'" role="status">
-            {{ t('fsCheck.repair.outcome', { action: writeActionText(lastRecord), outcome: writeOutcomeText(lastRecord) }) }}
-          </p>
-          <button
-            v-if="canRollbackLast"
-            class="wizard__button wizard__button--secondary"
-            type="button"
-            :disabled="writePlan.isPreparing.value || fsCheck.isBusy.value"
-            @click="proposeRollback"
-          >
-            {{ t('writePlan.history.rollback') }}
-          </button>
-        </div>
+        <p v-if="lastRecord" :class="lastRecord.outcome.done ? 'wizard__note' : 'wizard__error'" role="status">
+          {{ t('fsCheck.repair.outcome', { action: writeActionText(lastRecord), outcome: writeOutcomeText(lastRecord) }) }}
+        </p>
         <p v-if="writePlan.failure.value" class="wizard__error" role="alert">
           {{ formatHostError(writePlan.failure.value) }}
         </p>
         <p v-if="report.unreadableBytes > 0" class="wizard__hint wizard__hint--warning">
           {{ t('fsCheck.result.unreadable', { bytes: formatBytes(report.unreadableBytes) }) }}
         </p>
+        <FsFixPanel
+          v-if="fsCheck.target.value"
+          v-model:saving="isSavingLost"
+          :report="report"
+          :target="fsCheck.target.value"
+          :partition="{ number: checkedPartition.number, offset: checkedPartition.offset, length: checkedPartition.length }"
+          :can-write="canWrite"
+          :busy="writePlan.isPreparing.value || fsCheck.isBusy.value"
+          :preparing="writePlan.isPreparing.value"
+          @propose="proposeFsFix"
+        />
 
         <div class="fs-check__issues wizard__fill" role="region" :aria-label="t('fsCheck.result.issues')">
           <p v-if="totalIssues === 0" class="fs-check__clean">{{ t('fsCheck.result.cleanDetail') }}</p>
@@ -728,6 +750,14 @@ function buildReportText(): string {
           </p>
         </div>
 
+        <section v-if="targetRecords.length" class="fs-check__history" aria-labelledby="fs-check-write-history">
+          <h3 id="fs-check-write-history" class="wizard__section-title">{{ t('writePlan.history.title') }}</h3>
+          <WriteHistoryList
+            :records="targetRecords"
+            :disabled="writePlan.isPreparing.value || fsCheck.isBusy.value || isSavingLost"
+            @rollback="proposeRollback"
+          />
+        </section>
         <p class="wizard__hint wizard__hint--warning">{{ t('fsCheck.notes.readOnly') }}</p>
         <p class="wizard__hint">{{ t('fsCheck.notes.imageFirst') }}</p>
         <p v-if="exportedPath" class="wizard__note" aria-live="polite">
@@ -816,5 +846,12 @@ function buildReportText(): string {
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-sm);
+}
+
+.fs-check__history {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  width: 100%;
 }
 </style>

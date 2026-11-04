@@ -701,8 +701,10 @@ export function diagnoseBoot(target: JobTarget): Promise<BootDiagnosis> {
   return invoke<BootDiagnosis>('boot_diagnose', { target })
 }
 
-/** 修复引导扇区的方向：用备份覆盖坏了的主引导扇区，或用主引导扇区重写坏了的备份 */
-/** rebuild：主备都坏了时按分区里的结构推算出引导扇区，主引导扇区与备份都写（卷序列号换成新的） */
+/**
+ * 修复引导扇区的方向：用备份覆盖坏了的主引导扇区，或用主引导扇区重写坏了的备份；
+ * rebuild：主备都坏了时按分区里的结构推算出引导扇区，主引导扇区与备份都写（卷序列号换成新的）
+ */
 export type BootFix = 'primaryFromBackup' | 'backupFromPrimary' | 'rebuild'
 
 /** 重建出的引导扇区：推算出的各项（规范字段名，按 bootField.* 显示）、卷标、按它打开后根目录的前几项与总数 */
@@ -768,13 +770,34 @@ export interface MftDetail {
 }
 
 /** 写入计划的摘要；回滚时 bootSector / partitionTable / mft 是原来那次修复的细节，rollbackOf 是它的计划 ID */
+/**
+ * 文件系统修复（FAT、exFAT）的一类问题：FSInfo、分配位图里漏标的簇、过长的链、丢失簇（先另存）、未正常卸下的标记
+ */
+export type FsFix = 'fsInfo' | 'bitmap' | 'tooLong' | 'lost' | 'dirty'
+
+/** 一类修复改了多少：items 是文件数（链过长）或段数，clusters 是簇数 */
+export interface FsFixCount {
+  fix: FsFix
+  items: number
+  clusters: number
+}
+
+export interface FsFixDetail {
+  partition: number
+  partitionOffset: number
+  partitionLength: number
+  filesystem: string
+  counts: FsFixCount[]
+}
+
 export interface PlanSummary {
-  kind: 'bootSector' | 'partitionTable' | 'mft' | 'rollback'
+  kind: 'bootSector' | 'partitionTable' | 'mft' | 'fsFix' | 'rollback'
   target: JobTarget
   writes: WriteRange[]
   bootSector: BootSectorDetail | null
   partitionTable: PartitionTableDetail | null
   mft: MftDetail | null
+  fsFix: FsFixDetail | null
   rollbackOf: string | null
 }
 
@@ -823,6 +846,24 @@ export function planPartitionTable(target: JobTarget, fix: PartitionTableFix): P
  */
 export function planMft(target: JobTarget, partition: PartitionRef, fix: MftFix): Promise<PlanView> {
   return invoke<PlanView>('write_plan_mft', { target, partition, fix })
+}
+
+/** 生成文件系统修复（勾选的几类问题）的计划；引擎要把分区检查两遍，大分区要等一会儿 */
+export function planFsFix(target: JobTarget, partition: PartitionRef, fixes: FsFix[]): Promise<PlanView> {
+  return invoke<PlanView>('write_plan_fs_fix', { target, partition, fixes })
+}
+
+/**
+ * 把分区里的丢失簇另存到 outputDir 下新建的 lost-<任务 ID 前 8 位> 目录（任务，只读源），
+ * 每段连续的丢失簇存成一个 lost-<起始簇>.bin；结果是 CopySummary。源为物理磁盘时输出目录不能在这块盘上
+ */
+export function startSaveLost(
+  jobId: string,
+  target: JobTarget,
+  partition: PartitionRef,
+  outputDir: string,
+): Promise<void> {
+  return invoke<void>('job_start_save_lost', { jobId, target, partition, outputDir })
 }
 
 /** 执行已确认的计划；镜像正被别的程序打开时返回 imageInUse，计划留着可以再试 */

@@ -1,6 +1,8 @@
 //! 测试样本：丢失分区搜索用的整盘镜像。由 `yisi-fs` 与 `yisi-part` 的样本生成器拼出，只在测试里使用，越界时直接 panic。
 #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::expect_used)]
 
+use yisi_fs::boot::exfat_boot_checksum;
+use yisi_fs::format::{FatWidth, fat_entry_span, put_fat_entry};
 use yisi_fs::samples::{ExfatImage, FatImage, FatType, Layout, NTFS_ROOT, NtfsImage, pattern};
 use yisi_part::samples::{MbrEntry, mbr_disk};
 
@@ -104,5 +106,74 @@ pub fn search_disk() -> SearchDisk {
         report,
         photo,
         nested,
+    }
+}
+
+/// 样本 FAT 镜像里 FAT 的位置（按引导扇区读）：保留扇区数、每份 FAT 的扇区数、份数。
+pub fn fat_geometry(image: &[u8]) -> (usize, usize, usize) {
+    let reserved = u16::from_le_bytes([image[14], image[15]]) as usize;
+    let fats = image[16] as usize;
+    let fat16 = u16::from_le_bytes([image[22], image[23]]) as usize;
+    let sectors = if fat16 != 0 {
+        fat16
+    } else {
+        u32::from_le_bytes(image[36..40].try_into().unwrap()) as usize
+    };
+    (reserved, sectors, fats)
+}
+
+fn width(kind: FatType) -> FatWidth {
+    match kind {
+        FatType::Fat12 => FatWidth::Fat12,
+        FatType::Fat16 => FatWidth::Fat16,
+        FatType::Fat32 => FatWidth::Fat32,
+    }
+}
+
+/// 改样本 FAT 镜像里的表项；`copy` 为 `None` 时各份都改。
+pub fn set_fat(image: &mut [u8], kind: FatType, cluster: u32, value: u32, copy: Option<usize>) {
+    let (reserved, sectors, fats) = fat_geometry(image);
+    let width = width(kind);
+    let (at, _) = fat_entry_span(width, cluster);
+    for copy in copy.map_or(0..fats, |copy| copy..copy + 1) {
+        let table = (reserved + copy * sectors) * SECTOR;
+        put_fat_entry(width, cluster, value, &mut image[table + at as usize..]);
+    }
+}
+
+/// 样本 FAT 镜像里表项的原始值（第一份）。
+pub fn fat_entry(image: &[u8], kind: FatType, cluster: u32, copy: usize) -> u32 {
+    let (reserved, sectors, _) = fat_geometry(image);
+    let width = width(kind);
+    let (at, len) = fat_entry_span(width, cluster);
+    let table = (reserved + copy * sectors) * SECTOR + at as usize;
+    yisi_fs::format::fat_entry_raw(width, cluster, &image[table..table + len]).unwrap()
+}
+
+pub fn end_marker(kind: FatType) -> u32 {
+    width(kind).end_of_chain()
+}
+
+/// 样本 exFAT 镜像的簇区起点（字节）。
+pub fn exfat_heap(image: &[u8]) -> usize {
+    u32::from_le_bytes(image[88..92].try_into().unwrap()) as usize * SECTOR
+}
+
+/// 改样本 exFAT 镜像的分配位图（在 2 号簇）。
+pub fn set_bitmap(image: &mut [u8], cluster: u32, allocated: bool) {
+    let at = exfat_heap(image) + (cluster as usize - 2) / 8;
+    let bit = 1u8 << ((cluster - 2) % 8);
+    if allocated {
+        image[at] |= bit;
+    } else {
+        image[at] &= !bit;
+    }
+}
+
+/// 改完样本 exFAT 的主引导区后重算它的校验和。
+pub fn reseal_exfat_boot(image: &mut [u8]) {
+    let checksum = exfat_boot_checksum(&image[..11 * SECTOR]);
+    for word in image[11 * SECTOR..12 * SECTOR].as_chunks_mut::<4>().0 {
+        word.copy_from_slice(&checksum.to_le_bytes());
     }
 }

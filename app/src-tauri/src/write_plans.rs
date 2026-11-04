@@ -19,8 +19,8 @@ use yisi_broker::execute::{self, ImageFile};
 /// 执行的结果：成功，或停在哪一步、失败前已经写下去几段。与磁盘代理的答复同一个类型。
 pub use yisi_broker::protocol::WriteExecuted as WriteOutcome;
 use yisi_engine::protocol::{
-    BootFix, BootSectorPlan, MftFix, MftPlan, PartitionRef, PartitionTableFix, PartitionTablePlan,
-    RebuiltBoot, WritePlan, image_identity,
+    BootFix, BootSectorPlan, FsFix, FsFixCount, FsFixPlan, MftFix, MftPlan, PartitionRef,
+    PartitionTableFix, PartitionTablePlan, RebuiltBoot, WritePlan, image_identity,
 };
 
 use crate::broker::BrokerSession;
@@ -48,6 +48,7 @@ pub enum PlanKind {
     BootSector,
     PartitionTable,
     Mft,
+    FsFix,
     Rollback,
 }
 
@@ -103,6 +104,17 @@ pub struct MftDetail {
     pub to: u64,
 }
 
+/// 文件系统修复的细节，同引擎答复的 [`FsFixPlan`]（不含要写的内容）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsFixDetail {
+    pub partition: u32,
+    pub partition_offset: u64,
+    pub partition_length: u64,
+    pub filesystem: String,
+    pub counts: Vec<FsFixCount>,
+}
+
 /// 计划的摘要：给界面确认用，也记进写盘记录。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -118,6 +130,9 @@ pub struct PlanSummary {
     /// `$MFT` 与 `$MFTMirr` 互修的计划（以及回滚它时）的细节。
     #[serde(default)]
     pub mft: Option<MftDetail>,
+    /// 文件系统修复的计划（以及回滚它时）的细节。
+    #[serde(default)]
+    pub fs_fix: Option<FsFixDetail>,
     /// 回滚的是哪一次写入（计划 ID）。
     pub rollback_of: Option<String>,
 }
@@ -200,6 +215,7 @@ impl WritePlans {
                 boot_sector: Some(detail),
                 partition_table: None,
                 mft: None,
+                fs_fix: None,
                 rollback_of: None,
             },
         )
@@ -235,6 +251,7 @@ impl WritePlans {
                 boot_sector: None,
                 partition_table: Some(detail),
                 mft: None,
+                fs_fix: None,
                 rollback_of: None,
             },
         )
@@ -270,6 +287,41 @@ impl WritePlans {
                 boot_sector: None,
                 partition_table: None,
                 mft: Some(detail),
+                fs_fix: None,
+                rollback_of: None,
+            },
+        )
+    }
+
+    /// 请引擎生成文件系统修复的计划，存好备份后交给界面确认。只读源。
+    pub fn plan_fs_fix(
+        &self,
+        engines: &Engines,
+        broker: &BrokerSession,
+        target: Target,
+        partition: PartitionRef,
+        fixes: Vec<FsFix>,
+    ) -> Result<PlanView, HostError> {
+        let expected = writable(&target, &self.data_dir)?;
+        let planned = engines.plan_fs_fix(broker, target.clone(), partition, fixes)?;
+        check_fs_fix_plan(&planned, &expected, partition)?;
+        let detail = FsFixDetail {
+            partition: partition.number,
+            partition_offset: partition.offset,
+            partition_length: partition.length,
+            filesystem: planned.filesystem,
+            counts: planned.counts,
+        };
+        self.propose(
+            planned.plan,
+            PlanSummary {
+                kind: PlanKind::FsFix,
+                target,
+                writes: Vec::new(),
+                boot_sector: None,
+                partition_table: None,
+                mft: None,
+                fs_fix: Some(detail),
                 rollback_of: None,
             },
         )
@@ -306,6 +358,7 @@ impl WritePlans {
                 boot_sector: record.summary.boot_sector.clone(),
                 partition_table: record.summary.partition_table.clone(),
                 mft: record.summary.mft.clone(),
+                fs_fix: record.summary.fs_fix.clone(),
                 rollback_of: Some(record.plan_id.clone()),
             },
         )
@@ -570,6 +623,29 @@ fn check_mft_plan(
         return Err(HostError::new(
             "planMismatch",
             "计划要写的位置不在这个分区的主文件表或它的副本上",
+        ));
+    }
+    Ok(())
+}
+
+/// 文件系统修复的计划：每段都落在请求的分区里（按宿主自己请求的位置核对，不按引擎回传的）；段数与字节数的上限
+/// 由计划本身的核对管（[`WritePlan::validate`]）。
+fn check_fs_fix_plan(
+    planned: &FsFixPlan,
+    expected: &Writable,
+    partition: PartitionRef,
+) -> Result<(), HostError> {
+    let plan = &planned.plan;
+    check_device(plan, expected)?;
+    let end = partition.offset.saturating_add(partition.length);
+    if plan.writes.is_empty()
+        || plan.writes.iter().any(|write| {
+            write.offset < partition.offset || write.offset.saturating_add(write.len()) > end
+        })
+    {
+        return Err(HostError::new(
+            "planMismatch",
+            "计划要写的位置不在这个分区里",
         ));
     }
     Ok(())

@@ -9,6 +9,7 @@ pub use yisi_part::samples::{MemoryDisk, Noise};
 use crate::FsKind;
 use crate::boot_write::{ExfatBoot, FatBoot, exfat_boot_region, fat_boot, fat32_fs_info};
 use crate::fat::short_checksum;
+use crate::format::{FatWidth, fat_entry_span, put_fat_entry};
 
 mod ntfs;
 pub use ntfs::{NtfsImage, ROOT as NTFS_ROOT, TAG_WOF};
@@ -263,27 +264,11 @@ impl FatImage {
     pub fn finish(mut self) -> Vec<u8> {
         let bytes_per_fat = self.fat_sectors * SECTOR;
         let mut table = vec![0u8; bytes_per_fat];
+        let width = self.width();
         for (cluster, &value) in self.fat.iter().enumerate() {
-            match self.kind {
-                FatType::Fat12 => {
-                    let at = cluster + cluster / 2;
-                    let value = (value & 0x0FFF) as u16;
-                    let mut pair = u16::from_le_bytes([table[at], table[at + 1]]);
-                    pair = if cluster % 2 == 1 {
-                        (pair & 0x000F) | (value << 4)
-                    } else {
-                        (pair & 0xF000) | value
-                    };
-                    table[at..at + 2].copy_from_slice(&pair.to_le_bytes());
-                }
-                FatType::Fat16 => {
-                    table[cluster * 2..cluster * 2 + 2]
-                        .copy_from_slice(&((value & 0xFFFF) as u16).to_le_bytes());
-                }
-                FatType::Fat32 => {
-                    table[cluster * 4..cluster * 4 + 4].copy_from_slice(&value.to_le_bytes());
-                }
-            }
+            let cluster = cluster as u32;
+            let (at, _) = fat_entry_span(width, cluster);
+            put_fat_entry(width, cluster, value, &mut table[at as usize..]);
         }
         for copy in 0..2 {
             let at = (self.reserved + copy * self.fat_sectors) * SECTOR;
@@ -297,12 +282,16 @@ impl FatImage {
         self.image
     }
 
-    fn end_marker(&self) -> u32 {
+    fn width(&self) -> FatWidth {
         match self.kind {
-            FatType::Fat12 => 0xFFF,
-            FatType::Fat16 => 0xFFFF,
-            FatType::Fat32 => 0x0FFF_FFFF,
+            FatType::Fat12 => FatWidth::Fat12,
+            FatType::Fat16 => FatWidth::Fat16,
+            FatType::Fat32 => FatWidth::Fat32,
         }
+    }
+
+    fn end_marker(&self) -> u32 {
+        self.width().end_of_chain()
     }
 
     fn allocate(&mut self, count: usize, layout: Layout) -> Vec<u32> {

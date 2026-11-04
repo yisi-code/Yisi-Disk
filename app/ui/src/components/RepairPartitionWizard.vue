@@ -521,7 +521,7 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
           class="repair-wizard__partition"
           :aria-labelledby="`repair-partition-${partition.number}`"
         >
-          <h3 :id="`repair-partition-${partition.number}`" class="repair-wizard__partition-title">
+          <h3 :id="`repair-partition-${partition.number}`" class="wizard__section-title">
             {{ partitionTitle(partition) }}
           </h3>
           <p class="repair-wizard__verdict" :class="`repair-wizard__verdict--${partition.verdict}`">
@@ -665,7 +665,7 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
           class="repair-wizard__partition"
           aria-labelledby="repair-write-history"
         >
-          <h3 id="repair-write-history" class="repair-wizard__partition-title">
+          <h3 id="repair-write-history" class="wizard__section-title">
             {{ t('writePlan.history.title') }}
           </h3>
           <WriteHistoryList :records="targetRecords" :disabled="isBusy" @rollback="proposeRollback" />
@@ -682,12 +682,6 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
   gap: var(--space-sm);
   padding-top: var(--space-md);
   border-top: 1px solid var(--color-border);
-}
-
-.repair-wizard__partition-title {
-  margin: 0;
-  font-size: var(--font-size-body);
-  font-weight: 600;
 }
 
 .repair-wizard__verdict {
