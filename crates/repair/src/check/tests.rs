@@ -7,6 +7,9 @@ use yisi_fs::samples::{ExfatImage, FatImage, FatType, Layout, MemoryDisk, NtfsIm
 use yisi_io::{BlockDevice, IoError};
 
 use super::*;
+use crate::samples::{
+    end_marker, exfat_heap, fat_geometry, reseal_exfat_boot as reseal_boot, set_bitmap, set_fat,
+};
 
 /// 不暂停、不取消，记下最后一次进度。
 #[derive(Default)]
@@ -69,58 +72,6 @@ fn fat_sample(kind: FatType) -> FatSample {
     let gone = image.add_file(root, "deleted.bin", &pattern(3, 4000), Layout::Contiguous);
     image.delete(&gone);
     FatSample { image, a, b }
-}
-
-/// 引导扇区里 FAT 的位置：保留扇区数、每份 FAT 的扇区数、份数。
-fn fat_geometry(image: &[u8]) -> (usize, usize, usize) {
-    let reserved = u16::from_le_bytes([image[14], image[15]]) as usize;
-    let fats = image[16] as usize;
-    let fat16 = u16::from_le_bytes([image[22], image[23]]) as usize;
-    let sectors = if fat16 != 0 {
-        fat16
-    } else {
-        u32::from_le_bytes(image[36..40].try_into().unwrap()) as usize
-    };
-    (reserved, sectors, fats)
-}
-
-/// 改 FAT 表项；`copies` 为 `None` 时各份都改。
-fn set_fat(image: &mut [u8], kind: FatType, cluster: u32, value: u32, copies: Option<usize>) {
-    let (reserved, sectors, fats) = fat_geometry(image);
-    let range = copies.map_or(0..fats, |copy| copy..copy + 1);
-    for copy in range {
-        let table = (reserved + copy * sectors) * 512;
-        let cluster = cluster as usize;
-        match kind {
-            FatType::Fat12 => {
-                let at = table + cluster + cluster / 2;
-                let mut pair = u16::from_le_bytes([image[at], image[at + 1]]);
-                let value = (value & 0x0FFF) as u16;
-                pair = if cluster % 2 == 1 {
-                    (pair & 0x000F) | (value << 4)
-                } else {
-                    (pair & 0xF000) | value
-                };
-                image[at..at + 2].copy_from_slice(&pair.to_le_bytes());
-            }
-            FatType::Fat16 => {
-                let at = table + cluster * 2;
-                image[at..at + 2].copy_from_slice(&(value as u16).to_le_bytes());
-            }
-            FatType::Fat32 => {
-                let at = table + cluster * 4;
-                image[at..at + 4].copy_from_slice(&value.to_le_bytes());
-            }
-        }
-    }
-}
-
-fn end_marker(kind: FatType) -> u32 {
-    match kind {
-        FatType::Fat12 => 0xFFF,
-        FatType::Fat16 => 0xFFFF,
-        FatType::Fat32 => 0x0FFF_FFFF,
-    }
 }
 
 #[test]
@@ -356,35 +307,6 @@ fn exfat_sample() -> ExfatSample {
         image: image.finish(),
         fragmented,
         contiguous,
-    }
-}
-
-fn exfat_heap(image: &[u8]) -> usize {
-    u32::from_le_bytes(image[88..92].try_into().unwrap()) as usize * 512
-}
-
-/// 分配位图在 2 号簇。
-fn set_bitmap(image: &mut [u8], cluster: u32, allocated: bool) {
-    let at = exfat_heap(image) + (cluster as usize - 2) / 8;
-    let bit = 1u8 << ((cluster - 2) % 8);
-    if allocated {
-        image[at] |= bit;
-    } else {
-        image[at] &= !bit;
-    }
-}
-
-/// 改完主引导区后重算它的校验和。
-fn reseal_boot(image: &mut [u8]) {
-    let mut checksum = 0u32;
-    for (index, &byte) in image[..11 * 512].iter().enumerate() {
-        if matches!(index, 106 | 107 | 112) {
-            continue;
-        }
-        checksum = checksum.rotate_right(1).wrapping_add(u32::from(byte));
-    }
-    for word in image[11 * 512..12 * 512].as_chunks_mut::<4>().0 {
-        word.copy_from_slice(&checksum.to_le_bytes());
     }
 }
 

@@ -36,13 +36,14 @@ const canConfirm = computed(
 const detail = computed(() => props.plan.bootSector)
 const tableDetail = computed(() => props.plan.partitionTable)
 const mftDetail = computed(() => props.plan.mft)
+const fsFixDetail = computed(() => props.plan.fsFix)
 /** 这份计划涉及的分区：修复引导扇区的那个、分区表里加上或改了类型的那个、修 $MFT 的那个（NTFS） */
 const partitionDetail = computed(() => {
   const mft = mftDetail.value
   if (mft !== null) {
     return { partition: mft.partition, filesystem: 'ntfs' }
   }
-  return detail.value ?? tableDetail.value
+  return detail.value ?? tableDetail.value ?? fsFixDetail.value
 })
 const totalBytes = computed(() => props.plan.writes.reduce((sum, range) => sum + range.length, 0))
 /** 重建引导扇区时推算出的内容；回滚时不再列出 */
@@ -64,6 +65,20 @@ const rootText = computed(() => {
 })
 
 const whatText = computed(() => {
+  const fsFix = fsFixDetail.value
+  if (fsFix !== null) {
+    if (props.plan.kind === 'rollback') {
+      return t('writePlan.fsFixRollbackValue')
+    }
+    return fsFix.counts
+      .map((count) =>
+        t(`writePlan.fsFixValue.${count.fix}`, {
+          items: count.items.toLocaleString(locale.value),
+          clusters: count.clusters.toLocaleString(locale.value),
+        }),
+      )
+      .join(t('writePlan.listSeparator'))
+  }
   const mft = mftDetail.value
   if (mft !== null) {
     return t(props.plan.kind === 'rollback' ? 'writePlan.mftRollbackValue' : 'writePlan.mftValue', {
@@ -119,7 +134,7 @@ function position(offset: number): string {
 
 <template>
   <section class="write-plan" aria-labelledby="write-plan-title">
-    <h3 id="write-plan-title" class="write-plan__title">{{ writeActionText(plan) }}</h3>
+    <h3 id="write-plan-title" class="wizard__section-title">{{ writeActionText(plan) }}</h3>
     <dl class="wizard__details">
       <dt>{{ t('writePlan.target') }}</dt>
       <dd class="wizard__path-text">{{ sourceName(plan.target) }}</dd>
@@ -208,12 +223,6 @@ function position(offset: number): string {
   flex-direction: column;
   gap: var(--space-sm);
   width: 100%;
-}
-
-.write-plan__title {
-  margin: 0;
-  font-size: var(--font-size-body);
-  font-weight: 600;
 }
 
 .write-plan__actions {

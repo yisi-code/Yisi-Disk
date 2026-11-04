@@ -11,11 +11,12 @@ use serde::{Deserialize, Serialize};
 use crate::device::validate_sector_size;
 use crate::{BlockDevice, IoError};
 
-/// 一份计划最多这么多段。
-pub const MAX_WRITES: usize = 64;
+/// 一份计划最多这么多段（修文件系统时 FAT 两份、改动分散，段数多；其余种类由宿主按种类卡得更紧）。
+pub const MAX_WRITES: usize = 1024;
 
-/// 一份计划最多写这么多字节：写前与写后各一份、按十六进制编码后，整份计划仍装得进一条 1 MiB 的消息。
-pub const MAX_PLAN_BYTES: u64 = 128 * 1024;
+/// 一份计划最多写这么多字节：写前与写后各一份、按十六进制编码后约 32 MiB，装得进引擎发给宿主的一条消息
+/// （`yisi_rpc::MAX_ENGINE_OUTPUT_LEN`）。
+pub const MAX_PLAN_BYTES: u64 = 8 << 20;
 
 /// 计划要写的设备。执行前与实际打开的设备逐项核对，防止写错盘或写错文件。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

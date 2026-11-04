@@ -197,6 +197,13 @@
   border-collapse: collapse;
 }
 
+/* 面板里一节的标题（h3）：与正文同字号、加粗 */
+.wizard__section-title {
+  margin: 0;
+  font-size: var(--font-size-body);
+  font-weight: 600;
+}
+
 .wizard__caption {
   padding-bottom: var(--space-xs);
   font-weight: 600;

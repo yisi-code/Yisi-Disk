@@ -4,11 +4,13 @@ import {
   executeWritePlan,
   listWriteHistory,
   planBootSector,
+  planFsFix,
   planMft,
   planPartitionTable,
   planRollback,
   toHostError,
   type BootFix,
+  type FsFix,
   type HostError,
   type JobTarget,
   type MftFix,
@@ -71,6 +73,10 @@ export function useWritePlan() {
     return prepare(() => planMft(target, partition, fix))
   }
 
+  function prepareFsFix(target: JobTarget, partition: PartitionRef, fixes: FsFix[]): Promise<boolean> {
+    return prepare(() => planFsFix(target, partition, fixes))
+  }
+
   function prepareRollback(planId: string): Promise<boolean> {
     return prepare(() => planRollback(planId))
   }
@@ -125,6 +131,7 @@ export function useWritePlan() {
     prepareBootSector,
     prepareTableFix,
     prepareMftFix,
+    prepareFsFix,
     prepareRollback,
     execute,
     discard,

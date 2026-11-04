@@ -9,6 +9,7 @@ pub mod boot;
 pub mod boot_fix;
 pub mod boot_rebuild;
 pub mod check;
+pub mod fs_fix;
 pub mod mft_fix;
 #[cfg(any(test, feature = "test-samples"))]
 pub mod samples;

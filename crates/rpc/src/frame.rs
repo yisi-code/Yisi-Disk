@@ -8,12 +8,16 @@ use serde::de::DeserializeOwned;
 /// 单条消息的长度上限，防止对端发来过大的长度字段时一次分配过多内存。
 pub const MAX_FRAME_LEN: u32 = 1 << 20;
 
+/// 引擎发给宿主的消息的长度上限：修复文件系统的写入计划带着写前与写后两份内容（十六进制），最大约 32 MiB。
+/// 只用于这一个方向；宿主发给引擎的请求、宿主与磁盘代理之间的消息仍按 [`MAX_FRAME_LEN`]。
+pub const MAX_ENGINE_OUTPUT_LEN: u32 = 40 << 20;
+
 #[derive(Debug, thiserror::Error)]
 pub enum FrameError {
     #[error("对端已关闭连接")]
     Closed,
 
-    #[error("消息长度 {0} 超过上限 {MAX_FRAME_LEN}")]
+    #[error("消息长度 {0} 超过上限")]
     TooLarge(u64),
 
     #[error("读写消息失败")]
@@ -27,10 +31,19 @@ pub enum FrameError {
 }
 
 pub fn write_frame<W: Write, T: Serialize>(writer: &mut W, message: &T) -> Result<(), FrameError> {
+    write_frame_limited(writer, message, MAX_FRAME_LEN)
+}
+
+/// 同 [`write_frame`]，长度上限是 `max`。
+pub fn write_frame_limited<W: Write, T: Serialize>(
+    writer: &mut W,
+    message: &T,
+    max: u32,
+) -> Result<(), FrameError> {
     let body = serde_json::to_vec(message)?;
     let len = u32::try_from(body.len())
         .ok()
-        .filter(|&len| len <= MAX_FRAME_LEN)
+        .filter(|&len| len <= max)
         .ok_or(FrameError::TooLarge(body.len() as u64))?;
     writer.write_all(&len.to_le_bytes())?;
     writer.write_all(&body)?;
@@ -40,6 +53,14 @@ pub fn write_frame<W: Write, T: Serialize>(writer: &mut W, message: &T) -> Resul
 
 /// 读一条消息。在消息边界上读到连接结束返回 [`FrameError::Closed`]，读到一半就结束视为截断。
 pub fn read_frame<R: Read, T: DeserializeOwned>(reader: &mut R) -> Result<T, FrameError> {
+    read_frame_limited(reader, MAX_FRAME_LEN)
+}
+
+/// 同 [`read_frame`]，长度上限是 `max`。
+pub fn read_frame_limited<R: Read, T: DeserializeOwned>(
+    reader: &mut R,
+    max: u32,
+) -> Result<T, FrameError> {
     let mut header = [0u8; 4];
     let mut filled = 0;
     while filled < header.len() {
@@ -52,7 +73,7 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(reader: &mut R) -> Result<T, Fra
         }
     }
     let len = u32::from_le_bytes(header);
-    if len > MAX_FRAME_LEN {
+    if len > max {
         return Err(FrameError::TooLarge(u64::from(len)));
     }
     let mut body = vec![0u8; len as usize];

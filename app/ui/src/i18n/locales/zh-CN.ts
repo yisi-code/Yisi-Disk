@@ -173,9 +173,9 @@ export default {
     },
     fsCheck: {
       name: '检查文件系统',
-      summary: '只读检查 FAT（文件分配表）、exFAT（扩展文件分配表）的引导区、FAT 链、分配位图与目录项是否一致，列出问题和以后的修法，不改动磁盘。',
+      summary: '检查 FAT（文件分配表）、exFAT（扩展文件分配表）的引导区、FAT 链、分配位图与目录项是否一致，列出问题；丢失簇、分配位图漏标、过长的链、FSInfo（文件系统信息）与未正常卸下的标记可以勾选修复。检查本身只读。',
       suits: '分区能打开，但文件乱码、文件夹打不开、容量对不上，或者拔盘后提示要扫描修复。',
-      limits: 'NTFS（新技术文件系统）只检查引导扇区与主文件表；主文件表与它的副本对不上时可以修复，其余问题这一版只检查、不修复。',
+      limits: 'NTFS（新技术文件系统）只检查引导扇区与主文件表；两份 FAT（文件分配表）不一致、交叉链接、断链、目录项损坏这一版只检查、不修复。',
     },
     image: {
       name: '制作磁盘镜像（能识别坏区）',
@@ -1039,6 +1039,14 @@ export default {
     tableRollbackValue: '把分区表恢复成上次改写之前的样子',
     mftValue: '把{source}里的第 {records} 号记录复制到{target}的同一位置；{source}从{from}起，{target}从{to}起',
     mftRollbackValue: '把{target}里的第 {records} 号记录恢复成上次改写之前的内容；{target}从{to}起',
+    fsFixValue: {
+      fsInfo: '换成新的 FSInfo（文件系统信息）扇区，空闲簇数记为未知',
+      bitmap: '在分配位图里补标 {clusters} 个簇（{items} 段）',
+      tooLong: '截短 {items} 个文件的 FAT（文件分配表）链，释放多出的 {clusters} 个簇',
+      lost: '释放 {items} 段丢失簇（共 {clusters} 个簇）',
+      dirty: '标回「已正常卸下」',
+    },
+    fsFixRollbackValue: '把这些位置恢复成修复之前的内容',
     mftTable: '主文件表',
     mftCopy: '主文件表副本',
     listSeparator: '、',
@@ -1086,6 +1094,7 @@ export default {
       setType: '分区 {number}：分区类型改为 {type}',
       mirrorFromMft: '分区 {number}：用主文件表更新它的副本',
       mftFromMirror: '分区 {number}：用副本修复主文件表',
+      fsFix: '分区 {number}：修复文件系统',
       rollback: '回滚（{action}）',
       unknown: '写入',
     },
@@ -1164,9 +1173,44 @@ export default {
       volumeUnsupported: '选的是一个盘符，不能修复：请改选整块磁盘，或先制作镜像、在镜像上修复。',
       outcome: '{action}：{outcome}',
     },
+    fix: {
+      title: '修复',
+      intro: '勾选要修的几类问题，生成写入计划，确认后才写：写前存备份、写完读回核对、之后能回滚。建议先制作镜像、在镜像上修好再改原盘。',
+      count: '{count} 处',
+      lostCount: '{clusters} 个簇',
+      fsInfo: {
+        label: '重写 FSInfo（文件系统信息）扇区',
+        hint: '空闲簇数记为未知，Windows 挂载时会重新统计。',
+      },
+      bitmap: {
+        label: '在分配位图里补标文件占用的簇',
+        hint: '补上之后新文件不会再写到这些簇上。',
+      },
+      tooLong: {
+        label: '截短过长的 FAT（文件分配表）链',
+        hint: '按文件大小在应有长度处结束，多出来、只属于这个文件的簇释放；文件内容不变。',
+      },
+      lost: {
+        label: '释放丢失簇',
+        hint: '里面可能是没写完的文件：先另存到另一块盘，存好才能勾选。',
+      },
+      dirty: {
+        label: '清除「没有正常卸下」的标记',
+        hint: '只在把别的勾选项修好之后、已经没有「会丢数据」或「结构错误」的问题时才清除。',
+      },
+      save: '另存丢失簇…',
+      saveTitle: '选择另存丢失簇的文件夹（在另一块盘上）',
+      saving: '正在另存：{done} / {total}',
+      saved: '已另存 {files} 个文件（{size}）到 {path}。',
+      saveFailed: '有 {count} 段读不出，没能另存。',
+      saveFirst: '每段连续的丢失簇存成一个 lost-<起始簇>.bin，只读源盘。',
+      dirtyBlocked: '还有「会丢数据」或「结构错误」的问题没勾上：把它们一起勾上才能清除标记；这里修不了的问题还在时不能清除。',
+      propose: '生成修复计划…',
+      preparing: '正在生成修复计划：要把分区检查两遍，大分区要等一会儿…',
+    },
     notes: {
       readOnly:
-        '检查只读，不改动磁盘。NTFS 的主文件表与它的副本对不上时，可以在问题里修复（先存写前备份、确认后才写、可以回滚）；其余问题的修复要等后续版本。',
+        '检查只读，不改动磁盘。FAT（文件分配表）、exFAT（扩展文件分配表）的几类常见问题可以在上面勾选修复，NTFS（新技术文件系统）的主文件表与它的副本对不上时可以在问题里修复（都是先存写前备份、确认后才写、可以回滚）；其余问题的修复要等后续版本。',
       imageFirst:
         '盘有坏道、读得很慢或报错时，先用「制作磁盘镜像」做一份镜像，再在这里检查镜像文件：反复读坏道会加重损坏。',
     },
@@ -1320,7 +1364,7 @@ export default {
       volumeDirty: {
         title: '卷标记为「没有正常卸下」',
         detail: '拔盘前没有安全弹出，或者写到一半断电。Windows 下次插上时会提示扫描修复。',
-        fix: '没有别的问题时可以忽略；以后修复时会清掉这个标记。',
+        fix: '没有别的问题时可以在上面的「修复」里清掉这个标记；还有别的问题时先把它们修好。',
       },
       mediaFailure: {
         title: '文件系统记录过读写错误',
@@ -1330,7 +1374,7 @@ export default {
       fsInfoInvalid: {
         title: 'FSInfo（文件系统信息）扇区的签名不对',
         detail: 'FSInfo（文件系统信息）只记空闲簇数之类的提示，坏了不影响读文件。',
-        fix: '以后可以重写 FSInfo（文件系统信息）扇区。',
+        fix: '可以在上面的「修复」里重写 FSInfo（文件系统信息）扇区。',
       },
       fatCopiesDiffer: {
         title: '两份 FAT（文件分配表）不一致：从簇 {cluster} 起共 {count} 处不同',
@@ -1395,7 +1439,7 @@ export default {
       chainTooLong: {
         title: '{path}：FAT（文件分配表）链有 {actual} 个簇，按文件大小只需要 {expected} 个',
         detail: '多出的簇白白占着空间，文件内容本身没有问题。',
-        fix: '以后可以释放多出的簇。',
+        fix: '可以在上面的「修复」里截短这条链，释放多出的簇。',
       },
       crossLink: {
         title: '{path} 与 {otherPath} 共用 {count} 个簇（从簇 {cluster} 起）',
@@ -1405,17 +1449,17 @@ export default {
       lostClusters: {
         title: '从簇 {cluster} 起有 {count} 个簇已占用，但没有文件引用',
         detail: '这部分空间被占着却不属于任何文件，常见于删除或写入时中断，里面可能是丢失的文件内容。',
-        fix: '以后可以另存为孤立文件看看内容，或者直接释放。',
+        fix: '可以在上面的「修复」里先另存到另一块盘看看内容，再释放。',
       },
       lostClustersMore: {
         title: '另外还有 {count} 个丢失的簇，分散在 {actual} 处',
         detail: '没有逐段列出；情况与上面的丢失簇相同。',
-        fix: '以后可以另存为孤立文件看看内容，或者直接释放。',
+        fix: '可以在上面的「修复」里先另存到另一块盘看看内容，再释放。',
       },
       notInBitmap: {
         title: '{path}：{count} 个簇（从簇 {cluster} 起）在分配位图里是空闲的',
         detail: '系统会认为这些簇没人用，写新文件时可能覆盖掉这个文件的内容。',
-        fix: '先把这个文件复制出来；以后可以在分配位图里补上这些簇。',
+        fix: '先把这个文件复制出来，再在上面的「修复」里把这些簇补标进分配位图。',
       },
       sizeInvalid: {
         title: '{path}：有效数据长度（{actual}）大于文件长度（{expected}）',

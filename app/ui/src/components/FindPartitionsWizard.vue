@@ -444,7 +444,7 @@ async function openSelected() {
           </p>
         </div>
         <section class="find-partitions__found" :aria-labelledby="`${domPrefix}-found`">
-          <h3 :id="`${domPrefix}-found`" class="find-partitions__title">
+          <h3 :id="`${domPrefix}-found`" class="wizard__section-title find-partitions__title">
             {{ t('findPartitions.live.title', { count: search.found.value.length }) }}
           </h3>
           <ul v-if="search.found.value.length > 0" class="find-partitions__found-list">
@@ -530,7 +530,7 @@ async function openSelected() {
         <p v-if="candidates.length === 0" class="wizard__note">{{ t('findPartitions.results.none') }}</p>
         <div v-else class="find-partitions__results wizard__fill">
           <section class="find-partitions__pane" :aria-labelledby="`${domPrefix}-list`">
-            <h3 :id="`${domPrefix}-list`" class="find-partitions__title">
+            <h3 :id="`${domPrefix}-list`" class="wizard__section-title find-partitions__title">
               {{ t('findPartitions.list.title') }}
             </h3>
             <ul class="find-partitions__list">
@@ -589,7 +589,7 @@ async function openSelected() {
             class="find-partitions__pane find-partitions__pane--wide"
             :aria-labelledby="`${domPrefix}-files`"
           >
-            <h3 :id="`${domPrefix}-files`" class="find-partitions__title">
+            <h3 :id="`${domPrefix}-files`" class="wizard__section-title find-partitions__title">
               {{ t('findPartitions.files.title') }}
             </h3>
             <div class="find-partitions__box" aria-live="polite">
@@ -657,9 +657,6 @@ async function openSelected() {
 
 .find-partitions__title {
   align-self: center;
-  margin: 0;
-  font-size: var(--font-size-body);
-  font-weight: 600;
 }
 
 /* 列表框与占位框都不按内容撑高，与右边的文件列表框等高，内容超出时在框里滚动 */

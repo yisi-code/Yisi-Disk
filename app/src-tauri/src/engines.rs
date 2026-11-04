@@ -31,8 +31,9 @@ use yisi_engine::protocol::{
 use yisi_engine::protocol::{BootCopy, BootDiagnosis, DIAGNOSE_BOOT, DiagnoseBootParams};
 use yisi_engine::protocol::{BootFix, BootSectorPlan, PLAN_BOOT_SECTOR, PlanBootSectorParams};
 use yisi_engine::protocol::{
-    MftFix, MftPlan, PLAN_MFT, PLAN_PARTITION_TABLE, PartitionTableFix, PartitionTablePlan,
-    PlanMftParams, PlanPartitionTableParams,
+    FsFix, FsFixPlan, MftFix, MftPlan, PLAN_FS_FIX, PLAN_MFT, PLAN_PARTITION_TABLE,
+    PartitionTableFix, PartitionTablePlan, PlanFsFixParams, PlanMftParams,
+    PlanPartitionTableParams, SAVE_LOST, SaveLostParams,
 };
 
 mod fs_check;
@@ -41,13 +42,18 @@ pub use fs_check::save_report as save_fs_check_report;
 pub use image::ImagePlan;
 
 use crate::broker::BrokerSession;
-use yisi_rpc::{ErrorObject, FrameError, Id, Message, Request, read_message, write_message};
+use yisi_rpc::{
+    ErrorObject, FrameError, Id, MAX_ENGINE_OUTPUT_LEN, Message, Request, read_message_limited,
+    write_message,
+};
 
 /// 发给界面的事件名，载荷是 [`JobEvent`]。
 pub const JOB_EVENT: &str = "job-event";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// 打开分区表、列目录、预览可能要读很多数据（十万级的目录、慢速的 USB 盘），等得久一些。
 const BROWSE_TIMEOUT: Duration = Duration::from_secs(120);
+/// 生成文件系统修复的计划要把分区检查两遍（生成、预演），大分区要等很久。
+const FS_FIX_TIMEOUT: Duration = Duration::from_secs(3600);
 /// 扫描 MFT 有进度、可以随时停下，不设实际的上限（大盘、慢盘、读错误重试都可能很久）。
 const SCAN_TIMEOUT: Duration = Duration::from_secs(24 * 3600);
 /// 引擎每 2 秒一次心跳，超过这么久没有心跳就标为无响应。
@@ -361,6 +367,47 @@ impl Engines {
             partition,
             fix,
         })
+    }
+
+    /// 生成文件系统修复（FAT、exFAT）的写入计划。只读，不写盘；要把分区检查两遍，最多等一小时。
+    pub fn plan_fs_fix(
+        &self,
+        broker: &BrokerSession,
+        target: Target,
+        partition: PartitionRef,
+        fixes: Vec<FsFix>,
+    ) -> Result<FsFixPlan, HostError> {
+        query_source_timed(broker, target, PLAN_FS_FIX, FS_FIX_TIMEOUT, |source| {
+            PlanFsFixParams {
+                source,
+                partition,
+                fixes,
+            }
+        })
+    }
+
+    /// 把分区里的丢失簇另存到 `output_dir` 下（任务，只读源）。结果经任务事件的 completed 送达。
+    pub fn start_save_lost(
+        &self,
+        app: AppHandle,
+        broker: &BrokerSession,
+        job_id: String,
+        target: Target,
+        partition: PartitionRef,
+        output_dir: String,
+    ) -> Result<(), HostError> {
+        target.validate()?;
+        validate_job_id(&job_id)?;
+        let params_job_id = job_id.clone();
+        self.start_job_with(app, job_id, SAVE_LOST, FS_FIX_TIMEOUT, |engine_pid| {
+            to_params(&SaveLostParams {
+                job_id: params_job_id,
+                source: resolve_source(target, broker, engine_pid)?,
+                partition,
+                output_dir,
+            })
+        })
+        .map(|_| ())
     }
 
     /// 浏览分区：引擎读出分区表后一直运行，直到取消（关闭浏览）。物理盘与扫描一样，第一次需要时提权启动磁盘代理。
@@ -704,7 +751,7 @@ impl EngineProcess {
 
     fn read_loop(&self, mut stdout: ChildStdout, job: Option<&(AppHandle, String)>) {
         loop {
-            match read_message(&mut stdout) {
+            match read_message_limited(&mut stdout, MAX_ENGINE_OUTPUT_LEN) {
                 Ok(Message::Response(response)) => {
                     if let Some(waiter) = lock(&self.pending).remove(&response.id) {
                         let _ = waiter.send(response.outcome);
@@ -886,11 +933,22 @@ fn query_source<P: Serialize, T: DeserializeOwned>(
     method: &str,
     params: impl FnOnce(Source) -> P,
 ) -> Result<T, HostError> {
+    query_source_timed(broker, target, method, BROWSE_TIMEOUT, params)
+}
+
+/// 同 [`query_source`]，最多等 `timeout`。
+fn query_source_timed<P: Serialize, T: DeserializeOwned>(
+    broker: &BrokerSession,
+    target: Target,
+    method: &str,
+    timeout: Duration,
+    params: impl FnOnce(Source) -> P,
+) -> Result<T, HostError> {
     target.validate()?;
     let process = EngineProcess::spawn(None, || {})?;
     let result = resolve_source(target, broker, process.pid)
         .and_then(|source| to_params(&params(source)))
-        .and_then(|params| process.request(method, params, BROWSE_TIMEOUT));
+        .and_then(|params| process.request(method, params, timeout));
     process.abandon();
     from_value(result?)
 }

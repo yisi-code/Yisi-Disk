@@ -179,7 +179,7 @@ const enUS: typeof zhCN = {
       name: 'Check a file system',
       summary: 'Checks, read-only, that the FAT and exFAT boot region, FAT chains, allocation bitmap and directory entries agree, and lists the problems and how they can be repaired later. Nothing on the disk is changed.',
       suits: 'The partition opens but file names are garbled, folders will not open, the space does not add up, or Windows asks to scan and fix after unplugging.',
-      limits: 'NTFS gets only the boot sector and master file table checks; when the master file table and its copy disagree it can be repaired, other problems are only reported in this version.',
+      limits: 'NTFS gets only the boot sector and master file table checks. FAT copies that disagree, cross-links, broken chains and damaged directory entries are only reported in this version.',
     },
     image: {
       name: 'Create a disk image (bad-sector aware)',
@@ -1047,6 +1047,14 @@ const enUS: typeof zhCN = {
     tableRollbackValue: 'Restores the partition table to what it was before the last change',
     mftValue: 'Copies record(s) {records} of the {source} to the same place in the {target}; the {source} starts at {from}, the {target} at {to}',
     mftRollbackValue: 'Restores record(s) {records} of the {target} to what they were before the last change; the {target} starts at {to}',
+    fsFixValue: {
+      fsInfo: 'Writes a new FSInfo sector with the free cluster count marked unknown',
+      bitmap: 'Marks {clusters} cluster(s) in the allocation bitmap ({items} run(s))',
+      tooLong: 'Shortens the FAT chain of {items} file(s), freeing {clusters} extra cluster(s)',
+      lost: 'Frees {items} run(s) of lost clusters ({clusters} cluster(s))',
+      dirty: 'Marks the volume as cleanly unmounted',
+    },
+    fsFixRollbackValue: 'Restores these locations to what they were before the repair',
     mftTable: 'master file table',
     mftCopy: 'master file table copy',
     listSeparator: ', ',
@@ -1094,6 +1102,7 @@ const enUS: typeof zhCN = {
       setType: 'Partition {number}: change the partition type to {type}',
       mirrorFromMft: 'Partition {number}: update the master file table copy from the master file table',
       mftFromMirror: 'Partition {number}: repair the master file table from its copy',
+      fsFix: 'Partition {number}: repair the file system',
       rollback: 'Roll back ({action})',
       unknown: 'Write',
     },
@@ -1172,9 +1181,44 @@ const enUS: typeof zhCN = {
       volumeUnsupported: 'A single drive letter cannot be repaired: choose the whole disk instead, or create an image and repair the image.',
       outcome: '{action}: {outcome}',
     },
+    fix: {
+      title: 'Repair',
+      intro: 'Tick the kinds of problem to repair and prepare a write plan; nothing is written until you confirm. A backup is saved first, the result is read back, and it can be rolled back. Repair an image first, then the original disk.',
+      count: '{count} place | {count} places',
+      lostCount: '{clusters} cluster | {clusters} clusters',
+      fsInfo: {
+        label: 'Rewrite the FSInfo sector',
+        hint: 'The free cluster count is marked unknown; Windows recounts it when mounting.',
+      },
+      bitmap: {
+        label: 'Mark clusters used by files in the allocation bitmap',
+        hint: 'Afterwards new files will not be written over them.',
+      },
+      tooLong: {
+        label: 'Shorten FAT chains that are too long',
+        hint: 'Each chain ends where the file size says; extra clusters owned only by that file are freed. File contents do not change.',
+      },
+      lost: {
+        label: 'Free lost clusters',
+        hint: 'They may hold unfinished files: save them to another disk first; this can only be ticked after saving.',
+      },
+      dirty: {
+        label: 'Clear the "not cleanly unmounted" mark',
+        hint: 'Only cleared when, after the other ticked repairs, no "data loss" or "structure" problems are left.',
+      },
+      save: 'Save lost clusters…',
+      saveTitle: 'Choose a folder for the lost clusters (on another disk)',
+      saving: 'Saving: {done} / {total}',
+      saved: 'Saved {files} file(s) ({size}) to {path}.',
+      saveFailed: '{count} run(s) could not be read and were not saved.',
+      saveFirst: 'Each run of lost clusters is saved as lost-<first cluster>.bin; the source disk is only read.',
+      dirtyBlocked: 'Some "data loss" or "structure" problems are not ticked: tick them too to clear the mark. It cannot be cleared while problems that cannot be repaired here remain.',
+      propose: 'Prepare the repair plan…',
+      preparing: 'Preparing the repair plan: the partition is checked twice, which takes a while on a large partition…',
+    },
     notes: {
       readOnly:
-        'Checking is read-only and changes nothing. When the NTFS master file table and its copy disagree you can repair it from the problem (a backup is saved first, nothing is written until you confirm, and it can be rolled back); repairs for the other problems come in a later version.',
+        'Checking is read-only and changes nothing. Several common FAT and exFAT problems can be repaired from the Repair section above, and NTFS master file table problems from the problem itself (a backup is saved first, nothing is written until you confirm, and it can be rolled back); repairs for the other problems come in a later version.',
       imageFirst:
         'If the disk has bad sectors, is very slow or reports errors, first make an image with "Create a disk image" and check the image file here: reading bad sectors again and again makes them worse.',
     },
@@ -1328,7 +1372,7 @@ const enUS: typeof zhCN = {
       volumeDirty: {
         title: 'The volume is marked as not cleanly unmounted',
         detail: 'The disk was unplugged without ejecting it, or power was lost during a write. Windows will offer to scan and fix it next time.',
-        fix: 'Can be ignored if nothing else is wrong; a later repair will clear the mark.',
+        fix: 'If nothing else is wrong, clear the mark from the Repair section above; otherwise repair the other problems first.',
       },
       mediaFailure: {
         title: 'The file system has recorded read or write errors',
@@ -1338,7 +1382,7 @@ const enUS: typeof zhCN = {
       fsInfoInvalid: {
         title: 'The FSInfo sector signature is wrong',
         detail: 'FSInfo only holds hints such as the free cluster count; reading files is not affected.',
-        fix: 'Later the FSInfo sector can be rewritten.',
+        fix: 'Rewrite the FSInfo sector from the Repair section above.',
       },
       fatCopiesDiffer: {
         title: 'The two FATs differ in {count} place, starting at cluster {cluster} | The two FATs differ in {count} places, starting at cluster {cluster}',
@@ -1403,7 +1447,7 @@ const enUS: typeof zhCN = {
       chainTooLong: {
         title: '{path}: the FAT chain has {actual} cluster, but the file size needs only {expected} | {path}: the FAT chain has {actual} clusters, but the file size needs only {expected}',
         detail: 'The extra clusters waste space; the file contents are fine.',
-        fix: 'Later the extra clusters can be freed.',
+        fix: 'Shorten the chain and free the extra clusters from the Repair section above.',
       },
       crossLink: {
         title: '{path} and {otherPath} share {count} cluster (from cluster {cluster}) | {path} and {otherPath} share {count} clusters (from cluster {cluster})',
@@ -1413,17 +1457,17 @@ const enUS: typeof zhCN = {
       lostClusters: {
         title: '{count} cluster from cluster {cluster} is in use but not referenced by any file | {count} clusters from cluster {cluster} are in use but not referenced by any file',
         detail: 'This space is taken but belongs to no file, typically after an interrupted delete or write; it may hold lost file contents.',
-        fix: 'Later it can be saved as an orphan file to look at, or simply freed.',
+        fix: 'From the Repair section above, save them to another disk to look at, then free them.',
       },
       lostClustersMore: {
         title: '{count} more lost cluster in {actual} places | {count} more lost clusters in {actual} places',
         detail: 'Not listed one by one; the same as the lost clusters above.',
-        fix: 'Later it can be saved as orphan files to look at, or simply freed.',
+        fix: 'From the Repair section above, save them to another disk to look at, then free them.',
       },
       notInBitmap: {
         title: '{path}: {count} cluster (from cluster {cluster}) is free in the allocation bitmap | {path}: {count} clusters (from cluster {cluster}) are free in the allocation bitmap',
         detail: 'The system considers these clusters unused and may overwrite this file when writing new files.',
-        fix: 'Copy this file out first; later the clusters can be marked in the bitmap.',
+        fix: 'Copy this file out first, then mark the clusters in the bitmap from the Repair section above.',
       },
       sizeInvalid: {
         title: '{path}: the valid data length ({actual}) is larger than the file length ({expected})',

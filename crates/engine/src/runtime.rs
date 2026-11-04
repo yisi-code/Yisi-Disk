@@ -20,8 +20,9 @@ use yisi_engine::protocol::{
     ReadScanParams, SCAN_DELETED, ScanParams, Source,
 };
 use yisi_engine::protocol::{
-    DIAGNOSE_BOOT, DiagnoseBootParams, PLAN_BOOT_SECTOR, PLAN_MFT, PLAN_PARTITION_TABLE,
-    PlanBootSectorParams, PlanMftParams, PlanPartitionTableParams,
+    DIAGNOSE_BOOT, DiagnoseBootParams, PLAN_BOOT_SECTOR, PLAN_FS_FIX, PLAN_MFT,
+    PLAN_PARTITION_TABLE, PlanBootSectorParams, PlanFsFixParams, PlanMftParams,
+    PlanPartitionTableParams, SAVE_LOST, SaveLostParams,
 };
 #[cfg(windows)]
 use yisi_engine::protocol::{DiskList, DiskSummary, DiskVolume};
@@ -29,16 +30,16 @@ use yisi_engine::protocol::{OPEN_RANGE, OpenRangeParams, SEARCH_PARTITIONS, Sear
 use yisi_formats::Registry;
 use yisi_io::{BlockDevice, RawImage};
 use yisi_rpc::{
-    ErrorObject, FrameError, Message, Notification, Request, Response, error_code, read_message,
-    write_message,
+    ErrorObject, FrameError, MAX_ENGINE_OUTPUT_LEN, Message, Notification, Request, Response,
+    error_code, read_message, write_message_limited,
 };
 
 use crate::browse::{self, Session};
 use crate::copy_job::{self, Planned};
 use crate::job::{self, JobContext, JobOutcome, ProgressSender, RunningJob};
 use crate::{
-    boot_check, carve_job, extract_job, fs_check_job, image_inspect, image_job, mft_plan, preview,
-    read_scan, reading, search_job, table_plan,
+    boot_check, carve_job, extract_job, fs_check_job, fs_fix_plan, image_inspect, image_job,
+    lost_job, mft_plan, preview, read_scan, reading, search_job, table_plan,
 };
 
 /// 浏览任务每隔这么久看一次有没有被取消。
@@ -63,7 +64,7 @@ impl Outbox {
 
     pub fn send(&self, message: &Message) {
         let mut writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Err(error) = write_message(&mut *writer, message) {
+        if let Err(error) = write_message_limited(&mut *writer, message, MAX_ENGINE_OUTPUT_LEN) {
             tracing::warn!(%error, "向宿主发送消息失败");
         }
     }
@@ -241,6 +242,8 @@ fn dispatch_now(
                 PLAN_BOOT_SECTOR.to_owned(),
                 PLAN_PARTITION_TABLE.to_owned(),
                 PLAN_MFT.to_owned(),
+                PLAN_FS_FIX.to_owned(),
+                SAVE_LOST.to_owned(),
                 FS_CHECK.to_owned(),
             ];
             if cfg!(windows) {
@@ -361,6 +364,35 @@ fn dispatch_now(
                 &params.source,
                 |device, identity| table_plan::plan(device, identity, params.fix),
             )?)
+        }
+        PLAN_FS_FIX => {
+            let params: PlanFsFixParams = request.params()?;
+            to_result(&plan_without_read_errors(
+                &params.source,
+                |device, identity| {
+                    fs_fix_plan::plan(device, identity, params.partition, &params.fixes)
+                },
+            )?)
+        }
+        SAVE_LOST => {
+            state.ensure_idle()?;
+            let params: SaveLostParams = request.params()?;
+            let output_dir =
+                Path::new(&params.output_dir).join(format!("lost-{}", short_id(&params.job_id)));
+            let device: Arc<dyn BlockDevice> =
+                Arc::from(open_source_for_output(&params.source, &output_dir)?);
+            browse::verify_partition(device.as_ref(), params.partition)?;
+            let lost = fs_fix_plan::lost(device.as_ref(), params.partition)?;
+            std::fs::create_dir_all(&output_dir)
+                .map_err(|error| output_unavailable(&output_dir, &error))?;
+            let started = CopyStarted {
+                output_dir: output_dir.display().to_string(),
+            };
+            let partition = params.partition;
+            state.job = Some(start_job(params.job_id, outbox, events, move |context| {
+                lost_job::run(device.as_ref(), partition, &lost, &output_dir, context)
+            }));
+            to_result(&started)
         }
         PLAN_MFT => {
             let params: PlanMftParams = request.params()?;

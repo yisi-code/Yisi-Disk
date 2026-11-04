@@ -23,6 +23,10 @@ export function useWritePlanText() {
     if (mft !== null) {
       return t(`writePlan.action.${mft.fix}`, { number: mft.partition })
     }
+    const fsFix = summary.fsFix
+    if (fsFix !== null) {
+      return t('writePlan.action.fsFix', { number: fsFix.partition })
+    }
     const table = summary.partitionTable
     if (table === null) {
       return t('writePlan.action.unknown')

@@ -6,7 +6,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::frame::{FrameError, read_frame, write_frame};
+use crate::frame::{FrameError, read_frame_limited, write_frame, write_frame_limited};
 
 pub const JSONRPC_VERSION: &str = "2.0";
 
@@ -176,8 +176,22 @@ pub fn write_message<W: Write>(writer: &mut W, message: &Message) -> Result<(), 
     write_frame(writer, &message.to_value())
 }
 
+/// 同 [`write_message`]，长度上限是 `max`（引擎发给宿主时用 [`MAX_ENGINE_OUTPUT_LEN`](crate::MAX_ENGINE_OUTPUT_LEN)）。
+pub fn write_message_limited<W: Write>(
+    writer: &mut W,
+    message: &Message,
+    max: u32,
+) -> Result<(), FrameError> {
+    write_frame_limited(writer, &message.to_value(), max)
+}
+
 pub fn read_message<R: Read>(reader: &mut R) -> Result<Message, FrameError> {
-    let value = read_frame::<_, Value>(reader)?;
+    read_message_limited(reader, crate::MAX_FRAME_LEN)
+}
+
+/// 同 [`read_message`]，长度上限是 `max`（宿主读引擎的消息时用 [`MAX_ENGINE_OUTPUT_LEN`](crate::MAX_ENGINE_OUTPUT_LEN)）。
+pub fn read_message_limited<R: Read>(reader: &mut R, max: u32) -> Result<Message, FrameError> {
+    let value = read_frame_limited::<_, Value>(reader, max)?;
     Message::from_value(value).map_err(FrameError::Invalid)
 }
 
