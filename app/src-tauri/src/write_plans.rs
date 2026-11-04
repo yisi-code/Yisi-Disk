@@ -20,7 +20,7 @@ use yisi_broker::execute::{self, ImageFile};
 pub use yisi_broker::protocol::WriteExecuted as WriteOutcome;
 use yisi_engine::protocol::{
     BootFix, BootSectorPlan, MftFix, MftPlan, PartitionRef, PartitionTableFix, PartitionTablePlan,
-    WritePlan, image_identity,
+    RebuiltBoot, WritePlan, image_identity,
 };
 
 use crate::broker::BrokerSession;
@@ -71,6 +71,9 @@ pub struct BootSectorDetail {
     pub from: u64,
     pub to: u64,
     pub length: u64,
+    /// 重建时推算出的内容（写盘记录里重建之前的记录没有这一项）。
+    #[serde(default)]
+    pub rebuilt: Option<RebuiltBoot>,
 }
 
 /// 改写分区表的细节，同引擎答复的 [`PartitionTablePlan`]（不含要写的内容）。
@@ -186,6 +189,7 @@ impl WritePlans {
             from: planned.from,
             to: planned.to,
             length: planned.length,
+            rebuilt: planned.rebuilt,
         };
         self.propose(
             planned.plan,
@@ -485,21 +489,37 @@ fn execute_on(
     }
 }
 
-/// 引擎给的计划要与请求对得上：写的是这个镜像或这块盘、扇区大小与读它时一致；只有一段，落在这个分区里，
-/// 长度不超过一个引导区。引擎解析的是不可信的数据，宿主不只看它的摘要。
+/// 引擎给的计划要与请求对得上：写的是这个镜像或这块盘、扇区大小与读它时一致；复制时只有一段、重建时最多两段
+/// （主引导扇区与备份），都落在这个分区里，每段不超过一个引导区，第一段从计划说的位置开始。
+/// 引擎解析的是不可信的数据，宿主不只看它的摘要。
 fn check_boot_sector_plan(planned: &BootSectorPlan, expected: &Writable) -> Result<(), HostError> {
     let plan = &planned.plan;
     let mismatch = |what: &str| HostError::new("planMismatch", what.to_owned());
     check_device(plan, expected)?;
-    let [write] = plan.writes.as_slice() else {
-        return Err(mismatch("修复引导扇区的计划应该只有一段"));
+    let segments = if planned.fix == BootFix::Rebuild {
+        2
+    } else {
+        1
     };
+    if plan.writes.is_empty() || plan.writes.len() > segments {
+        return Err(mismatch("修复引导扇区的计划段数不对"));
+    }
     let partition_end = planned
         .partition_offset
         .saturating_add(planned.partition_length);
-    let inside = write.offset >= planned.partition_offset
-        && write.offset.saturating_add(write.len()) <= partition_end;
-    if !inside || write.len() > MAX_BOOT_SECTOR_BYTES || write.offset != planned.to {
+    let inside = |offset: u64, length: u64| {
+        offset >= planned.partition_offset && offset.saturating_add(length) <= partition_end
+    };
+    let starts_right = plan
+        .writes
+        .first()
+        .is_some_and(|write| write.offset == planned.to);
+    if !starts_right
+        || plan
+            .writes
+            .iter()
+            .any(|write| !inside(write.offset, write.len()) || write.len() > MAX_BOOT_SECTOR_BYTES)
+    {
         return Err(mismatch("计划要写的位置不在这个分区的引导扇区上"));
     }
     Ok(())

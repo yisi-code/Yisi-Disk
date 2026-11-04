@@ -7,6 +7,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 pub mod boot;
+pub mod boot_write;
 pub mod bpb;
 mod clusters;
 mod entry;
@@ -29,7 +30,7 @@ pub use boot::{BootCopy, BootLayout, BootSector, inspect_boot};
 pub use entry::{ClusterRef, Entry, FileRef, Listing, Location, State, Unsupported};
 /// FAT 短文件名的长文件名校验和与显示形式。文件系统检查（`yisi-repair`）用的也是这一份。
 pub use fat::{short_checksum as fat_short_checksum, short_display as fat_short_display};
-pub use ntfs::{mft_record_ok, mft_self_record_ok};
+pub use ntfs::{mft_record_layout, mft_record_ok, mft_self_record_ok, root_index_block_size};
 pub use reader::FileReader;
 
 use crate::region::Region;

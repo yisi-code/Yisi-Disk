@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use yisi_part::bytes::{le16, le32, le64};
 
 use self::record::{
-    ATTRIBUTE_LIST, Body, DATA, Extent, FILE_NAME, NAMESPACE_DOS, REPARSE_POINT, Record,
-    STANDARD_INFORMATION, VOLUME_NAME, decode_runs, parse_file_name, split_ref,
+    ATTRIBUTE_LIST, Body, DATA, Extent, FILE_NAME, INDEX_ROOT, NAMESPACE_DOS, REPARSE_POINT,
+    Record, STANDARD_INFORMATION, VOLUME_NAME, decode_runs, parse_file_name, split_ref, utf16,
 };
 use self::scan::Scan;
 use self::stream::Stream;
@@ -115,6 +115,29 @@ pub(crate) struct Ntfs {
 /// 打开卷、文件系统检查与丢失分区搜索都按这一条判断 `$MFT`（或 `$MFTMirr`）在不在。
 pub fn mft_self_record_ok(bytes: &[u8]) -> bool {
     Record::parse(bytes.to_vec(), MFT_RECORD).is_some_and(|record| is_mft_self(&record))
+}
+
+/// 第 `number` 条 MFT 记录里，没名字的数据流第一段从哪个簇开始，以及记录头记的记录大小（字节）。
+/// 重建引导扇区时，由 `$MFT`（第 0 条）、`$MFTMirr`（第 1 条）自己的记录推出它们在卷上的位置。
+pub fn mft_record_layout(bytes: &[u8], number: u64) -> Option<(u64, u64)> {
+    let record = Record::parse(bytes.to_vec(), number)?;
+    let record_size = u64::from(le32(bytes, 0x1C)?);
+    let lcn = record
+        .attributes()
+        .find_map(|attribute| match attribute.body {
+            Body::NonResident(ref body) if attribute.kind == DATA && attribute.name_is(&[]) => {
+                decode_runs(body.runs, body.lowest_vcn)?.first()?.lcn
+            }
+            _ => None,
+        })?;
+    Some((lcn, record_size))
+}
+
+/// 根目录（第 5 条记录）的索引根里记的索引块大小（字节）。
+pub fn root_index_block_size(bytes: &[u8]) -> Option<u64> {
+    let record = Record::parse(bytes.to_vec(), ROOT_RECORD)?;
+    let value = record.find(INDEX_ROOT, &utf16("$I30"))?.resident_value()?;
+    Some(u64::from(le32(value, 0x08)?))
 }
 
 /// 第 `number` 条 MFT 记录本身完整：签名 `FILE`、更新序列对得上、记录头合理、记的记录号（有的话）就是它。

@@ -2,19 +2,19 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use yisi_part::bytes::{le16, le32, le64};
+use yisi_part::bytes::{le32, le64};
 
 use crate::bpb::ExfatBpb;
 use crate::clusters::{Chain, Clusters, FatWidth, Run};
 use crate::entry::{ClusterRef, Entry, FileRef, Listing, Location, State, dos_time};
-use crate::format::{EXFAT_TYPE_BITMAP, EXFAT_TYPE_FILE, ExfatSet, exfat_entry_set};
+use crate::format::{
+    EXFAT_TYPE_BITMAP, EXFAT_TYPE_FILE, EXFAT_TYPE_LABEL, ExfatSet, exfat_entry_set, exfat_label,
+};
 use crate::reader::FileReader;
 use crate::region::{ChunkCache, Region};
 use crate::{FsError, MAX_DIR_BYTES, MAX_ENTRIES, bpb};
 
 const ENTRY: usize = 32;
-/// 目录项类型的第 7 位：1 为使用中，删除时清零。
-const TYPE_LABEL: u8 = 0x83;
 const ATTR_DIRECTORY: u16 = 0x10;
 /// 分配位图一次读进内存的上限（对应 20 亿个簇），超过时按块缓存。
 const MAX_LOADED_BITMAP: u64 = 256 << 20;
@@ -88,13 +88,8 @@ impl Exfat {
                         volume.bitmap_length = length;
                     }
                 }
-                Some(TYPE_LABEL) => {
-                    let count = usize::from(raw.get(1).copied().unwrap_or(0)).min(11);
-                    let units: Vec<u16> = (0..count)
-                        .filter_map(|index| le16(raw, 2 + index * 2))
-                        .collect();
-                    let label = String::from_utf16_lossy(&units);
-                    if !label.is_empty() {
+                Some(EXFAT_TYPE_LABEL) => {
+                    if let Some(label) = exfat_label(raw) {
                         volume.label = Some(label);
                     }
                 }

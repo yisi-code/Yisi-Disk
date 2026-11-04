@@ -188,3 +188,51 @@ fn refuses_when_the_target_cannot_be_read() {
         "{result:?}"
     );
 }
+
+#[test]
+fn rebuilds_when_both_copies_are_gone() {
+    let original = search_disk();
+    // 三个分区的主、备都清掉：每个分区都能重建，写下去后诊断是「正常」，根目录里看得到样本的文件
+    let names = ["notes.txt", "report.bin", "photo.dat"];
+    for ((number, start, _, backup, length), name) in partitions(&original).into_iter().zip(names) {
+        let mut disk = search_disk();
+        disk.image[start..start + length].fill(0);
+        disk.image[start + backup..start + backup + length].fill(0);
+        // MBR 类型 0x07 不分 NTFS 与 exFAT：两处都清空后可能是「认不出」
+        assert!(
+            matches!(
+                verdicts(&disk.image)[number as usize - 1],
+                Verdict::BothDamaged | Verdict::Unrecognized
+            ),
+            "分区 {number}"
+        );
+        let plan =
+            plan_boot_fix(&device(&disk.image), number, BootFix::Rebuild { serial: 7 }).unwrap();
+        assert_eq!((plan.from, plan.to), (start as u64, start as u64));
+        assert_eq!(plan.writes.len(), 2, "分区 {number}");
+        let rebuilt = plan.rebuilt.as_ref().unwrap();
+        assert!(
+            rebuilt.root.iter().any(|entry| entry == name),
+            "分区 {number}：{:?}",
+            rebuilt.root
+        );
+        assert!(rebuilt.root_count >= rebuilt.root.len());
+        assert!(
+            rebuilt
+                .fields
+                .iter()
+                .any(|(field, _)| *field == "volumeSerial")
+        );
+        apply(&mut disk.image, &plan);
+        assert_eq!(
+            verdicts(&disk.image),
+            vec![Verdict::Healthy; 3],
+            "分区 {number}"
+        );
+    }
+    // 还有一份好的就不重建
+    assert!(matches!(
+        plan_boot_fix(&device(&original.image), 1, BootFix::Rebuild { serial: 7 }),
+        Err(BootFixError::NotApplicable(Verdict::Healthy))
+    ));
+}

@@ -6,18 +6,24 @@
 //! 复制的范围：FAT32、NTFS 只复制引导扇区本身（FAT32 的 FSInfo 与第 2 扇区的引导代码不动：有的格式化程序
 //! 不在备份区写它们，整段复制可能把好的换成空的）；exFAT 复制整个引导区（12 个扇区，校验和扇区一起），
 //! 主备各自的校验和才对得上。备份写到主引导扇区自己记的位置（[`recorded_backup`]），与找备份时的第一选择相同。
+//!
+//! 主备都坏了（或两处都认不出）时可以重建（[`BootFix::Rebuild`]）：按分区里的结构推算出引导扇区
+//! （[`boot_rebuild`](crate::boot_rebuild)），主引导扇区与备份都写。预演除了诊断要「正常」，还要按它真的打开卷、
+//! 读出根目录，根目录的前几项随计划给出，让人在写之前认出是不是自己的盘。
 
 use std::sync::Arc;
 
-use yisi_fs::FsKind;
 use yisi_fs::boot::{BackupFamily, recorded_backup};
+use yisi_fs::boot_write::EXFAT_BOOT_REGION_SECTORS;
+use yisi_fs::{BootCopy, FsKind, State, Volume};
 use yisi_io::{BlockDevice, Overlay, SectorWrite};
 use yisi_part::{PartError, Partition, read_table};
 
 use crate::boot::{Verdict, diagnose_partition};
+use crate::boot_rebuild::{self, RebuildError};
 
-/// exFAT 的引导区：引导扇区、8 个扩展引导扇区、OEM 参数、保留、校验和扇区。
-const EXFAT_BOOT_REGION_SECTORS: u64 = 12;
+/// 重建的预演里列出根目录的前这么多项。
+const ROOT_PREVIEW: usize = 8;
 
 /// 往哪个方向修。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +32,18 @@ pub enum BootFix {
     PrimaryFromBackup,
     /// 主引导扇区正常、备份坏了：把主引导扇区复制到它记的备份位置。
     BackupFromPrimary,
+    /// 主备都坏了（或两处都认不出）：按分区里的结构推算出引导扇区，主引导扇区与备份都写。`serial` 是新的卷序列号。
+    Rebuild { serial: u64 },
+}
+
+/// 重建出的引导扇区：推算出的各项（规范字段名与值）、卷标，以及按它打开后根目录的前几项。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebuiltBoot {
+    pub fields: Vec<(&'static str, u64)>,
+    pub label: Option<String>,
+    /// 根目录里没删除的项的名字（前 [`ROOT_PREVIEW`] 个）与总数。
+    pub root: Vec<String>,
+    pub root_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,8 +54,11 @@ pub struct BootFixPlan {
     pub from: u64,
     pub to: u64,
     pub length: u64,
-    /// 只有一段：`to` 处的 `length` 字节。
+    /// 复制时只有一段：`to` 处的 `length` 字节。重建时是主引导扇区与备份各一段（FAT32 连同 FSInfo），
+    /// `from` 与 `to` 都是分区起点，`length` 是第一段的长度。
     pub writes: Vec<SectorWrite>,
+    /// 重建时推算出的内容。
+    pub rebuilt: Option<RebuiltBoot>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -60,6 +81,11 @@ pub enum BootFixError {
     /// 预演写入之后重新诊断，结论不是「正常」：写进去也修不好，不给计划。
     #[error("预演写入之后，诊断结论是 {0:?}")]
     Rehearsal(Verdict),
+    #[error("推算不出引导扇区")]
+    Rebuild(#[from] RebuildError),
+    /// 按重建的引导扇区打不开卷或读不出根目录。
+    #[error("按推算的引导扇区打不开卷：{0}")]
+    RebuiltUnusable(String),
 }
 
 /// 为分区表里编号为 `number` 的分区生成修复引导扇区的计划。只读源。
@@ -78,6 +104,12 @@ pub fn plan_boot_fix(
     let required = match fix {
         BootFix::PrimaryFromBackup => Verdict::PrimaryDamaged,
         BootFix::BackupFromPrimary => Verdict::BackupDamaged,
+        BootFix::Rebuild { serial } => {
+            if !matches!(report.verdict, Verdict::BothDamaged | Verdict::Unrecognized) {
+                return Err(BootFixError::NotApplicable(report.verdict));
+            }
+            return plan_rebuild(device, partition, report.filesystem, serial);
+        }
     };
     if report.verdict != required {
         return Err(BootFixError::NotApplicable(report.verdict));
@@ -91,13 +123,13 @@ pub fn plan_boot_fix(
             .backup
             .as_ref()
             .ok_or(BootFixError::NotApplicable(report.verdict))?,
-        BootFix::BackupFromPrimary => &report.primary,
+        BootFix::BackupFromPrimary | BootFix::Rebuild { .. } => &report.primary,
     };
     let sector_size = valid.sector_size.ok_or(BootFixError::NoBackupPosition)?;
     let valid_bytes = read(device, &partition, valid.offset, sector_size)?;
     let (from, to) = match fix {
         BootFix::PrimaryFromBackup => (valid.offset, 0),
-        BootFix::BackupFromPrimary => (
+        BootFix::BackupFromPrimary | BootFix::Rebuild { .. } => (
             0,
             recorded_backup(&valid_bytes, family, sector_size)
                 .ok_or(BootFixError::NoBackupPosition)?,
@@ -142,6 +174,58 @@ pub fn plan_boot_fix(
         to: at,
         length,
         writes,
+        rebuilt: None,
+        partition,
+    })
+}
+
+/// 重建：推算出引导扇区，预演写入后诊断要「正常」、按它打得开卷并读得出根目录。
+fn plan_rebuild(
+    device: &Arc<dyn BlockDevice>,
+    partition: Partition,
+    kind: FsKind,
+    serial: u64,
+) -> Result<BootFixPlan, BootFixError> {
+    let rebuilt = boot_rebuild::rebuild(device, &partition, kind, serial)?;
+    let rehearsal: Arc<dyn BlockDevice> =
+        Arc::new(Overlay::new(Arc::clone(device), &rebuilt.writes));
+    let rehearsed = diagnose_partition(&rehearsal, &partition);
+    if rehearsed.verdict != Verdict::Healthy {
+        return Err(BootFixError::Rehearsal(rehearsed.verdict));
+    }
+    let unusable = |error: &dyn std::fmt::Display| BootFixError::RebuiltUnusable(error.to_string());
+    let volume = Volume::open_with(
+        rehearsal,
+        partition.offset,
+        partition.length,
+        BootCopy::Primary,
+    )
+    .map_err(|error| unusable(&error))?;
+    let listing = volume
+        .list(&volume.root())
+        .map_err(|error| unusable(&error))?;
+    let live: Vec<String> = listing
+        .entries
+        .iter()
+        .filter(|entry| entry.state == State::Live)
+        .map(|entry| entry.name.clone())
+        .collect();
+    let length = rebuilt
+        .writes
+        .first()
+        .map_or(0, |write| write.after.len() as u64);
+    Ok(BootFixPlan {
+        filesystem: rebuilt.kind,
+        from: partition.offset,
+        to: partition.offset,
+        length,
+        rebuilt: Some(RebuiltBoot {
+            fields: yisi_fs::bpb::significant_fields(rebuilt.kind, &rebuilt.boot),
+            label: rebuilt.label,
+            root: live.iter().take(ROOT_PREVIEW).cloned().collect(),
+            root_count: live.len(),
+        }),
+        writes: rebuilt.writes,
         partition,
     })
 }

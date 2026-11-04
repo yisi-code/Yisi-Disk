@@ -3,13 +3,16 @@
 
 use std::sync::Arc;
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use yisi_engine::protocol::{
-    self, BootCopy, BootCopyReport, BootDiagnosis, BootDifference, BootFix, BootIssue,
-    BootSectorPlan, DeviceIdentity, PartitionBoot, WritePlan,
+    self, BootCopy, BootCopyReport, BootDiagnosis, BootDifference, BootField, BootFix, BootIssue,
+    BootSectorPlan, DeviceIdentity, PartitionBoot, PartitionRef, RebuiltBoot, WritePlan,
 };
 use yisi_io::BlockDevice;
 use yisi_repair::boot::{self, CopyReport, Issue, PartitionReport, TableIssue, Verdict};
 use yisi_repair::boot_fix::{self, BootFixError};
+use yisi_repair::boot_rebuild::{self, RebuildError};
 use yisi_rpc::ErrorObject;
 
 use crate::browse::{fs_key, note_key, role_key, scheme_name, table_kind};
@@ -42,18 +45,25 @@ pub fn plan(
     let direction = match fix {
         BootFix::PrimaryFromBackup => boot_fix::BootFix::PrimaryFromBackup,
         BootFix::BackupFromPrimary => boot_fix::BootFix::BackupFromPrimary,
+        BootFix::Rebuild => boot_fix::BootFix::Rebuild {
+            serial: new_serial(),
+        },
     };
     let planned = boot_fix::plan_boot_fix(device, partition, direction).map_err(|error| {
         let code = match error {
             BootFixError::Table(_) => protocol::error_code::SOURCE_UNAVAILABLE,
-            BootFixError::NoPartition(_) | BootFixError::NotApplicable(_) => {
+            BootFixError::NoPartition(_)
+            | BootFixError::NotApplicable(_)
+            | BootFixError::Rebuild(RebuildError::Unsupported(_)) => {
                 protocol::error_code::PLAN_NOT_APPLICABLE
             }
             BootFixError::NoBackupPosition
             | BootFixError::Unreadable(_)
             | BootFixError::Unaligned
             | BootFixError::Unchanged
-            | BootFixError::Rehearsal(_) => protocol::error_code::PLAN_UNAVAILABLE,
+            | BootFixError::Rehearsal(_)
+            | BootFixError::Rebuild(_)
+            | BootFixError::RebuiltUnusable(_) => protocol::error_code::PLAN_UNAVAILABLE,
         };
         ErrorObject::new(code, error_chain(&error))
     })?;
@@ -78,15 +88,71 @@ pub fn plan(
         from: planned.from,
         to: planned.to,
         length: planned.length,
+        rebuilt: planned.rebuilt.map(|rebuilt| RebuiltBoot {
+            fields: rebuilt
+                .fields
+                .into_iter()
+                .map(|(field, value)| BootField {
+                    field: field.to_owned(),
+                    value,
+                })
+                .collect(),
+            label: rebuilt.label,
+            root: rebuilt.root,
+            root_count: rebuilt.root_count as u64,
+        }),
     })
 }
 
-/// 协议里的引导扇区选择换成 `yisi-fs` 的。
+/// 协议里的引导扇区选择换成 `yisi-fs` 的。按重建的引导扇区（`Rebuilt`）时设备已换成叠加视图（[`boot_view`]），
+/// 在视图上按主引导扇区打开。
 pub fn fs_copy(copy: BootCopy) -> yisi_fs::BootCopy {
     match copy {
-        BootCopy::Primary => yisi_fs::BootCopy::Primary,
+        BootCopy::Primary | BootCopy::Rebuilt => yisi_fs::BootCopy::Primary,
         BootCopy::Backup => yisi_fs::BootCopy::Backup,
     }
+}
+
+/// 打开卷要用的设备：按重建的引导扇区（`Rebuilt`）时，把分区表里主备都坏了的分区（`only` 给了时只换这一个）
+/// 换成推算出的引导扇区的叠加视图，不写盘；其余情况原样返回。
+pub fn boot_view(
+    device: Arc<dyn BlockDevice>,
+    copy: BootCopy,
+    only: Option<PartitionRef>,
+) -> Result<Arc<dyn BlockDevice>, ErrorObject> {
+    if copy != BootCopy::Rebuilt {
+        return Ok(device);
+    }
+    let table = yisi_part::read_table(device.as_ref()).map_err(|error| {
+        ErrorObject::new(
+            protocol::error_code::SOURCE_UNAVAILABLE,
+            error_chain(&error),
+        )
+    })?;
+    let partitions: Vec<_> = table
+        .partitions
+        .into_iter()
+        .filter(|partition| {
+            only.is_none_or(|wanted| {
+                partition.offset == wanted.offset && partition.length == wanted.length
+            })
+        })
+        .collect();
+    Ok(boot_rebuild::overlay_rebuilt(
+        &device,
+        &partitions,
+        new_serial(),
+    ))
+}
+
+/// 新的卷序列号：重建的引导扇区推不出原来的，按当前时间取一个。
+fn new_serial() -> u64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    // 打散一下，高低两半都用上
+    let mixed = (nanos as u64) ^ ((nanos >> 64) as u64);
+    mixed.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(17)
 }
 
 fn partition(report: &PartitionReport) -> PartitionBoot {

@@ -214,6 +214,8 @@ pub fn lfn_name(parts: &[LfnPart]) -> Option<String> {
 /// exFAT 目录项类型的第 7 位：1 为使用中，删除时清零。
 pub const EXFAT_IN_USE: u8 = 0x80;
 pub const EXFAT_TYPE_BITMAP: u8 = 0x81;
+pub const EXFAT_TYPE_UPCASE: u8 = 0x82;
+pub const EXFAT_TYPE_LABEL: u8 = 0x83;
 pub const EXFAT_TYPE_FILE: u8 = 0x85;
 pub const EXFAT_TYPE_STREAM: u8 = 0xC0;
 pub const EXFAT_TYPE_NAME: u8 = 0xC1;
@@ -357,6 +359,23 @@ pub fn exfat_entry_set(entries: &[[u8; 32]], index: usize) -> ExfatSet {
     };
     set.name = String::from_utf16_lossy(&name);
     set
+}
+
+/// exFAT 卷标目录项（`0x83`）里的卷标；空的卷标为 `None`。
+pub fn exfat_label(raw: &[u8]) -> Option<String> {
+    let count = usize::from(raw.get(1).copied().unwrap_or(0)).min(11);
+    let units: Vec<u16> = (0..count)
+        .filter_map(|index| le16(raw, 2 + index * 2))
+        .collect();
+    let label = String::from_utf16_lossy(&units);
+    (!label.is_empty()).then_some(label)
+}
+
+/// exFAT 大写表的校验和：逐字节循环右移一位再加（大写表目录项里记的 `TableChecksum`）。
+pub fn exfat_table_checksum(bytes: &[u8]) -> u32 {
+    bytes.iter().fold(0u32, |sum, &byte| {
+        sum.rotate_right(1).wrapping_add(u32::from(byte))
+    })
 }
 
 /// 目录项集合的校验和：逐字节循环右移一位再加，跳过文件项里存校验和的第 2、3 字节；每项的类型字节按使用中计算。

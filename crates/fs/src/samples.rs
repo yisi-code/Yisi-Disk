@@ -6,6 +6,8 @@ use std::collections::BTreeSet;
 
 pub use yisi_part::samples::{MemoryDisk, Noise};
 
+use crate::FsKind;
+use crate::boot_write::{ExfatBoot, FatBoot, exfat_boot_region, fat_boot, fat32_fs_info};
 use crate::fat::short_checksum;
 
 mod ntfs;
@@ -112,41 +114,29 @@ impl FatImage {
         let cluster_count = ((total - first_data) / spc) as u32;
 
         let mut image = vec![0u8; total * SECTOR];
-        let boot = &mut image[..SECTOR];
-        boot[..3].copy_from_slice(&[0xEB, 0x58, 0x90]);
-        boot[3..11].copy_from_slice(b"MSDOS5.0");
-        boot[11..13].copy_from_slice(&(SECTOR as u16).to_le_bytes());
-        boot[13] = spc as u8;
-        boot[14..16].copy_from_slice(&(reserved as u16).to_le_bytes());
-        boot[16] = 2;
-        boot[17..19].copy_from_slice(&(root_entries as u16).to_le_bytes());
-        if total < 0x10000 {
-            boot[19..21].copy_from_slice(&(total as u16).to_le_bytes());
-        } else {
-            boot[32..36].copy_from_slice(&(total as u32).to_le_bytes());
-        }
-        boot[21] = 0xF8;
-        let label_at = if kind == FatType::Fat32 {
-            boot[36..40].copy_from_slice(&(fat_sectors as u32).to_le_bytes());
-            boot[44..48].copy_from_slice(&2u32.to_le_bytes());
-            // FSInfo 在第 1 扇区，备份引导扇区在第 6 扇区（`finish` 时复制过去）
-            boot[48..50].copy_from_slice(&1u16.to_le_bytes());
-            boot[50..52].copy_from_slice(&(FAT32_BACKUP_SECTOR as u16).to_le_bytes());
-            66
-        } else {
-            boot[22..24].copy_from_slice(&(fat_sectors as u16).to_le_bytes());
-            38
-        };
-        boot[label_at] = 0x29;
-        boot[label_at + 1..label_at + 5].copy_from_slice(&0x1234_5678u32.to_le_bytes());
-        boot[label_at + 5..label_at + 16].copy_from_slice(b"BOOTLABEL  ");
-        boot[label_at + 16..label_at + 24].copy_from_slice(match kind {
-            FatType::Fat12 => b"FAT12   ",
-            FatType::Fat16 => b"FAT16   ",
-            FatType::Fat32 => b"FAT32   ",
+        // FAT32 的 FSInfo 在第 1 扇区，备份引导扇区在第 6 扇区（`finish` 时复制过去）
+        let boot = fat_boot(&FatBoot {
+            kind: match kind {
+                FatType::Fat12 => FsKind::Fat12,
+                FatType::Fat16 => FsKind::Fat16,
+                FatType::Fat32 => FsKind::Fat32,
+            },
+            bytes_per_sector: SECTOR as u16,
+            sectors_per_cluster: spc as u8,
+            reserved: reserved as u16,
+            fats: 2,
+            root_entries: root_entries as u16,
+            total_sectors: total as u32,
+            media: 0xF8,
+            fat_sectors: fat_sectors as u32,
+            hidden_sectors: 0,
+            root_cluster: 2,
+            fs_info: 1,
+            backup_boot: FAT32_BACKUP_SECTOR as u16,
+            serial: 0x1234_5678,
+            label: *b"BOOTLABEL  ",
         });
-        boot[510] = 0x55;
-        boot[511] = 0xAA;
+        image[..SECTOR].copy_from_slice(&boot);
 
         let mut fat = vec![0u32; cluster_count as usize + 2];
         fat[0] = 0x0FFF_FFF8;
@@ -300,12 +290,7 @@ impl FatImage {
             self.image[at..at + bytes_per_fat].copy_from_slice(&table);
         }
         if self.kind == FatType::Fat32 {
-            // FSInfo 扇区：三处签名，空闲簇数与下一个空闲簇记为「未知」
-            let fs_info = &mut self.image[SECTOR..2 * SECTOR];
-            fs_info[..4].copy_from_slice(&0x4161_5252u32.to_le_bytes());
-            fs_info[484..488].copy_from_slice(&0x6141_7272u32.to_le_bytes());
-            fs_info[488..496].fill(0xFF);
-            fs_info[508..512].copy_from_slice(&0xAA55_0000u32.to_le_bytes());
+            self.image[SECTOR..2 * SECTOR].copy_from_slice(&fat32_fs_info(SECTOR as u16));
             let backup = FAT32_BACKUP_SECTOR * SECTOR;
             self.image.copy_within(..SECTOR, backup);
         }
@@ -636,40 +621,19 @@ impl ExfatImage {
     }
 
     pub fn finish(mut self) -> Vec<u8> {
-        let mut boot = [0u8; SECTOR];
-        boot[..3].copy_from_slice(&[0xEB, 0x76, 0x90]);
-        boot[3..11].copy_from_slice(b"EXFAT   ");
-        boot[72..80].copy_from_slice(&(EXFAT_TOTAL_SECTORS as u64).to_le_bytes());
-        boot[80..84].copy_from_slice(&(EXFAT_FAT_OFFSET as u32).to_le_bytes());
-        boot[84..88].copy_from_slice(&(self.fat_length as u32).to_le_bytes());
-        boot[88..92].copy_from_slice(&((self.heap_offset / SECTOR) as u32).to_le_bytes());
-        boot[92..96].copy_from_slice(&self.cluster_count.to_le_bytes());
-        boot[96..100].copy_from_slice(&4u32.to_le_bytes());
-        boot[100..104].copy_from_slice(&0x1234_5678u32.to_le_bytes());
-        boot[104..106].copy_from_slice(&0x0100u16.to_le_bytes());
-        boot[108] = 9;
-        boot[109] = EXFAT_SPC_SHIFT as u8;
-        boot[110] = 1;
-        boot[111] = 0x80;
-        boot[510] = 0x55;
-        boot[511] = 0xAA;
-        // 主引导区与备份引导区：引导扇区、8 个扩展引导扇区（只有结尾签名）、OEM、保留、校验和扇区
-        let mut region = vec![0u8; 12 * SECTOR];
-        region[..SECTOR].copy_from_slice(&boot);
-        for sector in 1..9 {
-            region[sector * SECTOR + 510] = 0x55;
-            region[sector * SECTOR + 511] = 0xAA;
-        }
-        let mut checksum = 0u32;
-        for (index, &byte) in region[..11 * SECTOR].iter().enumerate() {
-            if matches!(index, 106 | 107 | 112) {
-                continue;
-            }
-            checksum = checksum.rotate_right(1).wrapping_add(u32::from(byte));
-        }
-        for word in region[11 * SECTOR..].as_chunks_mut::<4>().0 {
-            word.copy_from_slice(&checksum.to_le_bytes());
-        }
+        // 主引导区与备份引导区内容相同
+        let region = exfat_boot_region(&ExfatBoot {
+            partition_offset: 0,
+            volume_length: EXFAT_TOTAL_SECTORS as u64,
+            fat_offset: EXFAT_FAT_OFFSET as u32,
+            fat_length: self.fat_length as u32,
+            heap_offset: (self.heap_offset / SECTOR) as u32,
+            cluster_count: self.cluster_count,
+            root_cluster: 4,
+            serial: 0x1234_5678,
+            sector_shift: 9,
+            cluster_shift: EXFAT_SPC_SHIFT as u8,
+        });
         self.image[..12 * SECTOR].copy_from_slice(&region);
         self.image[12 * SECTOR..24 * SECTOR].copy_from_slice(&region);
 

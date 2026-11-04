@@ -142,7 +142,8 @@ export interface FilePreview {
 }
 
 /** 打开卷时用哪一份引导扇区 */
-export type BootCopy = 'primary' | 'backup'
+/** 打开卷时用哪一份引导扇区；rebuilt 是主备都坏了时按分区里的结构推算出的（只在内存里换上，不写盘） */
+export type BootCopy = 'primary' | 'backup' | 'rebuilt'
 
 /** 引导扇区诊断的结论 */
 export type BootVerdict =
@@ -701,7 +702,16 @@ export function diagnoseBoot(target: JobTarget): Promise<BootDiagnosis> {
 }
 
 /** 修复引导扇区的方向：用备份覆盖坏了的主引导扇区，或用主引导扇区重写坏了的备份 */
-export type BootFix = 'primaryFromBackup' | 'backupFromPrimary'
+/** rebuild：主备都坏了时按分区里的结构推算出引导扇区，主引导扇区与备份都写（卷序列号换成新的） */
+export type BootFix = 'primaryFromBackup' | 'backupFromPrimary' | 'rebuild'
+
+/** 重建出的引导扇区：推算出的各项（规范字段名，按 bootField.* 显示）、卷标、按它打开后根目录的前几项与总数 */
+export interface RebuiltBoot {
+  fields: { field: string; value: number }[]
+  label: string | null
+  root: string[]
+  rootCount: number
+}
 
 /** 执行写入计划的步骤，失败时停在其中一步 */
 export type WriteStep = 'validate' | 'identity' | 'verify' | 'write' | 'flush' | 'readBack'
@@ -712,7 +722,7 @@ export interface WriteRange {
   length: number
 }
 
-/** 修复引导扇区的细节：from、to 是源上的字节偏移，length 是复制的字节数 */
+/** 修复引导扇区的细节：from、to 是源上的字节偏移，length 是复制的字节数（重建时是第一段的长度） */
 export interface BootSectorDetail {
   partition: number
   partitionOffset: number
@@ -722,6 +732,7 @@ export interface BootSectorDetail {
   from: number
   to: number
   length: number
+  rebuilt: RebuiltBoot | null
 }
 
 /** 怎么改分区表：把搜索找到的丢失分区写回去，或把类型与文件系统不符的分区改成对的类型 */

@@ -5,8 +5,8 @@ use yisi_fs::FsKind;
 use yisi_fs::boot::{exfat_boot_checksum, exfat_stored_checksum};
 use yisi_fs::bpb::{self, ExfatBpb as Geometry, Problem};
 use yisi_fs::format::{
-    EXFAT_IN_USE, EXFAT_TYPE_BITMAP, EXFAT_TYPE_FILE, EXFAT_TYPE_NAME, EXFAT_TYPE_STREAM, ExfatSet,
-    SetProblem, exfat_entry_set,
+    EXFAT_IN_USE, EXFAT_TYPE_BITMAP, EXFAT_TYPE_FILE, EXFAT_TYPE_NAME, EXFAT_TYPE_STREAM,
+    EXFAT_TYPE_UPCASE, ExfatSet, SetProblem, exfat_entry_set, exfat_table_checksum,
 };
 use yisi_part::bytes::{le32, le64};
 
@@ -18,7 +18,6 @@ use crate::check::table::{FatTable, Owners, ROOT, Width};
 use crate::check::{CheckItem, Ctx, Stage, Summary, check_backup};
 
 const ENTRY: usize = 32;
-const TYPE_UPCASE: u8 = 0x82;
 const ATTR_DIRECTORY: u16 = 0x10;
 /// VolumeFlags：第 1 位未正常卸下，第 2 位出过介质故障（第 0 位用哪份 FAT 见 `ExfatBpb::use_second_fat`）。
 const FLAG_DIRTY: u16 = 0x02;
@@ -232,7 +231,7 @@ impl ExfatChecker {
             match raw[0] {
                 0 => break,
                 EXFAT_TYPE_BITMAP if bitmap_entry.is_none() => bitmap_entry = Some(*raw),
-                TYPE_UPCASE if upcase_entry.is_none() => upcase_entry = Some(*raw),
+                EXFAT_TYPE_UPCASE if upcase_entry.is_none() => upcase_entry = Some(*raw),
                 _ => {}
             }
         }
@@ -331,9 +330,7 @@ impl ExfatChecker {
             return Some(());
         }
         bytes.truncate(wanted as usize);
-        let computed = bytes.iter().fold(0u32, |sum, &byte| {
-            sum.rotate_right(1).wrapping_add(u32::from(byte))
-        });
+        let computed = exfat_table_checksum(&bytes);
         if computed != recorded {
             ctx.issues.push(
                 Issue::new(IssueKind::UpcaseChecksum)
