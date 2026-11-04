@@ -266,7 +266,7 @@ impl BadMap {
     /// 写成文本。
     pub fn to_text(&self) -> String {
         let mut text = String::new();
-        text.push_str("# Yisi-Disk 坏区图：每行一个区段「起始偏移 长度 状态」，单位是字节\n");
+        text.push_str("# yisi-磁盘工具 坏区图：每行一个区段「起始偏移 长度 状态」，单位是字节\n");
         text.push_str("# 状态：untried 未读、done 已读、trim 待修边、scrape 待细读、bad 读不出（镜像里是 0）\n");
         let header = &self.header;
         let _ = writeln!(text, "version {VERSION}");

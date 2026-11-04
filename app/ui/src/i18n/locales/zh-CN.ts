@@ -1,6 +1,6 @@
 export default {
   app: {
-    name: 'Yisi-Disk',
+    name: 'yisi-磁盘工具',
     subtitle: '磁盘数据恢复',
   },
   locale: {
@@ -183,9 +183,9 @@ export default {
     },
   },
   about: {
-    title: '关于 Yisi-Disk',
+    title: '关于 yisi-磁盘工具',
     intro:
-      'Yisi-Disk 是磁盘数据恢复工具：找回删除的文件、按文件类型深度恢复、找回丢失的分区、修复打不开的分区、检查文件系统、检测坏道、制作能识别坏区的磁盘镜像。扫描、浏览和制作镜像都只读源盘，找回的文件和镜像一律保存到另一块盘上。',
+      'yisi-磁盘工具 是磁盘数据恢复工具：找回删除的文件、按文件类型深度恢复、找回丢失的分区、修复打不开的分区、检查文件系统、检测坏道、制作能识别坏区的磁盘镜像。扫描、浏览和制作镜像都只读源盘，找回的文件和镜像一律保存到另一块盘上。',
     version: '程序版本',
     engine: '恢复引擎',
     checking: '正在检查…',
@@ -1145,7 +1145,7 @@ export default {
       button: '导出问题清单…',
       title: '导出问题清单',
       fileType: '文本文件',
-      heading: 'Yisi-Disk 文件系统检查报告',
+      heading: 'yisi-磁盘工具 文件系统检查报告',
       saved: '问题清单已保存到 {path}',
     },
     issue: {

@@ -1,4 +1,4 @@
-# Yisi-Disk
+# yisi-磁盘工具
 
 带图形界面的磁盘数据恢复工具：找回删除的文件、按文件类型深度恢复、找回丢失的分区、制作能识别坏区的磁盘镜像。扫描、浏览和制作镜像都只读源盘，找回的文件和镜像一律保存到另一块盘上。
 
@@ -20,9 +20,11 @@
 
 ## 下载与运行
 
-1. 打开 [最新版本](https://github.com/yisi-code/Yisi-Disk/releases/latest)，下载 `Yisi-Disk-<版本>-windows-x64.zip`。
-2. 解压到任意位置（不要放在要恢复数据的那块盘上），得到 `Yisi-Disk-<版本>-windows-x64` 文件夹，双击里面的 `Yisi-Disk.exe` 运行。
+1. 打开 [最新版本](https://github.com/yisi-code/Yisi-Disk/releases/latest)，下载 `yisi-磁盘工具-<版本>-windows-x64.zip`。
+2. 解压到任意位置（不要放在要恢复数据的那块盘上），得到 `yisi-磁盘工具-<版本>-windows-x64` 文件夹，双击里面的 `yisi-磁盘工具.exe` 运行。
 3. 文件夹里的 `yisi-engine.exe`、`yisi-broker.exe` 由主程序按需启动，三个程序要放在一起。
+
+v0.1.1 及更早的安装包仍是改名前的名字（`Yisi-Disk-<版本>-windows-x64`、`Yisi-Disk.exe`）；从下一版起统一用上面的名字。
 
 运行要求：
 
@@ -65,7 +67,7 @@ pnpm tauri dev
 pnpm tauri build --no-bundle
 ```
 
-产物在仓库根目录的 `target/release/` 下：`yisi-app.exe` 是主程序（发布时改名为 `Yisi-Disk.exe`），`yisi-engine.exe`、`yisi-broker.exe` 要和它放在同一目录。
+产物在仓库根目录的 `target/release/` 下：`yisi-app.exe` 是主程序（发布时改名为 `yisi-磁盘工具.exe`），`yisi-engine.exe`、`yisi-broker.exe` 要和它放在同一目录。
 
 ### 检查与测试
 
@@ -86,7 +88,7 @@ pnpm typecheck
 ## 目录结构
 
 ```
-Yisi-Disk/
+yisi-磁盘工具/
 ├─ crates/          Rust 引擎各模块（块设备、分区表、文件系统、格式插件、深度恢复、修复、进程间通信）
 ├─ app/
 │  ├─ src-tauri/    桌面宿主（Tauri 2）
