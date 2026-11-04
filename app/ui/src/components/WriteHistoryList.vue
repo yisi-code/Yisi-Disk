@@ -5,17 +5,18 @@ import type { WriteRecord } from '../services/host'
 import { formatDateTime } from '../utils/format'
 
 /**
- * 写盘记录：什么时候做了什么、结果怎样、备份在哪；写下去过内容、还没回滚的修复可以「回滚…」（同样要确认）。
- * 记录最新的在前，回滚本身也是一条记录
+ * 写盘记录：什么时候做了什么、写到哪块盘、结果怎样、备份在哪；写下去过内容、还没回滚的修复可以「回滚…」（同样要确认）。
+ * 记录最新的在前，回滚本身也是一条记录。记录由宿主按认盘标识筛好；这块盘查不到序列号时（indistinct）在上面说明
  */
 const props = defineProps<{
   records: WriteRecord[]
   disabled: boolean
+  indistinct: boolean
 }>()
 const emit = defineEmits<{ rollback: [record: WriteRecord] }>()
 
 const { t } = useI18n()
-const { writeActionText, writeOutcomeText } = useWritePlanText()
+const { writeActionText, writeOutcomeText, writeTargetText } = useWritePlanText()
 
 function isRolledBack(record: WriteRecord): boolean {
   return props.records.some((other) => other.rollbackOf === record.planId && other.outcome.done)
@@ -28,11 +29,15 @@ function canRollback(record: WriteRecord): boolean {
 </script>
 
 <template>
+  <p v-if="indistinct" class="wizard__hint wizard__hint--warning">{{ t('writePlan.history.indistinct') }}</p>
   <ul class="record-list">
     <li v-for="record in records" :key="record.planId" class="record-list__item">
       <div class="record-list__text">
         <span class="record-list__title">{{ writeActionText(record) }}</span>
         <span class="wizard__note">{{ formatDateTime(new Date(record.executedAtMs)) }}</span>
+        <span class="wizard__note wizard__path-text">
+          {{ t('writePlan.history.target', { target: writeTargetText(record) }) }}
+        </span>
         <span :class="record.outcome.done ? 'wizard__note' : 'wizard__hint wizard__hint--warning'">
           {{ writeOutcomeText(record) }}
         </span>

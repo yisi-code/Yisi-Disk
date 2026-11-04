@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, shallowRef } from 'vue'
+import { computed, onMounted, ref, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import PartitionFiles from './PartitionFiles.vue'
 import SourcePicker from './SourcePicker.vue'
@@ -96,10 +96,8 @@ const isConfirming = computed(() => step.value === 'result' && !isBrowsing.value
 /** 镜像文件与整块磁盘可以修（Windows 所在的盘由宿主拒绝）；卷上的偏移不是盘上的偏移，不修 */
 const canWrite = computed(() => diagnosedTarget.value?.kind === 'image' || diagnosedTarget.value?.kind === 'disk')
 
-/** 诊断的这个源的写盘记录 */
-const targetRecords = computed(() =>
-  writePlan.records.value.filter((record) => sameTarget(record.target, diagnosedTarget.value)),
-)
+/** 诊断的这个源的写盘记录（宿主按认盘标识筛好） */
+const targetRecords = computed(() => writePlan.records.value)
 
 /** 刚执行的那次写入（同一个源时才显示） */
 const lastRecord = computed(() => {
@@ -115,9 +113,17 @@ const diagnosingText = computed(() =>
   isDeviceKind(diagnosedTarget.value?.kind) ? t('repair.diagnose.runningDisk') : t('repair.diagnose.running'),
 )
 
+// 换了诊断的源就读它的写盘记录
+watch(
+  diagnosedTarget,
+  (source) => {
+    void writePlan.loadRecords(source)
+  },
+  { immediate: true },
+)
+
 onMounted(() => {
   titleElement.value?.focus()
-  void writePlan.loadRecords()
 })
 
 async function handleExit() {
@@ -223,8 +229,12 @@ async function proposeRollback(record: WriteRecord) {
   if (isBusy.value) {
     return
   }
+  const source = diagnosedTarget.value
+  if (source === null) {
+    return
+  }
   await closeBrowse()
-  await writePlan.prepareRollback(record.planId)
+  await writePlan.prepareRollback(record.planId, source)
 }
 
 /** 确认后写入；写下去过内容（成功或写了一部分）就重新诊断，结果页显示写后的结论 */
@@ -668,7 +678,12 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
           <h3 id="repair-write-history" class="wizard__section-title">
             {{ t('writePlan.history.title') }}
           </h3>
-          <WriteHistoryList :records="targetRecords" :disabled="isBusy" @rollback="proposeRollback" />
+          <WriteHistoryList
+            :records="targetRecords"
+            :indistinct="writePlan.indistinct.value"
+            :disabled="isBusy"
+            @rollback="proposeRollback"
+          />
         </section>
       </div>
     </form>

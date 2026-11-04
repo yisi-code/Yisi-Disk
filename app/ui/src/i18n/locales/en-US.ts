@@ -1125,8 +1125,17 @@ const enUS: typeof zhCN = {
       flush: 'saving to disk failed',
       readBack: 'the data read back did not match',
     },
+    device: {
+      named: '{name} ({detail})',
+      withSerial: '{model}, {size}, serial number {serial}',
+      noSerial: '{model}, {size}, no serial number',
+      unknownModel: 'unknown model',
+    },
     history: {
       title: 'Write history',
+      target: 'Written to: {target}',
+      indistinct:
+        'This disk reports no serial number: records of another disk with the same vendor, model and size (for example several virtual disks copied from one image) are listed here too and cannot be told apart. Before a roll-back the content on the disk is checked byte by byte, and nothing is written if it differs.',
       backup: 'Backup: {path}',
       rollback: 'Roll back…',
       rolledBack: 'Rolled back',
@@ -1635,6 +1644,7 @@ const enUS: typeof zhCN = {
     writeRecordNotFound: 'This entry is not in the write history',
     rollbackNothing: 'Nothing was written that time, so there is nothing to roll back',
     rollbackDone: 'This write has already been rolled back',
+    rollbackOtherDevice: 'This record belongs to another disk (model, serial number or size differ), so it cannot be rolled back on this disk',
   },
 }
 

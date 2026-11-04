@@ -6,7 +6,7 @@ import { formatBytes } from '../utils/format'
 /** 写入计划与写盘记录的文字：做了什么、结果怎样。确认页、写盘记录、执行后的提示共用 */
 export function useWritePlanText() {
   const { t, te } = useI18n()
-  const { filesystemName } = usePartitionText()
+  const { filesystemName, sourceName } = usePartitionText()
 
   /** 「分区 N：用备份修复主引导扇区」「把找到的分区写回分区表…」；回滚时套上「回滚（…）」 */
   function writeActionText(summary: PlanSummary): string {
@@ -48,6 +48,24 @@ export function useWritePlanText() {
       : table.typeId
   }
 
+  /**
+   * 写到哪里：物理盘是「磁盘 3（型号，容量，序列号 …）」，查不到序列号时写明；编号是写的时候的。镜像文件是它的路径
+   */
+  function writeTargetText(summary: PlanSummary): string {
+    const name = sourceName(summary.target)
+    const device = summary.device
+    if (summary.target.kind !== 'disk' || device === null) {
+      return name
+    }
+    const model = device.model === '' ? t('writePlan.device.unknownModel') : device.model
+    const size = formatBytes(device.size)
+    const detail =
+      device.serial === ''
+        ? t('writePlan.device.noSerial', { model, size })
+        : t('writePlan.device.withSerial', { model, size, serial: device.serial })
+    return t('writePlan.device.named', { name, detail })
+  }
+
   /** 写成了、一个字节没写、写到一半三种说法；失败时说明停在哪一步 */
   function writeOutcomeText(record: WriteRecord): string {
     const { outcome } = record
@@ -60,5 +78,5 @@ export function useWritePlanText() {
       : t('writePlan.outcome.partial', { step, written: outcome.written })
   }
 
-  return { writeActionText, writeOutcomeText, tableTypeText }
+  return { writeActionText, writeOutcomeText, writeTargetText, tableTypeText }
 }

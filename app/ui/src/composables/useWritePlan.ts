@@ -30,15 +30,31 @@ export function useWritePlan() {
   const plan = shallowRef<PlanView | null>(null)
   /** 最近一次执行的结果 */
   const lastRecord = shallowRef<WriteRecord | null>(null)
+  /** 当前查看的源上的写盘记录（宿主按认盘标识筛好的），以及这块盘是不是查不到序列号 */
   const records = ref<WriteRecord[]>([])
+  const indistinct = ref(false)
+  /** 写盘记录是哪个源的：执行之后按它重新读 */
+  let historyTarget: JobTarget | null = null
   const isPreparing = ref(false)
   const isExecuting = ref(false)
   /** 生成、执行、放弃计划出的错 */
   const failure = ref<HostError | null>(null)
 
-  async function loadRecords() {
+  /** 读这个源的写盘记录；没有源时清空 */
+  async function loadRecords(target: JobTarget | null = historyTarget) {
+    historyTarget = target
+    if (target === null) {
+      records.value = []
+      indistinct.value = false
+      return
+    }
     try {
-      records.value = await listWriteHistory()
+      const history = await listWriteHistory(target)
+      // 读的过程中换了源：这份结果作废
+      if (historyTarget === target) {
+        records.value = history.records
+        indistinct.value = history.indistinct
+      }
     } catch (error) {
       failure.value = toHostError(error)
     }
@@ -83,8 +99,9 @@ export function useWritePlan() {
     return prepare(() => planFsFix(target, partition, fixes, badClusters))
   }
 
-  function prepareRollback(planId: string): Promise<boolean> {
-    return prepare(() => planRollback(planId))
+  /** 回滚写盘记录里的一次写入；target 是现在查看的源（宿主核对它就是当时写的那块盘） */
+  function prepareRollback(planId: string, target: JobTarget): Promise<boolean> {
+    return prepare(() => planRollback(planId, target))
   }
 
   /** 执行等确认的计划。写之前被拒绝（镜像或卷正被占用等）时宿主留着计划，这里也留着，处理之后可以再试 */
@@ -130,6 +147,7 @@ export function useWritePlan() {
     plan,
     lastRecord,
     records,
+    indistinct,
     isPreparing,
     isExecuting,
     failure,

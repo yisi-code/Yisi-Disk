@@ -40,6 +40,13 @@ fn summary(image: &Path) -> PlanSummary {
         mft: None,
         fs_fix: None,
         rollback_of: None,
+        device: None,
+    }
+}
+
+fn image_target(image: &Path) -> Target {
+    Target::Image {
+        path: image.display().to_string(),
     }
 }
 
@@ -75,7 +82,9 @@ fn executes_records_and_rolls_back() {
         "planNotFound"
     );
 
-    let rollback = plans.rollback(&view.plan_id).unwrap();
+    let rollback = plans
+        .rollback(&view.plan_id, &image_target(&image))
+        .unwrap();
     assert_eq!(rollback.summary.kind, PlanKind::Rollback);
     assert_eq!(
         rollback.summary.rollback_of.as_deref(),
@@ -88,7 +97,10 @@ fn executes_records_and_rolls_back() {
     assert!(std::fs::read(&image).unwrap().iter().all(|&byte| byte == 0));
     assert_eq!(plans.records()[0].plan_id, rollback.plan_id);
     assert_eq!(
-        plans.rollback(&view.plan_id).unwrap_err().code,
+        plans
+            .rollback(&view.plan_id, &image_target(&image))
+            .unwrap_err()
+            .code,
         "rollbackDone"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -110,7 +122,10 @@ fn refuses_a_changed_image_and_keeps_it_intact() {
     assert_eq!(std::fs::read(&image).unwrap(), bytes);
     // 一段都没写，没什么可回滚的
     assert_eq!(
-        plans.rollback(&view.plan_id).unwrap_err().code,
+        plans
+            .rollback(&view.plan_id, &image_target(&image))
+            .unwrap_err()
+            .code,
         "rollbackNothing"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -176,7 +191,10 @@ fn volumes_and_the_system_disk_are_not_written() {
         writable(&image_target, &data).unwrap(),
         Writable {
             identity: image_identity(&std::fs::canonicalize(&image).unwrap()),
+            size: std::fs::metadata(&image).unwrap().len(),
             sector_size: IMAGE_SECTOR_SIZE,
+            model: String::new(),
+            serial: String::new(),
         }
     );
     #[cfg(windows)]
@@ -209,7 +227,10 @@ fn boot_sector_plans_must_match_the_request() {
     };
     let expected = Writable {
         identity: image_identity(&real),
+        size: std::fs::metadata(&real).map_or(0, |meta| meta.len()),
         sector_size: IMAGE_SECTOR_SIZE,
+        model: String::new(),
+        serial: String::new(),
     };
     assert!(check_boot_sector_plan(&planned(), &expected).is_ok());
 
@@ -280,7 +301,10 @@ fn partition_table_plans_only_touch_the_table_areas() {
     let real = std::fs::canonicalize(&image).unwrap();
     let expected = Writable {
         identity: image_identity(&real),
+        size: std::fs::metadata(&real).map_or(0, |meta| meta.len()),
         sector_size: IMAGE_SECTOR_SIZE,
+        model: String::new(),
+        serial: String::new(),
     };
     let planned = |offset: u64| {
         let mut plan = plan_for(&image);
@@ -319,7 +343,10 @@ fn fs_fix_plans_stay_inside_the_partition() {
     let real = std::fs::canonicalize(&image).unwrap();
     let expected = Writable {
         identity: image_identity(&real),
+        size: std::fs::metadata(&real).map_or(0, |meta| meta.len()),
         sector_size: IMAGE_SECTOR_SIZE,
+        model: String::new(),
+        serial: String::new(),
     };
     let partition = PartitionRef {
         number: 1,
@@ -356,5 +383,43 @@ fn fs_fix_plans_stay_inside_the_partition() {
             "{name}"
         );
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn history_follows_the_device_not_the_path() {
+    let (plans, dir, image) = setup("history");
+    let view = plans.propose(plan_for(&image), summary(&image)).unwrap();
+    // 记下了写到哪个镜像：规范路径、长度、扇区大小
+    let device = view.summary.device.clone().unwrap();
+    assert_eq!((device.size, device.sector_size), (8192, IMAGE_SECTOR_SIZE));
+    let record = plans
+        .execute(&BrokerSession::default(), &view.plan_id)
+        .unwrap();
+    let history = plans.history(&image_target(&image));
+    assert_eq!(history.records, vec![record]);
+    assert!(!history.indistinct);
+
+    // 同一个路径上换成了另一个（长度不同的）文件：以前的记录不算它的，也不能拿它回滚
+    std::fs::write(&image, vec![0u8; 16384]).unwrap();
+    assert!(plans.history(&image_target(&image)).records.is_empty());
+    assert_eq!(
+        plans
+            .rollback(&view.plan_id, &image_target(&image))
+            .unwrap_err()
+            .code,
+        "rollbackOtherDevice"
+    );
+    // 另一个路径上的镜像也不算
+    let other = dir.join("other.img");
+    std::fs::write(&other, vec![0u8; 8192]).unwrap();
+    assert!(plans.history(&image_target(&other)).records.is_empty());
+    // 文件不在了：没有记录
+    assert!(
+        plans
+            .history(&image_target(&dir.join("gone.img")))
+            .records
+            .is_empty()
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

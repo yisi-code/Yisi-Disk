@@ -257,11 +257,12 @@ async function proposeWriteBack() {
 
 async function proposeRollback() {
   const record = lastRecord.value
-  if (record === null || isPartitionBusy.value) {
+  const source = search.target.value
+  if (record === null || source === null || isPartitionBusy.value) {
     return
   }
   await closeBrowse()
-  await writePlan.prepareRollback(record.planId)
+  await writePlan.prepareRollback(record.planId, source)
   if (writePlan.plan.value === null) {
     await reopenBrowse()
   }

@@ -27,7 +27,7 @@ use crate::engines::{
     Engines, HostError, ImagePlan, Target, refuse_executable, save_fs_check_report,
 };
 use crate::image_history::{ImageHistory, ImageRecord};
-use crate::write_plans::{PlanView, WritePlans, WriteRecord};
+use crate::write_plans::{PlanView, WriteHistory, WritePlans, WriteRecord};
 
 /// 程序文件夹里建不了 `data` 时的提示（界面还没加载，中英文一起给出）。
 const DATA_DIR_UNWRITABLE: &str = "程序要在自己所在的文件夹里建 data 文件夹，存放做过的镜像、写盘记录与备份、界面缓存，但建不出来。\
@@ -322,19 +322,20 @@ fn write_plan_discard(plans: State<'_, WritePlans>, plan_id: String) -> Result<(
     plans.discard(&plan_id)
 }
 
-/// 为写盘记录里的一次写入生成回滚计划，交给界面确认。
+/// 为写盘记录里的一次写入生成回滚计划，交给界面确认。`target` 是现在查看的源，必须就是当时写的那块盘。
 #[tauri::command(async)]
 fn write_plan_rollback(
     plans: State<'_, WritePlans>,
     plan_id: String,
+    target: Target,
 ) -> Result<PlanView, HostError> {
-    plans.rollback(&plan_id)
+    plans.rollback(&plan_id, &target)
 }
 
-/// 写盘记录，最新的在前。
+/// 这个源（现在这块盘、这个镜像文件）上的写盘记录，最新的在前；按认盘标识认，不按编号认。
 #[tauri::command(async)]
-fn write_history_list(plans: State<'_, WritePlans>) -> Vec<WriteRecord> {
-    plans.records()
+fn write_history_list(plans: State<'_, WritePlans>, target: Target) -> WriteHistory {
+    plans.history(&target)
 }
 
 #[tauri::command(async)]

@@ -135,6 +135,41 @@ pub struct PlanSummary {
     pub fs_fix: Option<FsFixDetail>,
     /// 回滚的是哪一次写入（计划 ID）。
     pub rollback_of: Option<String>,
+    /// 写到哪块盘（生成计划时由 [`WritePlans::propose`] 填上）。
+    #[serde(default)]
+    pub device: Option<PlanDevice>,
+}
+
+/// 写到哪块盘：与计划里的设备相同（认盘标识、容量、扇区大小），另记给人看的型号与序列号。写盘记录按它认源：
+/// 同一个编号上换了一块盘，以前的记录不会算到它头上；盘重新插拔后编号变了，记录跟着盘走。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanDevice {
+    pub identity: String,
+    pub size: u64,
+    pub sector_size: u32,
+    /// 磁盘的厂商与型号；镜像文件为空。
+    pub model: String,
+    /// 磁盘的序列号；镜像文件、查不到序列号的盘为空。
+    pub serial: String,
+}
+
+impl PlanDevice {
+    /// 是同一块盘（或同一个镜像文件）：认盘标识、容量、扇区大小都相同。
+    fn same_as(&self, other: &PlanDevice) -> bool {
+        self.identity == other.identity
+            && self.size == other.size
+            && self.sector_size == other.sector_size
+    }
+}
+
+/// 一个源的写盘记录：现在这块盘（这个镜像文件）上做过的写入，最新的在前。`indistinct` 表示这块盘查不到序列号，
+/// 同厂商、同型号、同容量的另一块盘的记录也会列在这里（执行回滚前会逐字节核对写前内容，对不上不写）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteHistory {
+    pub records: Vec<WriteRecord>,
+    pub indistinct: bool,
 }
 
 /// 等界面确认的计划。
@@ -217,6 +252,7 @@ impl WritePlans {
                 mft: None,
                 fs_fix: None,
                 rollback_of: None,
+                device: None,
             },
         )
     }
@@ -253,6 +289,7 @@ impl WritePlans {
                 mft: None,
                 fs_fix: None,
                 rollback_of: None,
+                device: None,
             },
         )
     }
@@ -289,6 +326,7 @@ impl WritePlans {
                 mft: Some(detail),
                 fs_fix: None,
                 rollback_of: None,
+                device: None,
             },
         )
     }
@@ -325,13 +363,15 @@ impl WritePlans {
                 mft: None,
                 fs_fix: Some(detail),
                 rollback_of: None,
+                device: None,
             },
         )
     }
 
-    /// 回滚一次写入：读回它的备份、反过来生成计划，存好新的备份后交给界面确认。
+    /// 回滚一次写入：读回它的备份、反过来生成计划，存好新的备份后交给界面确认。`target` 是界面上现在查看的源：
+    /// 它必须就是当时写的那块盘（认盘标识、容量、扇区大小相同；盘重新插拔后编号变了也行），否则拒绝。
     /// 失败的那次只回滚已经写下去的段；盘上的内容必须仍是写后的，执行时才会写。
-    pub fn rollback(&self, plan_id: &str) -> Result<PlanView, HostError> {
+    pub fn rollback(&self, plan_id: &str, target: &Target) -> Result<PlanView, HostError> {
         let records = self.records();
         let record = records
             .iter()
@@ -346,7 +386,15 @@ impl WritePlans {
         if rolled_back {
             return Err(HostError::new("rollbackDone", plan_id));
         }
-        writable(&record.summary.target, &self.data_dir)?;
+        let current = writable(target, &self.data_dir)?.device();
+        if !record
+            .summary
+            .device
+            .as_ref()
+            .is_some_and(|device| device.same_as(&current))
+        {
+            return Err(HostError::new("rollbackOtherDevice", plan_id));
+        }
         let backup = SavedBackup::load(Path::new(&record.backup_path))
             .map_err(|error| HostError::new("backupUnreadable", yisi_rpc::error_chain(&error)))?;
         let mut inverse = backup.plan().inverse();
@@ -355,13 +403,14 @@ impl WritePlans {
             inverse,
             PlanSummary {
                 kind: PlanKind::Rollback,
-                target: record.summary.target.clone(),
+                target: target.clone(),
                 writes: Vec::new(),
                 boot_sector: record.summary.boot_sector.clone(),
                 partition_table: record.summary.partition_table.clone(),
                 mft: record.summary.mft.clone(),
                 fs_fix: record.summary.fs_fix.clone(),
                 rollback_of: Some(record.plan_id.clone()),
+                device: None,
             },
         )
     }
@@ -411,9 +460,49 @@ impl WritePlans {
         self.load()
     }
 
+    /// `target` 现在这块盘（这个镜像文件）上的写盘记录：按认盘标识、容量、扇区大小认，不按编号认。
+    /// 查不到这个源（拔掉了、文件不在了）时为空。
+    pub fn history(&self, target: &Target) -> WriteHistory {
+        let Ok(current) = device_of(target).map(|found| found.device()) else {
+            return WriteHistory {
+                records: Vec::new(),
+                indistinct: false,
+            };
+        };
+        let records = self
+            .records()
+            .into_iter()
+            .filter(|record| {
+                record
+                    .summary
+                    .device
+                    .as_ref()
+                    .is_some_and(|device| device.same_as(&current))
+            })
+            .collect();
+        WriteHistory {
+            records,
+            indistinct: matches!(target, Target::Disk { .. }) && current.serial.is_empty(),
+        }
+    }
+
     /// 存好备份，登记为等确认的计划。
     fn propose(&self, plan: WritePlan, mut summary: PlanSummary) -> Result<PlanView, HostError> {
         let dir = &self.data_dir;
+        // 型号与序列号按现在这个源查（计划的认盘标识已与它核对过）
+        let described = device_of(&summary.target)
+            .ok()
+            .filter(|found| found.identity == plan.device.identity);
+        summary.device = Some(PlanDevice {
+            identity: plan.device.identity.clone(),
+            size: plan.device.size,
+            sector_size: plan.device.sector_size,
+            model: described
+                .as_ref()
+                .map(|found| found.model.clone())
+                .unwrap_or_default(),
+            serial: described.map(|found| found.serial).unwrap_or_default(),
+        });
         summary.writes = plan
             .writes
             .iter()
@@ -463,22 +552,75 @@ const ERROR_SHARING_VIOLATION: i32 = 32;
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Writable {
     identity: String,
+    size: u64,
     sector_size: u32,
+    model: String,
+    serial: String,
+}
+
+impl Writable {
+    fn device(&self) -> PlanDevice {
+        PlanDevice {
+            identity: self.identity.clone(),
+            size: self.size,
+            sector_size: self.sector_size,
+            model: self.model.clone(),
+            serial: self.serial.clone(),
+        }
+    }
+}
+
+/// 这个源现在是哪块盘：镜像文件按规范路径与长度，物理盘按编号查到的厂商、型号、序列号与容量。不做能不能写的核对。
+fn device_of(target: &Target) -> Result<Writable, HostError> {
+    match target {
+        Target::Image { path } => {
+            let real = std::fs::canonicalize(path).map_err(|error| {
+                HostError::new("writeTargetUnavailable", format!("{path}：{error}"))
+            })?;
+            let size = std::fs::metadata(&real)
+                .map_err(|error| {
+                    HostError::new("writeTargetUnavailable", format!("{path}：{error}"))
+                })?
+                .len();
+            Ok(Writable {
+                identity: image_identity(&real),
+                size,
+                sector_size: IMAGE_SECTOR_SIZE,
+                model: String::new(),
+                serial: String::new(),
+            })
+        }
+        #[cfg(windows)]
+        Target::Disk { disk_number } => {
+            let disk = yisi_io::list_disks()
+                .into_iter()
+                .find(|disk| disk.number == *disk_number)
+                .ok_or_else(|| {
+                    HostError::new("invalidDisk", format!("找不到磁盘 {disk_number}"))
+                })?;
+            let model = format!("{} {}", disk.vendor, disk.model)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            Ok(Writable {
+                identity: disk.identity(),
+                size: disk.size,
+                sector_size: disk.sector_size,
+                model,
+                serial: disk.serial.trim().to_owned(),
+            })
+        }
+        #[cfg(not(windows))]
+        Target::Disk { .. } => Err(HostError::new("writeTargetUnsupported", "")),
+        Target::Volume { .. } => Err(HostError::new("writeTargetUnsupported", "")),
+    }
 }
 
 /// 镜像文件与整块物理盘可以写，卷不行（卷上的偏移不是盘上的偏移）。物理盘：Windows 所在的盘不写，
 /// 写前备份所在的 `data` 也不能在这块盘上（盘写坏了备份要还在）。
 fn writable(target: &Target, data_dir: &Path) -> Result<Writable, HostError> {
     match target {
-        Target::Image { path } => {
-            let real = std::fs::canonicalize(path).map_err(|error| {
-                HostError::new("writeTargetUnavailable", format!("{path}：{error}"))
-            })?;
-            Ok(Writable {
-                identity: image_identity(&real),
-                sector_size: IMAGE_SECTOR_SIZE,
-            })
-        }
+        Target::Image { .. } => device_of(target),
         #[cfg(windows)]
         Target::Disk { disk_number } => writable_disk(*disk_number, data_dir),
         #[cfg(not(windows))]
@@ -502,13 +644,8 @@ fn writable_disk(number: u32, data_dir: &Path) -> Result<Writable, HostError> {
     }
     yisi_io::ensure_off_source(Ok(number), yisi_io::volume_disk_numbers(data_dir))
         .map_err(|error| HostError::new("backupOnTarget", yisi_rpc::error_chain(&error)))?;
-    let disk = yisi_io::list_disks()
-        .into_iter()
-        .find(|disk| disk.number == number)
-        .ok_or_else(|| HostError::new("invalidDisk", format!("找不到磁盘 {number}")))?;
-    Ok(Writable {
-        identity: disk.identity(),
-        sector_size: disk.sector_size,
+    device_of(&Target::Disk {
+        disk_number: number,
     })
 }
 
