@@ -14,8 +14,8 @@ use crate::check::disk::Span;
 use crate::check::issue::{Area, Issue, IssueKind};
 use crate::check::table::{FatTable, Link, Owners, ROOT};
 use crate::check::{
-    CheckItem, Ctx, EntryAt, EntryChange, EntryFix, EntryRef, FatCopies, FatLayout, Stage, Summary,
-    check_backup,
+    CheckItem, Ctx, EmptyDir, EntryAt, EntryChange, EntryFix, EntryRef, FatCopies, FatLayout,
+    Stage, Summary, check_backup,
 };
 
 const ENTRY: usize = 32;
@@ -511,12 +511,24 @@ impl FatChecker {
             });
             if directory {
                 self.volume.directories += 1;
-                if first == 0 {
+                let parent_cluster = match job.at {
+                    DirAt::Clusters(cluster) if job.id != ROOT => cluster,
+                    _ => 0,
+                };
+                if first == 0 || !self.volume.fat.is_valid(first) {
                     ctx.issues.push(
                         Issue::new(IssueKind::FirstClusterInvalid)
-                            .path(path)
-                            .actual(0),
+                            .path(path.as_str())
+                            .actual(u64::from(first)),
                     );
+                    // 原来的内容找不到了：改成空目录，名字留着
+                    if let Some(at) = at(index) {
+                        ctx.findings.empty_dirs.push(EmptyDir {
+                            path,
+                            at,
+                            parent: parent_cluster,
+                        });
+                    }
                 } else if job.depth + 1 > MAX_DEPTH {
                     ctx.issues.push(Issue::new(IssueKind::TooDeep).path(path));
                 } else {
@@ -524,10 +536,7 @@ impl FatChecker {
                         id,
                         path,
                         at: DirAt::Clusters(first),
-                        parent_cluster: match job.at {
-                            DirAt::Clusters(cluster) if job.id != ROOT => cluster,
-                            _ => 0,
-                        },
+                        parent_cluster,
                         depth: job.depth + 1,
                         entry,
                     });

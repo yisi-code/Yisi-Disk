@@ -1309,6 +1309,10 @@ pub enum FsFix {
     Entries,
     /// 读不出的空闲簇标成坏簇（[`PlanFsFixParams::bad_clusters`]）。
     BadClusters,
+    /// exFAT 大写表坏了或找不到：写回标准大写表。
+    Upcase,
+    /// exFAT 分配位图本身坏了：按目录树重建（要单独做）。
+    RebuildBitmap,
 }
 
 /// 一类修复改了多少：`items` 是文件数（链过长）或段数，`clusters` 是簇数（FSInfo 与卸下标志为 0）。

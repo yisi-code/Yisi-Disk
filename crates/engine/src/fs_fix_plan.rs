@@ -117,10 +117,12 @@ fn error(error: FsFixError) -> ErrorObject {
         | FsFixError::NotTracked
         | FsFixError::FatCopiesDiffer
         | FsFixError::FatCopiesAlone
+        | FsFixError::BitmapAlone
         | FsFixError::NothingToFix(_)
         | FsFixError::DirtyWithProblems => protocol::error_code::PLAN_NOT_APPLICABLE,
         FsFixError::TooLarge { .. }
         | FsFixError::NoFreeClusters
+        | FsFixError::NoRootSlot
         | FsFixError::Unreadable(_)
         | FsFixError::Rehearsal(_) => protocol::error_code::PLAN_UNAVAILABLE,
     };
@@ -140,6 +142,8 @@ fn to_repair(fix: FsFix) -> fs_fix::FsFix {
         FsFix::CrossLinks => fs_fix::FsFix::CrossLinks,
         FsFix::Entries => fs_fix::FsFix::Entries,
         FsFix::BadClusters => fs_fix::FsFix::BadClusters,
+        FsFix::Upcase => fs_fix::FsFix::Upcase,
+        FsFix::RebuildBitmap => fs_fix::FsFix::RebuildBitmap,
     }
 }
 
@@ -156,5 +160,7 @@ fn from_repair(fix: fs_fix::FsFix) -> FsFix {
         fs_fix::FsFix::CrossLinks => FsFix::CrossLinks,
         fs_fix::FsFix::Entries => FsFix::Entries,
         fs_fix::FsFix::BadClusters => FsFix::BadClusters,
+        fs_fix::FsFix::Upcase => FsFix::Upcase,
+        fs_fix::FsFix::RebuildBitmap => FsFix::RebuildBitmap,
     }
 }

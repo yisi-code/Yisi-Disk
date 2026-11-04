@@ -51,7 +51,19 @@ const freeScan = defineModel<FreeScanSummary | null>('freeScan', { default: null
 const ratings = defineModel<FatRating[] | null>('ratings', { default: null })
 
 /** 列出的次序；两份 FAT 的两个方向是一组单选 */
-const ORDER: FsFix[] = ['lost', 'bitmap', 'tooLong', 'chains', 'crossLinks', 'entries', 'fsInfo', 'badClusters', 'dirty']
+const ORDER: FsFix[] = [
+  'rebuildBitmap',
+  'lost',
+  'bitmap',
+  'tooLong',
+  'chains',
+  'crossLinks',
+  'entries',
+  'upcase',
+  'fsInfo',
+  'badClusters',
+  'dirty',
+]
 const FAT_SOURCES: FsFix[] = ['fatFromFirst', 'fatFromSecond']
 /** 每类修复对应检查里的哪几类问题（清除卸下标记前，看严重的问题是不是都勾上了） */
 const ISSUE_KINDS: Record<FsFix, string[]> = {
@@ -75,6 +87,8 @@ const ISSUE_KINDS: Record<FsFix, string[]> = {
     'sizeInvalid',
   ],
   badClusters: [],
+  upcase: ['upcaseChecksum', 'upcaseMissing'],
+  rebuildBitmap: ['bitmapInvalid'],
 }
 const FAT_FAMILY = ['fat12', 'fat16', 'fat32', 'exfat']
 
@@ -100,12 +114,16 @@ const isFat = computed(() => FAT_FAMILY.includes(props.report.filesystem))
 const repairOf = (fix: FsFix): FsFixCount | undefined => props.report.repairs.find((repair) => repair.fix === fix)
 /** 两份 FAT 不一致：只能先统一 */
 const unifying = computed(() => FAT_SOURCES.some((fix) => repairOf(fix)))
-/** 这个分区上能修的几类；坏簇不在检查结果里，FAT 家族都能先读一遍空闲簇 */
+/** 分配位图本身坏了：只能先重建（要单独做） */
+const rebuilding = computed(() => repairOf('rebuildBitmap') !== undefined)
+/** 这个分区上能修的几类；坏簇不在检查结果里，FAT 家族都能先读一遍空闲簇（位图坏了、两份 FAT 不一致时除外） */
 const available = computed(() => {
   if (!isFat.value) {
     return []
   }
-  return ORDER.filter((fix) => (fix === 'badClusters' ? !unifying.value : repairOf(fix) !== undefined))
+  return ORDER.filter((fix) =>
+    fix === 'badClusters' ? !unifying.value && !rebuilding.value : repairOf(fix) !== undefined,
+  )
 })
 /** 丢失簇存好了才能勾选释放；读出了读不出的空闲簇才能勾选标坏簇 */
 const lostReady = computed(() => saved.value !== null && saved.value.failed === 0)
@@ -368,6 +386,7 @@ function propose() {
       <span v-else-if="!canWrite" class="wizard__hint">{{ t('fsCheck.repair.volumeUnsupported') }}</span>
       <span v-else-if="dirtyBlocked" class="wizard__hint wizard__hint--warning">{{ t('fsCheck.fix.dirtyBlocked') }}</span>
       <span v-else-if="unifying" class="wizard__hint">{{ t('fsCheck.fix.fatCopies.alone') }}</span>
+      <span v-else-if="rebuilding" class="wizard__hint">{{ t('fsCheck.fix.rebuildBitmap.alone') }}</span>
     </div>
   </section>
 </template>
