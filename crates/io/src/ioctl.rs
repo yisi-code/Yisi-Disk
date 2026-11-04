@@ -1,5 +1,6 @@
 //! 同步 `DeviceIoControl` 的封装。输出一律按字节接收、再按字段偏移取值，不把驱动写入的内容直接当成结构体。
 
+use std::os::windows::io::{AsHandle, AsRawHandle};
 use std::{io, ptr};
 
 use windows_sys::Win32::Foundation::HANDLE;
@@ -44,6 +45,17 @@ pub(crate) fn ioctl(
         .ok()
         .filter(|&len| len <= output.len())
         .ok_or_else(|| invalid_data(format!("IOCTL 报告写入了 {returned} 字节，超过缓冲区")))
+}
+
+/// 对一个打开着的设备发出 IOCTL 或 FSCTL（句柄借自活着的对象，一定有效）。磁盘代理锁卷、卸卷、
+/// 通知系统重读分区表用它，不另写一份 `DeviceIoControl`。
+pub fn device_io_control(
+    device: &impl AsHandle,
+    code: u32,
+    input: &[u8],
+    output: &mut [u8],
+) -> io::Result<usize> {
+    ioctl(device.as_handle().as_raw_handle(), code, input, output)
 }
 
 /// 没有输入、要求驱动把 `out` 写满的 IOCTL。

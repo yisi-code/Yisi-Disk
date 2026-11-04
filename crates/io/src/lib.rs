@@ -28,7 +28,7 @@ mod windows_disk;
 
 pub use device::BlockDevice;
 #[cfg(windows)]
-pub use disk_list::{BusType, DiskInfo, PartitionStyle, list_disks};
+pub use disk_list::{BusType, DiskInfo, PartitionStyle, disk_identity, list_disks};
 pub use disk_path::{
     MAX_DISK_NUMBER, physical_drive_number, physical_drive_path, volume_letter, volume_path,
     volume_root,
@@ -38,6 +38,8 @@ pub use imaging::{
     BadMap, ImageStore, ImagingControl, ImagingOptions, ImagingOutcome, MapError, MapHeader,
     RecordedPartition, Round, Scope, Segment, SegmentState, run_imaging,
 };
+#[cfg(windows)]
+pub use ioctl::device_io_control;
 pub use metered::{MeteredDevice, ReadMeter, ReadStats, SLOW_READ};
 pub use plan::{
     DeviceIdentity, MAX_PLAN_BYTES, MAX_WRITES, Overlay, PlanError, SectorWrite, WritePlan,
@@ -49,7 +51,8 @@ pub use scan::{SCAN_BLOCK, ScanControl, scan_device};
 pub use sparse::{is_sparse, make_sparse};
 #[cfg(windows)]
 pub use volume::{
-    OnSource, ensure_off_source, ensure_off_volume, volume_disk_numbers, volume_guid,
+    DiskExtent, OnSource, VolumeOnDisk, ensure_off_source, ensure_off_volume, system_disks,
+    volume_disk_numbers, volume_guid, volumes_on_disk,
 };
 #[cfg(windows)]
 pub use volume_info::{MountedVolume, VolumeInfo, mounted_volumes, volume_info};

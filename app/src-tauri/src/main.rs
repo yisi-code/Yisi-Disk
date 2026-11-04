@@ -213,7 +213,8 @@ fn boot_diagnose(
     engines.diagnose_boot(&broker, target)
 }
 
-/// 生成修复引导扇区的写入计划：引擎重新诊断并预演，宿主存好备份后交给界面确认。只读，不写盘。目前只支持镜像文件。
+/// 生成修复引导扇区的写入计划：引擎重新诊断并预演，宿主存好备份后交给界面确认。只读，不写盘。
+/// 镜像文件与整块物理盘可以写（Windows 所在的盘不行），卷不行。
 #[tauri::command(async)]
 fn write_plan_boot_sector(
     engines: State<'_, Engines>,
@@ -226,13 +227,14 @@ fn write_plan_boot_sector(
     plans.plan_boot_sector(&engines, &broker, target, partition, fix)
 }
 
-/// 执行界面已确认的计划（只接受计划 ID，写的内容是宿主存着的那份），结果记进写盘记录。
+/// 执行界面已确认的计划（只接受计划 ID，写的内容是宿主存着的那份），结果记进写盘记录。物理盘交给磁盘代理。
 #[tauri::command(async)]
 fn write_plan_execute(
+    broker: State<'_, BrokerSession>,
     plans: State<'_, WritePlans>,
     plan_id: String,
 ) -> Result<WriteRecord, HostError> {
-    plans.execute(&plan_id)
+    plans.execute(&broker, &plan_id)
 }
 
 /// 放弃还没执行的计划，删掉它的备份。

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use yisi_io::{DeviceIdentity, PlanError, WritePlan, image_identity};
 
 use crate::backup::SavedBackup;
+use crate::protocol::WriteExecuted;
 
 /// 能执行写入计划的设备。
 pub trait WriteTarget {
@@ -155,6 +156,28 @@ pub fn execute(target: &mut dyn WriteTarget, backup: &SavedBackup) -> Result<(),
         }
     }
     Ok(())
+}
+
+/// 执行并把结果整理成答复：成功，或停在哪一步、失败前已经写下去几段。宿主执行镜像、代理执行物理盘共用。
+pub fn execute_reported(target: &mut dyn WriteTarget, backup: &SavedBackup) -> WriteExecuted {
+    match execute(target, backup) {
+        Ok(()) => WriteExecuted {
+            done: true,
+            step: None,
+            written: backup.plan().writes.len(),
+            detail: None,
+        },
+        Err(failure) => {
+            let detail = yisi_rpc::error_chain(&failure.error);
+            tracing::warn!(%detail, written = failure.written, "写入计划执行失败");
+            WriteExecuted {
+                done: false,
+                step: Some(failure.error.step()),
+                written: failure.written,
+                detail: Some(detail),
+            }
+        }
+    }
 }
 
 fn check_identity(plan: &WritePlan, actual: &DeviceIdentity) -> Result<(), ExecuteError> {

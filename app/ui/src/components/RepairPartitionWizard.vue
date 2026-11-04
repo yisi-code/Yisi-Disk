@@ -90,8 +90,8 @@ const isBusy = computed(
 /** 结果页上正在确认一份写入计划：这时只显示确认内容 */
 const isConfirming = computed(() => step.value === 'result' && !isBrowsing.value && writePlan.plan.value !== null)
 
-/** 只写镜像文件；物理盘、卷要先做镜像 */
-const canWrite = computed(() => diagnosedTarget.value?.kind === 'image')
+/** 镜像文件与整块磁盘可以修（Windows 所在的盘由宿主拒绝）；卷上的偏移不是盘上的偏移，不修 */
+const canWrite = computed(() => diagnosedTarget.value?.kind === 'image' || diagnosedTarget.value?.kind === 'disk')
 
 /** 诊断的这个源的写盘记录 */
 const targetRecords = computed(() =>
@@ -592,7 +592,9 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
               {{ t('repair.fix.preparing') }}
             </span>
           </div>
-          <p v-if="!canWrite && fixDirection(partition)" class="wizard__hint">{{ t('repair.fix.imageOnly') }}</p>
+          <p v-if="!canWrite && fixDirection(partition)" class="wizard__hint">
+            {{ t('repair.fix.volumeUnsupported') }}
+          </p>
           <p v-if="browseError?.number === partition.number" class="wizard__error" role="alert">
             {{ t('repair.browse.failed', { reason: browseError.text }) }}
           </p>

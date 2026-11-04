@@ -1,8 +1,9 @@
 //! 写入计划在宿主里的流程：请引擎生成计划 → 先存备份 → 界面确认 → 执行 → 记进写盘记录；
 //! 回滚是把备份里的计划反过来，同样先存备份、确认、执行（docs/architecture.md 4.2）。
 //!
-//! 目前只执行镜像文件：宿主以普通权限、独占方式打开镜像写入（`yisi_broker::execute::ImageFile`），不经磁盘代理，
-//! 也不弹 UAC。计划存在宿主里，界面只拿到计划 ID 与摘要，执行的是宿主存着的那一份，界面换不掉要写的内容。
+//! 镜像文件由宿主以普通权限、独占方式打开写入（`yisi_broker::execute::ImageFile`），不经磁盘代理；整块物理盘交给
+//! 磁盘代理（`broker.executeWrite`），代理读回同一份备份执行。卷不写（卷上的偏移不是盘上的偏移）。计划存在宿主里，
+//! 界面只拿到计划 ID 与摘要，执行的是宿主存着的那一份，界面换不掉要写的内容。
 //!
 //! 备份存在程序文件夹下 `data` 里的 `write-backups`（以计划 ID 命名），写盘记录存在同一处的 `write-history.json`
 //! （读写规则见 [`record_file`]）。
@@ -14,7 +15,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use serde::{Deserialize, Serialize};
 use yisi_broker::backup::SavedBackup;
-use yisi_broker::execute::{self, ImageFile, Step};
+use yisi_broker::execute::{self, ImageFile};
+/// 执行的结果：成功，或停在哪一步、失败前已经写下去几段。与磁盘代理的答复同一个类型。
+pub use yisi_broker::protocol::WriteExecuted as WriteOutcome;
 use yisi_engine::protocol::{BootFix, BootSectorPlan, WritePlan, image_identity};
 
 use crate::broker::BrokerSession;
@@ -80,19 +83,6 @@ pub struct PlanView {
     pub summary: PlanSummary,
 }
 
-/// 执行的结果。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WriteOutcome {
-    pub done: bool,
-    /// 失败时停在哪一步。
-    pub step: Option<Step>,
-    /// 失败前已经写下去的段数；为 0 时设备没被改动。成功时是全部段数。
-    pub written: usize,
-    /// 失败的技术细节。
-    pub detail: Option<String>,
-}
-
 /// 写盘记录里的一条：执行过的计划（成功或失败）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -138,9 +128,9 @@ impl WritePlans {
         partition: u32,
         fix: BootFix,
     ) -> Result<PlanView, HostError> {
-        let image = writable_image(&target)?;
+        let expected = writable(&target, &self.data_dir)?;
         let planned = engines.plan_boot_sector(broker, target.clone(), partition, fix)?;
-        check_boot_sector_plan(&planned, &image)?;
+        check_boot_sector_plan(&planned, &expected)?;
         let detail = BootSectorDetail {
             partition: planned.partition,
             partition_offset: planned.partition_offset,
@@ -180,7 +170,7 @@ impl WritePlans {
         if rolled_back {
             return Err(HostError::new("rollbackDone", plan_id));
         }
-        writable_image(&record.summary.target)?;
+        writable(&record.summary.target, &self.data_dir)?;
         let backup = SavedBackup::load(Path::new(&record.backup_path))
             .map_err(|error| HostError::new("backupUnreadable", yisi_rpc::error_chain(&error)))?;
         let mut inverse = backup.plan().inverse();
@@ -197,45 +187,20 @@ impl WritePlans {
         )
     }
 
-    /// 执行已确认的计划，记进写盘记录。镜像正被别的程序打开时不执行，计划留着，关掉那个程序后可以再试。
-    pub fn execute(&self, plan_id: &str) -> Result<WriteRecord, HostError> {
+    /// 执行已确认的计划，记进写盘记录。写之前就被拒绝（镜像正被别的程序打开、卷正被占用等）时盘没被改动，
+    /// 计划留着，处理之后可以再试。
+    pub fn execute(&self, broker: &BrokerSession, plan_id: &str) -> Result<WriteRecord, HostError> {
         let _guard = lock(&self.guard);
         let pending = lock(&self.pending)
             .remove(plan_id)
             .ok_or_else(|| HostError::new("planNotFound", plan_id))?;
-        let Target::Image { path } = pending.summary.target.clone() else {
-            return Err(HostError::new("writeTargetUnsupported", ""));
-        };
-        let mut image = match ImageFile::open(Path::new(&path), IMAGE_SECTOR_SIZE) {
-            Ok(image) => image,
+        let outcome = match execute_on(broker, &pending.summary.target, &pending.backup) {
+            Ok(outcome) => outcome,
             Err(error) => {
-                let code = if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
-                    "imageInUse"
-                } else {
-                    "writeTargetUnavailable"
-                };
                 lock(&self.pending).insert(plan_id.to_owned(), pending);
-                return Err(HostError::new(code, format!("{path}：{error}")));
+                return Err(error);
             }
         };
-        let outcome = match execute::execute(&mut image, &pending.backup) {
-            Ok(()) => WriteOutcome {
-                done: true,
-                step: None,
-                written: pending.backup.plan().writes.len(),
-                detail: None,
-            },
-            Err(failure) => {
-                tracing::warn!(plan_id, error = %yisi_rpc::error_chain(&failure.error), "写入计划执行失败");
-                WriteOutcome {
-                    done: false,
-                    step: Some(failure.error.step()),
-                    written: failure.written,
-                    detail: Some(yisi_rpc::error_chain(&failure.error)),
-                }
-            }
-        };
-        drop(image);
         let record = WriteRecord {
             plan_id: plan_id.to_owned(),
             summary: pending.summary,
@@ -315,27 +280,101 @@ impl WritePlans {
 /// 别的程序开着文件时 Windows 的错误码。
 const ERROR_SHARING_VIOLATION: i32 = 32;
 
-/// 目前只执行镜像文件：物理盘与卷要等磁盘代理能写盘。返回镜像的规范路径。
-fn writable_image(target: &Target) -> Result<PathBuf, HostError> {
+/// 可以写的目标应有的设备标识与扇区大小：计划里的 `device` 要与它一致。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Writable {
+    identity: String,
+    sector_size: u32,
+}
+
+/// 镜像文件与整块物理盘可以写，卷不行（卷上的偏移不是盘上的偏移）。物理盘：Windows 所在的盘不写，
+/// 写前备份所在的 `data` 也不能在这块盘上（盘写坏了备份要还在）。
+fn writable(target: &Target, data_dir: &Path) -> Result<Writable, HostError> {
     match target {
-        Target::Image { path } => std::fs::canonicalize(path)
-            .map_err(|error| HostError::new("writeTargetUnavailable", format!("{path}：{error}"))),
-        Target::Disk { .. } | Target::Volume { .. } => {
+        Target::Image { path } => {
+            let real = std::fs::canonicalize(path).map_err(|error| {
+                HostError::new("writeTargetUnavailable", format!("{path}：{error}"))
+            })?;
+            Ok(Writable {
+                identity: image_identity(&real),
+                sector_size: IMAGE_SECTOR_SIZE,
+            })
+        }
+        #[cfg(windows)]
+        Target::Disk { disk_number } => writable_disk(*disk_number, data_dir),
+        #[cfg(not(windows))]
+        Target::Disk { .. } => {
+            let _ = data_dir;
             Err(HostError::new("writeTargetUnsupported", ""))
         }
+        Target::Volume { .. } => Err(HostError::new("writeTargetUnsupported", "")),
     }
 }
 
-/// 引擎给的计划要与请求对得上：写的是这个镜像、按读镜像时的扇区大小；只有一段，落在这个分区里，
+#[cfg(windows)]
+fn writable_disk(number: u32, data_dir: &Path) -> Result<Writable, HostError> {
+    let system = yisi_io::system_disks()
+        .map_err(|error| HostError::new("writeSystemDisk", yisi_rpc::error_chain(&error)))?;
+    if system.contains(&number) {
+        return Err(HostError::new(
+            "writeSystemDisk",
+            format!("磁盘 {number} 上有 Windows 所在的卷"),
+        ));
+    }
+    yisi_io::ensure_off_source(Ok(number), yisi_io::volume_disk_numbers(data_dir))
+        .map_err(|error| HostError::new("backupOnTarget", yisi_rpc::error_chain(&error)))?;
+    let disk = yisi_io::list_disks()
+        .into_iter()
+        .find(|disk| disk.number == number)
+        .ok_or_else(|| HostError::new("invalidDisk", format!("找不到磁盘 {number}")))?;
+    Ok(Writable {
+        identity: disk.identity(),
+        sector_size: disk.sector_size,
+    })
+}
+
+/// 执行一份计划：镜像在宿主里写，物理盘交给磁盘代理。写之前就被拒绝时返回错误（盘没被改动）。
+fn execute_on(
+    broker: &BrokerSession,
+    target: &Target,
+    backup: &SavedBackup,
+) -> Result<WriteOutcome, HostError> {
+    match target {
+        Target::Image { path } => {
+            let mut image =
+                ImageFile::open(Path::new(path), IMAGE_SECTOR_SIZE).map_err(|error| {
+                    let code = if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
+                        "imageInUse"
+                    } else {
+                        "writeTargetUnavailable"
+                    };
+                    HostError::new(code, format!("{path}：{error}"))
+                })?;
+            Ok(execute::execute_reported(&mut image, backup))
+        }
+        #[cfg(windows)]
+        Target::Disk { disk_number } => {
+            broker.execute_write(*disk_number, &backup.path().display().to_string())
+        }
+        #[cfg(not(windows))]
+        Target::Disk { .. } => {
+            let _ = broker;
+            Err(HostError::new("writeTargetUnsupported", ""))
+        }
+        Target::Volume { .. } => Err(HostError::new("writeTargetUnsupported", "")),
+    }
+}
+
+/// 引擎给的计划要与请求对得上：写的是这个镜像或这块盘、扇区大小与读它时一致；只有一段，落在这个分区里，
 /// 长度不超过一个引导区。引擎解析的是不可信的数据，宿主不只看它的摘要。
-fn check_boot_sector_plan(planned: &BootSectorPlan, image: &Path) -> Result<(), HostError> {
+fn check_boot_sector_plan(planned: &BootSectorPlan, expected: &Writable) -> Result<(), HostError> {
     let plan = &planned.plan;
     let mismatch = |what: &str| HostError::new("planMismatch", what.to_owned());
-    if plan.device.identity != image_identity(image) {
-        return Err(mismatch("计划写的不是这个镜像文件"));
+    if plan.device.identity != expected.identity {
+        return Err(mismatch("计划写的不是这个镜像文件或这块盘"));
     }
-    if plan.device.sector_size != IMAGE_SECTOR_SIZE {
-        return Err(mismatch("计划的扇区大小与读镜像时不同"));
+    if plan.device.sector_size != expected.sector_size {
+        return Err(mismatch("计划的扇区大小与读源时不同"));
     }
     plan.validate()
         .map_err(|error| mismatch(&error.to_string()))?;

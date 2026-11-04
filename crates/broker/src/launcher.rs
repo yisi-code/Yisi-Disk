@@ -40,7 +40,10 @@ use windows_sys::Win32::UI::Shell::{
 use serde_json::{Value, json};
 use yisi_rpc::{ErrorObject, FrameError, Id, Message, Request, read_message, write_message};
 
-use crate::protocol::{DiskOpened, OPEN_DISK, OpenDiskParams, SHUTDOWN};
+use crate::protocol::{
+    DiskOpened, EXECUTE_WRITE, ExecuteWriteParams, OPEN_DISK, OpenDiskParams, SHUTDOWN,
+    WriteExecuted,
+};
 
 /// 管道只允许管理员组和 SYSTEM 连接：提权后的代理属于管理员组；
 /// 未提权的进程即使与宿主是同一个用户，管理员组在它的令牌里也只用于拒绝，连不上。
@@ -135,6 +138,21 @@ impl BrokerConnection {
         };
         let params = serde_json::to_value(params).map_err(FrameError::Json)?;
         let result = self.call(OPEN_DISK, params)?;
+        serde_json::from_value(result).map_err(|error| CallError::Unexpected(error.to_string()))
+    }
+
+    /// 请代理执行备份文件 `backup_path` 里的计划，写到磁盘 `disk_number`。
+    pub fn execute_write(
+        &mut self,
+        disk_number: u32,
+        backup_path: &str,
+    ) -> Result<WriteExecuted, CallError> {
+        let params = ExecuteWriteParams {
+            disk_number,
+            backup_path: backup_path.to_owned(),
+        };
+        let params = serde_json::to_value(params).map_err(FrameError::Json)?;
+        let result = self.call(EXECUTE_WRITE, params)?;
         serde_json::from_value(result).map_err(|error| CallError::Unexpected(error.to_string()))
     }
 
