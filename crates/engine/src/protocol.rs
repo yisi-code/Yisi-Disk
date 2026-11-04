@@ -81,6 +81,10 @@ pub const PLAN_BOOT_SECTOR: &str = "repair.planBootSector";
 /// GPT 主备两份一起改），或把类型与文件系统不符的分区改成对的类型（诊断要报类型不符）。预演写入后重新读分区表核对。
 /// 错误码同 [`PLAN_BOOT_SECTOR`]。
 pub const PLAN_PARTITION_TABLE: &str = "repair.planPartitionWrite";
+/// 生成 NTFS `$MFT` 与 `$MFTMirr` 互相修复的写入计划：参数 [`PlanMftParams`]，结果是 [`MftPlan`]。只读源、不写盘，
+/// 读完即答复。只看前 4 条记录，逐条判断哪一份可信；分区先按文件系统检查的规则核对（对不上答复 `FS_UNAVAILABLE`）。
+/// 没有可以这样修的记录、或主引导扇区不能用时答复 [`error_code::PLAN_NOT_APPLICABLE`]；其余错误码同 [`PLAN_BOOT_SECTOR`]。
+pub const PLAN_MFT: &str = "repair.planMftRepair";
 /// 制作能识别坏区的镜像（任务）：参数 [`ImageParams`]，建好镜像文件与坏区图后答复 [`ImageStarted`]；
 /// 进展经 [`IMAGING`] 送达，结果是 [`ImageSummary`]。镜像文件或坏区图已经存在时答复 [`error_code::IMAGE_EXISTS`]；
 /// 源为物理磁盘时，镜像必须在另一块盘上，否则答复 [`error_code::OUTPUT_ON_SOURCE`]。取消时保存坏区图，之后可以续做。
@@ -1122,6 +1126,41 @@ pub struct PartitionTablePlan {
     pub type_id: String,
     /// 改完之后的用途，同 [`PartitionInfo::role`]。
     pub role: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanMftParams {
+    pub source: Source,
+    /// 检查时的分区编号、偏移与长度（同 [`FsCheckParams::partition`]）。
+    pub partition: PartitionRef,
+    pub fix: MftFix,
+}
+
+/// `$MFT` 与 `$MFTMirr` 互相修复的方向。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MftFix {
+    /// 用 `$MFT` 重写 `$MFTMirr`（`$MFT` 里可信、又与镜像不同的记录）。
+    MirrorFromMft,
+    /// 用 `$MFTMirr` 修复 `$MFT`（`$MFT` 里坏了、镜像里可信的记录）。
+    MftFromMirror,
+}
+
+/// `$MFT` 与 `$MFTMirr` 互相修复的写入计划。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MftPlan {
+    pub plan: WritePlan,
+    pub fix: MftFix,
+    pub partition: u32,
+    pub partition_offset: u64,
+    pub partition_length: u64,
+    /// 要改写的记录号（0 到 3）。
+    pub records: Vec<u64>,
+    /// 两份前 4 条记录在源上的起点：从哪一份复制到哪一份。
+    pub from: u64,
+    pub to: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

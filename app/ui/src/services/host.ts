@@ -733,13 +733,28 @@ export interface PartitionTableDetail {
   role: string | null
 }
 
-/** 写入计划的摘要；回滚时 bootSector / partitionTable 是原来那次修复的细节，rollbackOf 是它的计划 ID */
+/** NTFS `$MFT` 与 `$MFTMirr` 互相修复的方向 */
+export type MftFix = 'mirrorFromMft' | 'mftFromMirror'
+
+/** `$MFT` 与 `$MFTMirr` 互修的细节：改写哪几条记录（0 到 3），从哪一份的起点复制到哪一份 */
+export interface MftDetail {
+  fix: MftFix
+  partition: number
+  partitionOffset: number
+  partitionLength: number
+  records: number[]
+  from: number
+  to: number
+}
+
+/** 写入计划的摘要；回滚时 bootSector / partitionTable / mft 是原来那次修复的细节，rollbackOf 是它的计划 ID */
 export interface PlanSummary {
-  kind: 'bootSector' | 'partitionTable' | 'rollback'
+  kind: 'bootSector' | 'partitionTable' | 'mft' | 'rollback'
   target: JobTarget
   writes: WriteRange[]
   bootSector: BootSectorDetail | null
   partitionTable: PartitionTableDetail | null
+  mft: MftDetail | null
   rollbackOf: string | null
 }
 
@@ -780,6 +795,14 @@ export function planBootSector(target: JobTarget, partition: number, fix: BootFi
  */
 export function planPartitionTable(target: JobTarget, fix: PartitionTableFix): Promise<PlanView> {
   return invoke<PlanView>('write_plan_partition_table', { target, fix })
+}
+
+/**
+ * 生成 `$MFT` 与 `$MFTMirr` 互相修复的写入计划（只读，不写盘）；分区与检查文件系统时相同。
+ * 没有可以这样修的记录时返回 planNotApplicable
+ */
+export function planMft(target: JobTarget, partition: PartitionRef, fix: MftFix): Promise<PlanView> {
+  return invoke<PlanView>('write_plan_mft', { target, partition, fix })
 }
 
 /** 执行已确认的计划；镜像正被别的程序打开时返回 imageInUse，计划留着可以再试 */

@@ -20,8 +20,8 @@ use yisi_engine::protocol::{
     ReadScanParams, SCAN_DELETED, ScanParams, Source,
 };
 use yisi_engine::protocol::{
-    DIAGNOSE_BOOT, DiagnoseBootParams, PLAN_BOOT_SECTOR, PLAN_PARTITION_TABLE,
-    PlanBootSectorParams, PlanPartitionTableParams,
+    DIAGNOSE_BOOT, DiagnoseBootParams, PLAN_BOOT_SECTOR, PLAN_MFT, PLAN_PARTITION_TABLE,
+    PlanBootSectorParams, PlanMftParams, PlanPartitionTableParams,
 };
 #[cfg(windows)]
 use yisi_engine::protocol::{DiskList, DiskSummary, DiskVolume};
@@ -37,8 +37,8 @@ use crate::browse::{self, Session};
 use crate::copy_job::{self, Planned};
 use crate::job::{self, JobContext, JobOutcome, ProgressSender, RunningJob};
 use crate::{
-    boot_check, carve_job, extract_job, fs_check_job, image_inspect, image_job, preview, read_scan,
-    reading, search_job, table_plan,
+    boot_check, carve_job, extract_job, fs_check_job, image_inspect, image_job, mft_plan, preview,
+    read_scan, reading, search_job, table_plan,
 };
 
 /// 浏览任务每隔这么久看一次有没有被取消。
@@ -240,6 +240,7 @@ fn dispatch_now(
                 DIAGNOSE_BOOT.to_owned(),
                 PLAN_BOOT_SECTOR.to_owned(),
                 PLAN_PARTITION_TABLE.to_owned(),
+                PLAN_MFT.to_owned(),
                 FS_CHECK.to_owned(),
             ];
             if cfg!(windows) {
@@ -358,6 +359,13 @@ fn dispatch_now(
             to_result(&plan_without_read_errors(
                 &params.source,
                 |device, identity| table_plan::plan(device, identity, params.fix),
+            )?)
+        }
+        PLAN_MFT => {
+            let params: PlanMftParams = request.params()?;
+            to_result(&plan_without_read_errors(
+                &params.source,
+                |device, identity| mft_plan::plan(device, identity, params.partition, params.fix),
             )?)
         }
         PREVIEW_RANGE => {

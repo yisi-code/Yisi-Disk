@@ -10,6 +10,7 @@ mod fs_check_job;
 mod image_inspect;
 mod image_job;
 mod job;
+mod mft_plan;
 mod preview;
 mod read_scan;
 mod reading;

@@ -19,6 +19,10 @@ export function useWritePlanText() {
     if (boot !== null) {
       return t(`writePlan.action.${boot.fix}`, { number: boot.partition })
     }
+    const mft = summary.mft
+    if (mft !== null) {
+      return t(`writePlan.action.${mft.fix}`, { number: mft.partition })
+    }
     const table = summary.partitionTable
     if (table === null) {
       return t('writePlan.action.unknown')

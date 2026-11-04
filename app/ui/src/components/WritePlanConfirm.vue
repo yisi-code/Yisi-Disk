@@ -35,11 +35,28 @@ const canConfirm = computed(
 )
 const detail = computed(() => props.plan.bootSector)
 const tableDetail = computed(() => props.plan.partitionTable)
-/** 这份计划涉及的分区：修复引导扇区的那个，或分区表里加上、改了类型的那个 */
-const partitionDetail = computed(() => detail.value ?? tableDetail.value)
+const mftDetail = computed(() => props.plan.mft)
+/** 这份计划涉及的分区：修复引导扇区的那个、分区表里加上或改了类型的那个、修 $MFT 的那个（NTFS） */
+const partitionDetail = computed(() => {
+  const mft = mftDetail.value
+  if (mft !== null) {
+    return { partition: mft.partition, filesystem: 'ntfs' }
+  }
+  return detail.value ?? tableDetail.value
+})
 const totalBytes = computed(() => props.plan.writes.reduce((sum, range) => sum + range.length, 0))
 
 const whatText = computed(() => {
+  const mft = mftDetail.value
+  if (mft !== null) {
+    return t(props.plan.kind === 'rollback' ? 'writePlan.mftRollbackValue' : 'writePlan.mftValue', {
+      records: mft.records.map((record) => record.toLocaleString(locale.value)).join(t('writePlan.listSeparator')),
+      source: t(mft.fix === 'mirrorFromMft' ? 'writePlan.mftTable' : 'writePlan.mftCopy'),
+      target: t(mft.fix === 'mirrorFromMft' ? 'writePlan.mftCopy' : 'writePlan.mftTable'),
+      from: position(mft.from),
+      to: position(mft.to),
+    })
+  }
   const table = tableDetail.value
   if (table !== null) {
     if (props.plan.kind === 'rollback') {
