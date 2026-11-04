@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Yisi-Disk",
+  "productName": "yisi-磁盘工具",
   "identifier": "io.github.yisi-code.yisi-disk",
   "build": {
     "beforeDevCommand": "cargo build -p yisi-engine -p yisi-broker && pnpm dev",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Yisi-Disk",
+        "title": "yisi-磁盘工具",
         "width": 1200,
         "height": 800,
         "minWidth": 960,

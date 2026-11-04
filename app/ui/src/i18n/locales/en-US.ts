@@ -2,7 +2,7 @@ import type zhCN from './zh-CN'
 
 const enUS: typeof zhCN = {
   app: {
-    name: 'Yisi-Disk',
+    name: 'Yisi Disk Tools',
     subtitle: 'Disk data recovery',
   },
   locale: {
@@ -187,9 +187,9 @@ const enUS: typeof zhCN = {
     },
   },
   about: {
-    title: 'About Yisi-Disk',
+    title: 'About Yisi Disk Tools',
     intro:
-      'Yisi-Disk is a disk data recovery tool: recover deleted files, deep recovery by file type, find lost partitions, repair partitions that will not open, file system checks, bad sector checks, and bad-sector-aware disk images. Scanning, browsing and imaging only read the source disk, and recovered files and images are always saved to another disk.',
+      'Yisi Disk Tools is a disk data recovery tool: recover deleted files, deep recovery by file type, find lost partitions, repair partitions that will not open, file system checks, bad sector checks, and bad-sector-aware disk images. Scanning, browsing and imaging only read the source disk, and recovered files and images are always saved to another disk.',
     version: 'Version',
     engine: 'Recovery engine',
     checking: 'Checking…',
@@ -1153,7 +1153,7 @@ const enUS: typeof zhCN = {
       button: 'Export problem list…',
       title: 'Export problem list',
       fileType: 'Text file',
-      heading: 'Yisi-Disk file system check report',
+      heading: 'Yisi Disk Tools file system check report',
       saved: 'Problem list saved to {path}',
     },
     issue: {

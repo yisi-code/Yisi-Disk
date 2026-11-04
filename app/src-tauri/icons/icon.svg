@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <!-- Yisi-Disk 图标（64 px 及以上）的源文件；48 px 及以下用 icon-small.svg。字母画成线条，不依赖字体 -->
+  <!-- yisi-磁盘工具 图标（64 px 及以上）的源文件；48 px 及以下用 icon-small.svg。字母画成线条，不依赖字体 -->
   <defs>
     <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#3d7cf0"/>
