@@ -76,6 +76,11 @@ pub const DIAGNOSE_BOOT: &str = "repair.diagnoseBoot";
 /// 生成计划时读源出过错（盘可能有坏道），答复 [`error_code::PLAN_READ_ERRORS`]。
 /// 源只能是镜像文件或整块物理盘：卷上的偏移不是盘上的偏移，答复 `INVALID_PARAMS`。
 pub const PLAN_BOOT_SECTOR: &str = "repair.planBootSector";
+/// 生成改写分区表的写入计划：参数 [`PlanPartitionTableParams`]，结果是 [`PartitionTablePlan`]。只读源、不写盘，读完即答复。
+/// 两种改法：把搜索找到的丢失分区加进分区表（那个位置要认得出 FAT、exFAT 或 NTFS，MBR 放进空的主分区表项，
+/// GPT 主备两份一起改），或把类型与文件系统不符的分区改成对的类型（诊断要报类型不符）。预演写入后重新读分区表核对。
+/// 错误码同 [`PLAN_BOOT_SECTOR`]。
+pub const PLAN_PARTITION_TABLE: &str = "repair.planPartitionWrite";
 /// 制作能识别坏区的镜像（任务）：参数 [`ImageParams`]，建好镜像文件与坏区图后答复 [`ImageStarted`]；
 /// 进展经 [`IMAGING`] 送达，结果是 [`ImageSummary`]。镜像文件或坏区图已经存在时答复 [`error_code::IMAGE_EXISTS`]；
 /// 源为物理磁盘时，镜像必须在另一块盘上，否则答复 [`error_code::OUTPUT_ON_SOURCE`]。取消时保存坏区图，之后可以续做。
@@ -1080,6 +1085,43 @@ pub struct BootSectorPlan {
     pub from: u64,
     pub to: u64,
     pub length: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanPartitionTableParams {
+    pub source: Source,
+    pub fix: PartitionTableFix,
+}
+
+/// 怎么改分区表。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum PartitionTableFix {
+    /// 把搜索找到的丢失分区（起点与长度，字节）加进分区表。
+    AddLost { offset: u64, length: u64 },
+    /// 把这个编号的分区的类型改成与文件系统相符的值。
+    SetType { partition: u32 },
+}
+
+/// 改写分区表的写入计划，以及改完之后这个分区在表里的样子。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionTablePlan {
+    pub plan: WritePlan,
+    pub fix: PartitionTableFix,
+    /// mbr、gpt 之一。
+    pub scheme: String,
+    /// 同 [`PartitionBoot::filesystem`]。
+    pub filesystem: String,
+    /// 改完之后的分区编号、起点与长度。
+    pub partition: u32,
+    pub offset: u64,
+    pub length: u64,
+    /// 改完之后的类型：MBR 为 `0x07` 这样的类型字节，GPT 为类型 GUID。
+    pub type_id: String,
+    /// 改完之后的用途，同 [`PartitionInfo::role`]。
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

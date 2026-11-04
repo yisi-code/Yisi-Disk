@@ -23,7 +23,7 @@ const emit = defineEmits<{ confirm: []; cancel: [] }>()
 const { t, locale } = useI18n()
 const { formatHostError } = useHostErrorText()
 const { sourceName, filesystemName } = usePartitionText()
-const { writeActionText } = useWritePlanText()
+const { writeActionText, tableTypeText } = useWritePlanText()
 
 const isAcknowledged = ref(false)
 const isOriginalAcknowledged = ref(false)
@@ -34,9 +34,25 @@ const canConfirm = computed(
   () => isAcknowledged.value && (!isDisk.value || isOriginalAcknowledged.value) && !props.busy,
 )
 const detail = computed(() => props.plan.bootSector)
+const tableDetail = computed(() => props.plan.partitionTable)
+/** 这份计划涉及的分区：修复引导扇区的那个，或分区表里加上、改了类型的那个 */
+const partitionDetail = computed(() => detail.value ?? tableDetail.value)
 const totalBytes = computed(() => props.plan.writes.reduce((sum, range) => sum + range.length, 0))
 
 const whatText = computed(() => {
+  const table = tableDetail.value
+  if (table !== null) {
+    if (props.plan.kind === 'rollback') {
+      return t('writePlan.tableRollbackValue')
+    }
+    return table.fix.kind === 'addLost'
+      ? t('writePlan.addLostValue', {
+          start: position(table.offset),
+          size: formatBytes(table.length),
+          type: tableTypeText(table),
+        })
+      : t('writePlan.setTypeValue', { type: tableTypeText(table) })
+  }
   const current = detail.value
   if (current === null) {
     return null
@@ -68,10 +84,15 @@ function position(offset: number): string {
     <dl class="wizard__details">
       <dt>{{ t('writePlan.target') }}</dt>
       <dd class="wizard__path-text">{{ sourceName(plan.target) }}</dd>
-      <template v-if="detail">
+      <template v-if="partitionDetail">
         <dt>{{ t('writePlan.partition') }}</dt>
         <dd>
-          {{ t('writePlan.partitionValue', { number: detail.partition, filesystem: filesystemName(detail.filesystem) }) }}
+          {{
+            t('writePlan.partitionValue', {
+              number: partitionDetail.partition,
+              filesystem: filesystemName(partitionDetail.filesystem),
+            })
+          }}
         </dd>
       </template>
       <template v-if="whatText">

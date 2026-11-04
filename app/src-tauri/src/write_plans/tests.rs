@@ -36,6 +36,7 @@ fn summary(image: &Path) -> PlanSummary {
         },
         writes: Vec::new(),
         boot_sector: None,
+        partition_table: None,
         rollback_of: None,
     }
 }
@@ -236,5 +237,46 @@ fn boot_sector_plans_must_match_the_request() {
             "{name}"
         );
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn partition_table_plans_only_touch_the_table_areas() {
+    use yisi_engine::protocol::{PartitionTableFix, PartitionTablePlan};
+
+    let (_, dir, image) = setup("table");
+    let real = std::fs::canonicalize(&image).unwrap();
+    let expected = Writable {
+        identity: image_identity(&real),
+        sector_size: IMAGE_SECTOR_SIZE,
+    };
+    let planned = |offset: u64| {
+        let mut plan = plan_for(&image);
+        plan.writes[0].offset = offset;
+        PartitionTablePlan {
+            plan,
+            fix: PartitionTableFix::SetType { partition: 1 },
+            scheme: "mbr".to_owned(),
+            filesystem: "fat32".to_owned(),
+            partition: 1,
+            offset: 1024,
+            length: 4096,
+            type_id: "0x0C".to_owned(),
+            role: None,
+        }
+    };
+    // 8 KiB 的设备整个都在开头与末尾 64 KiB 之内
+    assert!(check_table_plan(&planned(0), &expected).is_ok());
+    let mut big = planned(0);
+    big.plan.device.size = 1 << 30;
+    big.plan.writes[0].offset = 1 << 20;
+    let mut big_expected = expected.clone();
+    big_expected.sector_size = IMAGE_SECTOR_SIZE;
+    assert_eq!(
+        check_table_plan(&big, &big_expected).unwrap_err().code,
+        "planMismatch"
+    );
+    big.plan.writes[0].offset = (1 << 30) - 512;
+    assert!(check_table_plan(&big, &big_expected).is_ok());
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -32,7 +32,8 @@ pub enum Role {
 
 const EFI_SYSTEM: Guid = Guid::from_text("C12A7328-F81F-11D2-BA4B-00A0C93EC93B");
 const MICROSOFT_RESERVED: Guid = Guid::from_text("E3C9E316-0B5C-4DB8-817D-F92DF00215AE");
-const BASIC_DATA: Guid = Guid::from_text("EBD0A0A2-B9E5-4433-87C0-68B6B72699C7");
+/// Windows 的基本数据分区（FAT、exFAT、NTFS 都用它）。
+pub const BASIC_DATA: Guid = Guid::from_text("EBD0A0A2-B9E5-4433-87C0-68B6B72699C7");
 const WINDOWS_RECOVERY: Guid = Guid::from_text("DE94BBA4-06D1-4D40-A16A-BFD50179D6AC");
 const LDM_METADATA: Guid = Guid::from_text("5808C8AA-7E8F-42E0-85D2-E1E90434CFB3");
 const LDM_DATA: Guid = Guid::from_text("AF9B60A0-1431-4F62-BC68-3311714A69AD");

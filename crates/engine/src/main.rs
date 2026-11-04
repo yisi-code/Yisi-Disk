@@ -15,6 +15,7 @@ mod read_scan;
 mod reading;
 mod runtime;
 mod search_job;
+mod table_plan;
 
 fn main() {
     // stdout 是与宿主之间的 JSON-RPC 通道，日志一律写 stderr

@@ -4,11 +4,13 @@ import {
   executeWritePlan,
   listWriteHistory,
   planBootSector,
+  planPartitionTable,
   planRollback,
   toHostError,
   type BootFix,
   type HostError,
   type JobTarget,
+  type PartitionTableFix,
   type PlanView,
   type WriteRecord,
 } from '../services/host'
@@ -58,11 +60,15 @@ export function useWritePlan() {
     return prepare(() => planBootSector(target, partition, fix))
   }
 
+  function prepareTableFix(target: JobTarget, fix: PartitionTableFix): Promise<boolean> {
+    return prepare(() => planPartitionTable(target, fix))
+  }
+
   function prepareRollback(planId: string): Promise<boolean> {
     return prepare(() => planRollback(planId))
   }
 
-  /** 执行等确认的计划。镜像正被占用（imageInUse）时计划留着，可以关掉占用的程序再试 */
+  /** 执行等确认的计划。写之前被拒绝（镜像或卷正被占用等）时宿主留着计划，这里也留着，处理之后可以再试 */
   async function execute(): Promise<WriteRecord | null> {
     const current = plan.value
     if (current === null || isExecuting.value) {
@@ -78,7 +84,7 @@ export function useWritePlan() {
       return record
     } catch (error) {
       failure.value = toHostError(error)
-      if (failure.value.code !== 'imageInUse') {
+      if (failure.value.code === 'planNotFound') {
         plan.value = null
       }
       return null
@@ -110,6 +116,7 @@ export function useWritePlan() {
     failure,
     loadRecords,
     prepareBootSector,
+    prepareTableFix,
     prepareRollback,
     execute,
     discard,

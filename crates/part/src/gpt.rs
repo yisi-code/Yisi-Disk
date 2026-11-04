@@ -6,7 +6,20 @@ use crate::bytes::{le32, le64};
 use crate::crc32::crc32;
 use crate::{Guid, Note, PartError, Partition, PartitionKind};
 
-const SIGNATURE: &[u8; 8] = b"EFI PART";
+pub(crate) const SIGNATURE: &[u8; 8] = b"EFI PART";
+/// 表头里各字段的偏移（UEFI 规范第 5 章）。
+pub(crate) const HEADER_SIZE_AT: usize = 12;
+pub(crate) const HEADER_CRC_AT: usize = 16;
+pub(crate) const MY_LBA_AT: usize = 24;
+pub(crate) const ALTERNATE_LBA_AT: usize = 32;
+pub(crate) const FIRST_USABLE_AT: usize = 40;
+pub(crate) const LAST_USABLE_AT: usize = 48;
+pub(crate) const ENTRIES_LBA_AT: usize = 72;
+pub(crate) const ENTRY_COUNT_AT: usize = 80;
+pub(crate) const ENTRY_SIZE_AT: usize = 84;
+pub(crate) const ENTRIES_CRC_AT: usize = 88;
+/// 规范里表头的大小。
+pub(crate) const HEADER_SIZE: usize = 92;
 const MIN_HEADER_SIZE: u32 = 92;
 const MIN_ENTRY_SIZE: u32 = 128;
 /// 表项区最多读这么多字节（规范的默认是 128 项 × 128 字节 = 16 KiB），挡住构造出来的巨大表项数。
@@ -144,6 +157,97 @@ fn entries(
         }
     }
     Ok(Some(partitions))
+}
+
+/// 填上表头的校验和：先把校验和字段清零，再对整个表头（`header` 就是表头那么长）算 CRC-32。
+pub(crate) fn seal_header(header: &mut [u8]) -> Option<()> {
+    header.get_mut(HEADER_CRC_AT..HEADER_CRC_AT + 4)?.fill(0);
+    let crc = crc32(&[header]);
+    header
+        .get_mut(HEADER_CRC_AT..HEADER_CRC_AT + 4)?
+        .copy_from_slice(&crc.to_le_bytes());
+    Some(())
+}
+
+/// 写一个表项（先清空整项）：类型、唯一 GUID、首尾 LBA（含）、属性、名字（最多 36 个 UTF-16 单元）。
+pub(crate) fn put_entry(
+    slot: &mut [u8],
+    type_guid: Guid,
+    unique_guid: Guid,
+    first: u64,
+    last: u64,
+    attributes: u64,
+    name: &str,
+) -> Option<()> {
+    slot.get_mut(..NAME_OFFSET + NAME_BYTES)?;
+    slot.fill(0);
+    slot.get_mut(..16)?.copy_from_slice(&type_guid.0);
+    slot.get_mut(16..32)?.copy_from_slice(&unique_guid.0);
+    slot.get_mut(32..40)?.copy_from_slice(&first.to_le_bytes());
+    slot.get_mut(40..48)?.copy_from_slice(&last.to_le_bytes());
+    slot.get_mut(48..56)?
+        .copy_from_slice(&attributes.to_le_bytes());
+    for (index, unit) in name.encode_utf16().take(NAME_BYTES / 2).enumerate() {
+        let at = NAME_OFFSET + index * 2;
+        slot.get_mut(at..at + 2)?
+            .copy_from_slice(&unit.to_le_bytes());
+    }
+    Some(())
+}
+
+/// 主 GPT（LBA 1 的表头与它的表项区），改写分区表时用。表头与表项的校验和都对才返回。
+pub(crate) struct Primary {
+    /// 表头那么长的字节（不含扇区里表头之后的部分）。
+    pub header: Vec<u8>,
+    pub entries: Vec<u8>,
+    pub entries_lba: u64,
+    pub entry_size: usize,
+    pub alternate_lba: u64,
+    pub first_usable: u64,
+    pub last_usable: u64,
+}
+
+/// 按设备的扇区大小读主 GPT。读不出、校验和不对时为 `None`。
+pub(crate) fn read_primary(device: &dyn BlockDevice) -> Result<Option<Primary>, PartError> {
+    let sector = u64::from(device.sector_size());
+    let Some(header) = header_at(device, sector, 1)? else {
+        return Ok(None);
+    };
+    let total = u64::from(header.entry_count) * u64::from(header.entry_size);
+    if total > MAX_ENTRIES_BYTES {
+        return Ok(None);
+    }
+    let mut bytes = vec![0u8; sector as usize];
+    if device.read_at(sector, &mut bytes)? != bytes.len() {
+        return Ok(None);
+    }
+    let size = le32(&bytes, HEADER_SIZE_AT).map_or(0, |size| size as usize);
+    let (Some(first_usable), Some(last_usable), Some(head)) = (
+        le64(&bytes, FIRST_USABLE_AT),
+        le64(&bytes, LAST_USABLE_AT),
+        bytes.get(..size),
+    ) else {
+        return Ok(None);
+    };
+    let head = head.to_vec();
+    let Some(offset) = header.entries_lba.checked_mul(sector) else {
+        return Ok(None);
+    };
+    let mut entries = vec![0u8; total as usize];
+    if device.read_at(offset, &mut entries)? != entries.len()
+        || crc32(&[&entries]) != header.entries_crc
+    {
+        return Ok(None);
+    }
+    Ok(Some(Primary {
+        header: head,
+        entries,
+        entries_lba: header.entries_lba,
+        entry_size: header.entry_size as usize,
+        alternate_lba: header.alternate_lba,
+        first_usable,
+        last_usable,
+    }))
 }
 
 fn entry_partition(index: usize, entry: &[u8], sector: u64) -> Option<Partition> {

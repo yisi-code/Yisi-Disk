@@ -30,6 +30,9 @@ use yisi_engine::protocol::{
 
 use yisi_engine::protocol::{BootCopy, BootDiagnosis, DIAGNOSE_BOOT, DiagnoseBootParams};
 use yisi_engine::protocol::{BootFix, BootSectorPlan, PLAN_BOOT_SECTOR, PlanBootSectorParams};
+use yisi_engine::protocol::{
+    PLAN_PARTITION_TABLE, PartitionTableFix, PartitionTablePlan, PlanPartitionTableParams,
+};
 
 mod fs_check;
 
@@ -304,22 +307,18 @@ impl Engines {
         )
     }
 
-    /// 诊断引导扇区：另起一个引擎读分区表和各分区的主备引导扇区，答复后退出。物理盘第一次需要时提权启动磁盘代理。
+    /// 诊断引导扇区：读分区表和各分区的主备引导扇区。
     pub fn diagnose_boot(
         &self,
         broker: &BrokerSession,
         target: Target,
     ) -> Result<BootDiagnosis, HostError> {
-        target.validate()?;
-        let process = EngineProcess::spawn(None, || {})?;
-        let result = resolve_source(target, broker, process.pid)
-            .and_then(|source| to_params(&DiagnoseBootParams { source }))
-            .and_then(|params| process.request(DIAGNOSE_BOOT, params, BROWSE_TIMEOUT));
-        process.abandon();
-        from_value(result?)
+        query_source(broker, target, DIAGNOSE_BOOT, |source| DiagnoseBootParams {
+            source,
+        })
     }
 
-    /// 生成修复引导扇区的写入计划：另起一个引擎读源、重新诊断并预演写入，答复后退出。只读，不写盘。
+    /// 生成修复引导扇区的写入计划：读源、重新诊断并预演写入。只读，不写盘。
     pub fn plan_boot_sector(
         &self,
         broker: &BrokerSession,
@@ -327,19 +326,25 @@ impl Engines {
         partition: u32,
         fix: BootFix,
     ) -> Result<BootSectorPlan, HostError> {
-        target.validate()?;
-        let process = EngineProcess::spawn(None, || {})?;
-        let result = resolve_source(target, broker, process.pid)
-            .and_then(|source| {
-                to_params(&PlanBootSectorParams {
-                    source,
-                    partition,
-                    fix,
-                })
-            })
-            .and_then(|params| process.request(PLAN_BOOT_SECTOR, params, BROWSE_TIMEOUT));
-        process.abandon();
-        from_value(result?)
+        query_source(broker, target, PLAN_BOOT_SECTOR, |source| {
+            PlanBootSectorParams {
+                source,
+                partition,
+                fix,
+            }
+        })
+    }
+
+    /// 生成改写分区表的写入计划：读源、核对并预演写入。只读，不写盘。
+    pub fn plan_partition_table(
+        &self,
+        broker: &BrokerSession,
+        target: Target,
+        fix: PartitionTableFix,
+    ) -> Result<PartitionTablePlan, HostError> {
+        query_source(broker, target, PLAN_PARTITION_TABLE, |source| {
+            PlanPartitionTableParams { source, fix }
+        })
     }
 
     /// 浏览分区：引擎读出分区表后一直运行，直到取消（关闭浏览）。物理盘与扫描一样，第一次需要时提权启动磁盘代理。
@@ -855,6 +860,22 @@ fn disk_path(disk_number: u32) -> Result<String, HostError> {
 fn to_params(params: &impl Serialize) -> Result<Value, HostError> {
     serde_json::to_value(params)
         .map_err(|error| HostError::new("engineProtocol", error.to_string()))
+}
+
+/// 另起一个引擎，对 `target` 发一次只读查询（诊断、生成写入计划），答复后引擎退出。物理盘第一次需要时提权启动磁盘代理。
+fn query_source<P: Serialize, T: DeserializeOwned>(
+    broker: &BrokerSession,
+    target: Target,
+    method: &str,
+    params: impl FnOnce(Source) -> P,
+) -> Result<T, HostError> {
+    target.validate()?;
+    let process = EngineProcess::spawn(None, || {})?;
+    let result = resolve_source(target, broker, process.pid)
+        .and_then(|source| to_params(&params(source)))
+        .and_then(|params| process.request(method, params, BROWSE_TIMEOUT));
+    process.abandon();
+    from_value(result?)
 }
 
 /// 引擎的错误码对应的界面错误码；没有专门文案的统一为 `engineRejected`。

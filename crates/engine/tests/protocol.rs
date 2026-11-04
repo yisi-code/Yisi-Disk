@@ -2070,3 +2070,68 @@ fn boot_sector_plans_restore_the_primary_from_the_backup() {
     engine.close_input();
     assert!(engine.wait_exit().success());
 }
+
+#[test]
+fn partition_table_plans_add_a_lost_partition_and_refuse_what_does_not_apply() {
+    use yisi_engine::protocol::{PLAN_PARTITION_TABLE, PartitionTablePlan};
+
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-table-plan");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut disk = yisi_repair::samples::search_disk();
+    // 抹掉第 3 个表项（exFAT）
+    disk.image[446 + 32..446 + 48].fill(0);
+    let image = dir.join("missing-entry.img");
+    std::fs::write(&image, &disk.image).unwrap();
+    let source = json!({"type": "image", "path": image, "sectorSize": 512});
+    let (offset, length) = disk.exfat;
+
+    let mut engine = Engine::start();
+    let plan: PartitionTablePlan = serde_json::from_value(
+        engine
+            .call(
+                PLAN_PARTITION_TABLE,
+                json!({"source": source, "fix": {"kind": "addLost", "offset": offset, "length": length}}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            plan.scheme.as_str(),
+            plan.filesystem.as_str(),
+            plan.type_id.as_str()
+        ),
+        ("mbr", "exfat", "0x07")
+    );
+    assert_eq!(
+        (plan.partition, plan.offset, plan.length),
+        (3, offset, length)
+    );
+    assert_eq!(plan.plan.writes.len(), 1);
+    assert_eq!(plan.plan.writes[0].offset, 0);
+    // 生成计划不写源
+    assert_eq!(std::fs::read(&image).unwrap(), disk.image);
+
+    // 类型本来就对：不适用；没有分区表：生不成
+    let refused = engine
+        .call(
+            PLAN_PARTITION_TABLE,
+            json!({"source": source, "fix": {"kind": "setType", "partition": 1}}),
+        )
+        .unwrap_err();
+    assert_eq!(refused.code, error_code::PLAN_NOT_APPLICABLE);
+    let (lost, _) = lost_partitions_image(&dir);
+    let refused = engine
+        .call(
+            PLAN_PARTITION_TABLE,
+            json!({
+                "source": {"type": "image", "path": lost, "sectorSize": 512},
+                "fix": {"kind": "addLost", "offset": offset, "length": length}
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(refused.code, error_code::PLAN_UNAVAILABLE);
+    engine.close_input();
+    assert!(engine.wait_exit().success());
+}

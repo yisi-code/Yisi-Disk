@@ -7,13 +7,17 @@ import SourcePicker from './SourcePicker.vue'
 import WizardSteps from './WizardSteps.vue'
 import JobControls from './JobControls.vue'
 import ReadHealthHint from './ReadHealthHint.vue'
+import WritePlanConfirm from './WritePlanConfirm.vue'
 import { useBrowse } from '../composables/useBrowse'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { usePartitionText } from '../composables/usePartitionText'
 import { usePartitionSearch } from '../composables/usePartitionSearch'
 import { useSourceSelection } from '../composables/useSourceSelection'
+import { useWritePlan } from '../composables/useWritePlan'
+import { useWritePlanText } from '../composables/useWritePlanText'
 import {
   isDeviceKind,
+  sameTarget,
   toHostError,
   type FoundPartition,
   type HostError,
@@ -32,6 +36,8 @@ const { formatHostError } = useHostErrorText()
 const { filesystemName, sourceName, unbrowsableReason } = usePartitionText()
 const search = usePartitionSearch()
 const browse = useBrowse()
+const writePlan = useWritePlan()
+const { writeActionText, writeOutcomeText } = useWritePlanText()
 const domPrefix = useId()
 
 const titleElement = ref<HTMLHeadingElement | null>(null)
@@ -70,10 +76,40 @@ const partitionRef = computed<PartitionRef | null>(() => {
   }
 })
 
-/** 打开分区、扫描 MFT、复制进行中时不能换分区，也不能返回 */
+/** 打开分区、扫描 MFT、复制、生成或执行写入计划进行中时不能换分区，也不能返回 */
 const isPartitionBusy = computed(
-  () => isOpeningPartition.value || browse.isScanning.value || isCopying.value,
+  () =>
+    isOpeningPartition.value ||
+    browse.isScanning.value ||
+    isCopying.value ||
+    writePlan.isPreparing.value ||
+    writePlan.isExecuting.value,
 )
+
+/** 镜像文件与整块磁盘可以写回分区表；卷上没有分区表 */
+const canWrite = computed(() => {
+  const kind = search.target.value?.kind
+  return kind === 'image' || kind === 'disk'
+})
+
+/** 选中的是「丢失」、又不与别的候选重叠的分区：可以写回分区表 */
+const canWriteBack = computed(() => {
+  const candidate = selectedCandidate.value
+  return candidate !== null && candidate.relation === 'lost' && !candidate.overlapsCandidate
+})
+
+/** 结果页上正在确认写回分区表或回滚 */
+const isConfirming = computed(() => step.value === 'results' && writePlan.plan.value !== null)
+
+/** 刚执行的那次写入（同一个源时才显示）；写下去过、还没回滚的可以回滚 */
+const lastRecord = computed(() => {
+  const record = writePlan.lastRecord.value
+  return record !== null && sameTarget(record.target, search.target.value) ? record : null
+})
+const canRollbackLast = computed(() => {
+  const record = lastRecord.value
+  return record !== null && record.kind !== 'rollback' && record.outcome.written > 0
+})
 
 const sourceText = computed(() => sourceName(search.target.value))
 
@@ -147,6 +183,7 @@ async function handleExit() {
   if (search.isBusy.value || isPartitionBusy.value) {
     return
   }
+  await writePlan.discard()
   await closeBrowse()
   emit('exit')
 }
@@ -156,7 +193,8 @@ async function goBack() {
   if (previous === undefined || search.isBusy.value || isPartitionBusy.value) {
     return
   }
-  // 结果页回到来源：关闭浏览，换了源要重新搜索
+  // 结果页回到来源：放弃没确认的计划、关闭浏览，换了源要重新搜索
+  await writePlan.discard()
   await closeBrowse()
   step.value = 'source'
 }
@@ -177,6 +215,56 @@ async function enterResults() {
   step.value = 'results'
   const source = search.target.value
   if (source !== null && candidates.value.length > 0) {
+    await browse.open(source)
+  }
+}
+
+/** 把选中的丢失分区写回分区表：先关掉浏览（浏览会话开着这个源），生成计划后显示确认内容 */
+async function proposeWriteBack() {
+  const candidate = selectedCandidate.value
+  const source = search.target.value
+  if (candidate === null || source === null || !canWriteBack.value || isPartitionBusy.value) {
+    return
+  }
+  await closeBrowse()
+  await writePlan.prepareTableFix(source, {
+    kind: 'addLost',
+    offset: candidate.offset,
+    length: candidate.length,
+  })
+  if (writePlan.plan.value === null) {
+    await reopenBrowse()
+  }
+}
+
+async function proposeRollback() {
+  const record = lastRecord.value
+  if (record === null || isPartitionBusy.value) {
+    return
+  }
+  await closeBrowse()
+  await writePlan.prepareRollback(record.planId)
+  if (writePlan.plan.value === null) {
+    await reopenBrowse()
+  }
+}
+
+async function confirmWrite() {
+  await writePlan.execute()
+  if (writePlan.plan.value === null) {
+    await reopenBrowse()
+  }
+}
+
+async function cancelWrite() {
+  await writePlan.discard()
+  await reopenBrowse()
+}
+
+/** 写入计划结束后重新打开浏览，继续浏览、另存 */
+async function reopenBrowse() {
+  const source = search.target.value
+  if (source !== null && candidates.value.length > 0 && !browse.isOpen.value) {
     await browse.open(source)
   }
 }
@@ -349,6 +437,17 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
         </div>
       </div>
 
+      <div v-else-if="isConfirming && writePlan.plan.value" class="wizard__panel">
+        <WritePlanConfirm
+          :plan="writePlan.plan.value"
+          :sector-size="search.summary.value?.sectorSize ?? 512"
+          :busy="writePlan.isExecuting.value"
+          :failure="writePlan.failure.value"
+          @confirm="confirmWrite"
+          @cancel="cancelWrite"
+        />
+      </div>
+
       <div v-else class="wizard__panel wizard__fill">
         <dl class="wizard__details">
           <dt>{{ t('common.source') }}</dt>
@@ -356,6 +455,29 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
         </dl>
         <p class="wizard__note">{{ summaryText }}</p>
         <p class="wizard__hint wizard__hint--warning">{{ t('findPartitions.results.readOnly') }}</p>
+        <div v-if="lastRecord" class="find-partitions__outcome">
+          <p :class="lastRecord.outcome.done ? 'wizard__note' : 'wizard__error'" role="status">
+            {{
+              t('findPartitions.write.outcome', {
+                action: writeActionText(lastRecord),
+                outcome: writeOutcomeText(lastRecord),
+              })
+            }}
+          </p>
+          <button
+            v-if="canRollbackLast"
+            class="wizard__button wizard__button--secondary"
+            type="button"
+            :disabled="isPartitionBusy"
+            @click="proposeRollback"
+          >
+            {{ t('writePlan.history.rollback') }}
+          </button>
+        </div>
+        <p v-if="lastRecord?.outcome.done" class="wizard__hint">{{ t('findPartitions.write.reopenHint') }}</p>
+        <p v-if="writePlan.failure.value" class="wizard__error" role="alert">
+          {{ formatHostError(writePlan.failure.value) }}
+        </p>
         <p v-if="browse.status.value === 'starting'" class="wizard__note" aria-live="polite">
           {{
             isDeviceKind(search.target.value?.kind)
@@ -417,6 +539,23 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
               </li>
             </ul>
             <p class="wizard__hint">{{ t('findPartitions.list.hint') }}</p>
+            <div v-if="canWriteBack" class="find-partitions__write">
+              <template v-if="canWrite">
+                <button
+                  class="wizard__button wizard__button--secondary"
+                  type="button"
+                  :disabled="isPartitionBusy"
+                  @click="proposeWriteBack"
+                >
+                  {{ t('findPartitions.write.start') }}
+                </button>
+                <p v-if="writePlan.isPreparing.value" class="wizard__note" aria-live="polite">
+                  {{ t('findPartitions.write.preparing') }}
+                </p>
+                <p v-else class="wizard__hint">{{ t('findPartitions.write.hint') }}</p>
+              </template>
+              <p v-else class="wizard__hint">{{ t('findPartitions.write.volumeUnsupported') }}</p>
+            </div>
           </section>
 
           <PartitionFiles
@@ -581,5 +720,13 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
 
 .find-partitions__tag--lost {
   border-color: var(--color-warning);
+}
+
+.find-partitions__outcome,
+.find-partitions__write {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
 }
 </style>

@@ -15,6 +15,7 @@ use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Manager, State, WebviewWindowBuilder};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use yisi_engine::protocol::PartitionInfo;
+use yisi_engine::protocol::PartitionTableFix;
 use yisi_engine::protocol::{BootCopy, BootDiagnosis, BootFix, ImageDescription, ImageInspection};
 use yisi_engine::protocol::{
     BrowseOpened, Capabilities, CopyItem, DiskList, ExtractItem, FileListPage, FilePreview,
@@ -225,6 +226,19 @@ fn write_plan_boot_sector(
     fix: BootFix,
 ) -> Result<PlanView, HostError> {
     plans.plan_boot_sector(&engines, &broker, target, partition, fix)
+}
+
+/// 生成改写分区表的写入计划（把找到的丢失分区写回分区表、把类型不符的分区改成对的类型），存好备份后交给界面确认。
+/// 只读，不写盘；可写的源与修复引导扇区相同。
+#[tauri::command(async)]
+fn write_plan_partition_table(
+    engines: State<'_, Engines>,
+    broker: State<'_, BrokerSession>,
+    plans: State<'_, WritePlans>,
+    target: Target,
+    fix: PartitionTableFix,
+) -> Result<PlanView, HostError> {
+    plans.plan_partition_table(&engines, &broker, target, fix)
 }
 
 /// 执行界面已确认的计划（只接受计划 ID，写的内容是宿主存着的那份），结果记进写盘记录。物理盘交给磁盘代理。
@@ -594,6 +608,7 @@ fn main() -> anyhow::Result<()> {
             image_history_relocate,
             boot_diagnose,
             write_plan_boot_sector,
+            write_plan_partition_table,
             write_plan_execute,
             write_plan_discard,
             write_plan_rollback,

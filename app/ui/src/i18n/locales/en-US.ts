@@ -860,8 +860,16 @@ const enUS: typeof zhCN = {
       unreadable: '{size} could not be read and was skipped; partitions there cannot be found.',
       truncated: 'Too many partitions were found; only the first {count} are listed.',
       readOnly:
-        'This version is read-only: it does not write the partition table back or change the disk. Save the files you need to another disk first; writing found partitions back to the partition table will come in a later version.',
+        'Searching and browsing are read-only and do not change the disk. Save the files you need to another disk first; afterwards a "lost" partition can be written back to the partition table.',
       opening: 'Opening for browsing…',
+    },
+    write: {
+      start: 'Write back to the partition table…',
+      preparing: 'Preparing the plan to write it back…',
+      hint: 'A "lost" partition can be written back to the partition table: a backup is saved first, nothing is written until you confirm, and it can be rolled back. Windows mounts it afterwards and may write to it, so save the files you need first.',
+      volumeUnsupported: 'A single drive letter is selected, so the partition table cannot be changed: choose the whole disk.',
+      outcome: '{action}: {outcome}',
+      reopenHint: 'The partition table has changed, but "lost" in the results is not updated: search again to check, or look in "Repair a partition that will not open".',
     },
     list: {
       title: 'Partitions found',
@@ -971,6 +979,7 @@ const enUS: typeof zhCN = {
       backupFromPrimary: 'Repair the backup from the primary boot sector…',
       preparing: 'Preparing the repair plan…',
       volumeUnsupported: 'A single drive letter cannot be repaired: choose the whole disk instead, or create an image and repair the image.',
+      setType: 'Change the partition type…',
       outcome: '{action}: {outcome}',
     },
     issue: {
@@ -1008,6 +1017,10 @@ const enUS: typeof zhCN = {
     target: 'Writes to',
     partition: 'Partition',
     partitionValue: 'Partition {number} · {filesystem}',
+    typeValue: '{role} ({type})',
+    addLostValue: 'Adds a partition to the partition table: starting at {start}, {size}, type {type}',
+    setTypeValue: 'Changes the type of this partition in the partition table to {type}',
+    tableRollbackValue: 'Restores the partition table to what it was before the last change',
     what: 'What it does',
     copyValue: 'Copies {size} from {from} to {to}',
     rollbackValue: 'Restores {size} at {to} to what it was before the last write',
@@ -1039,6 +1052,8 @@ const enUS: typeof zhCN = {
     action: {
       primaryFromBackup: 'Partition {number}: repair the primary boot sector from the backup',
       backupFromPrimary: 'Partition {number}: repair the backup from the primary boot sector',
+      addLost: 'Write the found {filesystem} partition (starting at {start}, {size}) back to the partition table',
+      setType: 'Partition {number}: change the partition type to {type}',
       rollback: 'Roll back ({action})',
       unknown: 'Write',
     },

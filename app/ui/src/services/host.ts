@@ -715,12 +715,31 @@ export interface BootSectorDetail {
   length: number
 }
 
-/** 写入计划的摘要；回滚时 bootSector 是原来那次修复的细节，rollbackOf 是它的计划 ID */
+/** 怎么改分区表：把搜索找到的丢失分区写回去，或把类型与文件系统不符的分区改成对的类型 */
+export type PartitionTableFix =
+  | { kind: 'addLost'; offset: number; length: number }
+  | { kind: 'setType'; partition: number }
+
+/** 改写分区表的细节：改完之后这个分区的编号、位置与类型（MBR 为 0x07 这样的类型字节，GPT 为类型 GUID） */
+export interface PartitionTableDetail {
+  fix: PartitionTableFix
+  scheme: 'mbr' | 'gpt'
+  filesystem: string
+  partition: number
+  offset: number
+  length: number
+  typeId: string
+  /** 改完之后的用途，界面按 partition.role.* 显示 */
+  role: string | null
+}
+
+/** 写入计划的摘要；回滚时 bootSector / partitionTable 是原来那次修复的细节，rollbackOf 是它的计划 ID */
 export interface PlanSummary {
-  kind: 'bootSector' | 'rollback'
+  kind: 'bootSector' | 'partitionTable' | 'rollback'
   target: JobTarget
   writes: WriteRange[]
   bootSector: BootSectorDetail | null
+  partitionTable: PartitionTableDetail | null
   rollbackOf: string | null
 }
 
@@ -753,6 +772,14 @@ export interface WriteRecord extends PlanSummary {
  */
 export function planBootSector(target: JobTarget, partition: number, fix: BootFix): Promise<PlanView> {
   return invoke<PlanView>('write_plan_boot_sector', { target, partition, fix })
+}
+
+/**
+ * 生成改写分区表的写入计划（只读，不写盘）。那个位置认不出文件系统、分区表没有空位或与别的分区重叠时
+ * 返回 planUnavailable；类型本来就对时返回 planNotApplicable
+ */
+export function planPartitionTable(target: JobTarget, fix: PartitionTableFix): Promise<PlanView> {
+  return invoke<PlanView>('write_plan_partition_table', { target, fix })
 }
 
 /** 执行已确认的计划；镜像正被别的程序打开时返回 imageInUse，计划留着可以再试 */

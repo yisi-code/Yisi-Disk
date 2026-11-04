@@ -33,6 +33,7 @@ fn main() {
         "image_history_relocate",
         "boot_diagnose",
         "write_plan_boot_sector",
+        "write_plan_partition_table",
         "write_plan_execute",
         "write_plan_discard",
         "write_plan_rollback",
