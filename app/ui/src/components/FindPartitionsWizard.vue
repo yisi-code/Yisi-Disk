@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, useId, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import FoundPartitionItem from './FoundPartitionItem.vue'
 import MftScanProgress from './MftScanProgress.vue'
 import PartitionFiles from './PartitionFiles.vue'
 import SourcePicker from './SourcePicker.vue'
@@ -19,10 +20,10 @@ import {
   isDeviceKind,
   sameTarget,
   toHostError,
-  type FoundPartition,
   type HostError,
   type PartitionInfo,
   type PartitionRef,
+  type SearchMode,
 } from '../services/host'
 import { formatBytes, formatSeconds } from '../utils/format'
 
@@ -33,7 +34,7 @@ const emit = defineEmits<{ exit: [] }>()
 
 const { t } = useI18n()
 const { formatHostError } = useHostErrorText()
-const { filesystemName, sourceName, unbrowsableReason } = usePartitionText()
+const { sourceName, unbrowsableReason } = usePartitionText()
 const search = usePartitionSearch()
 const browse = useBrowse()
 const writePlan = useWritePlan()
@@ -43,6 +44,8 @@ const domPrefix = useId()
 const titleElement = ref<HTMLHeadingElement | null>(null)
 const step = ref<WizardStep>('source')
 const { sourceKind, imagePath, device, target } = useSourceSelection()
+/** 下一次搜索怎么搜：来源这一步选，结果页的「深度搜索」改成 deep */
+const searchMode = ref<SearchMode>('quick')
 /** 选中的候选分区在结果里的下标 */
 const selectedIndex = ref<number | null>(null)
 /** 选中的候选分区在浏览会话里按位置打开后的信息；NTFS 扫完 MFT 才给出 */
@@ -150,6 +153,7 @@ const summaryText = computed(() => {
     return ''
   }
   const parts = [
+    t(`findPartitions.results.mode.${summary.mode}`),
     t('findPartitions.results.summary', { count: summary.candidates.length }, summary.candidates.length),
     t('findPartitions.results.table', {
       scheme: t(`findPartitions.results.scheme.${summary.scheme}`),
@@ -161,6 +165,14 @@ const summaryText = computed(() => {
   }
   if (summary.candidatesTruncated) {
     parts.push(t('findPartitions.results.truncated', { count: summary.candidates.length }))
+  }
+  if (summary.stoppedAt !== null) {
+    parts.push(
+      t('findPartitions.results.stopped', {
+        position: formatBytes(summary.stoppedAt),
+        percent: summary.size > 0 ? Math.floor((summary.stoppedAt / summary.size) * 100) : 0,
+      }),
+    )
   }
   return parts.join(t('findPartitions.results.separator'))
 })
@@ -207,7 +219,13 @@ async function handleSubmit() {
   }
   await closeBrowse()
   step.value = 'search'
-  await search.start(current)
+  await search.start(current, searchMode.value)
+}
+
+/** 结果页上：快速搜索没找到要找的，换深度搜索重新搜一遍 */
+async function searchDeep() {
+  searchMode.value = 'deep'
+  await handleSubmit()
 }
 
 /** 搜索完成：进入结果页，有找到分区时打开浏览会话（物理磁盘这时可能再请求一次提权） */
@@ -315,34 +333,6 @@ async function openSelected() {
   openedPartition.value = partition
 }
 
-function candidateName(candidate: FoundPartition): string {
-  return t('findPartitions.list.name', {
-    filesystem: filesystemName(candidate.filesystem),
-    size: formatBytes(candidate.length),
-  })
-}
-
-/** 候选分区的说明标签：与分区表的关系，以及靠备份找到、与别的候选重叠、超出末尾 */
-function candidateTags(candidate: FoundPartition): { kind: string; text: string }[] {
-  const tags: { kind: string; text: string }[] = [
-    {
-      kind: candidate.relation,
-      text: t(`findPartitions.list.relation.${candidate.relation}`, {
-        number: candidate.tablePartition ?? '',
-      }),
-    },
-  ]
-  if (candidate.foundBy === 'backup') {
-    tags.push({ kind: 'backup', text: t('findPartitions.list.backup') })
-  }
-  if (candidate.overlapsCandidate) {
-    tags.push({ kind: 'overlapsCandidate', text: t('findPartitions.list.overlapsCandidate') })
-  }
-  if (candidate.truncated) {
-    tags.push({ kind: 'truncated', text: t('findPartitions.list.truncated') })
-  }
-  return tags
-}
 </script>
 
 <template>
@@ -385,6 +375,7 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
             v-else-if="search.isBusy.value"
             :status="search.status.value"
             :pause="{ isPaused: search.isPaused.value, isToggling: search.isTogglingPause.value }"
+            keeps-result
             @pause="search.pause"
             @resume="search.resume"
             @cancel="search.cancel"
@@ -408,6 +399,23 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
           v-model:device="device"
           :disk-hint="t('findPartitions.diskHint')"
         />
+        <fieldset class="wizard__choices">
+          <legend class="wizard__note">{{ t('findPartitions.mode.legend') }}</legend>
+          <label class="wizard__choice">
+            <input v-model="searchMode" type="radio" :name="`${domPrefix}-mode`" value="quick" />
+            <span>
+              {{ t('findPartitions.mode.quick') }}
+              <span class="wizard__note">{{ t('findPartitions.mode.quickHint') }}</span>
+            </span>
+          </label>
+          <label class="wizard__choice">
+            <input v-model="searchMode" type="radio" :name="`${domPrefix}-mode`" value="deep" />
+            <span>
+              {{ t('findPartitions.mode.deep') }}
+              <span class="wizard__note">{{ t('findPartitions.mode.deepHint') }}</span>
+            </span>
+          </label>
+        </fieldset>
         <p class="wizard__hint">{{ t('findPartitions.results.readOnly') }}</p>
       </div>
 
@@ -435,6 +443,22 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
             {{ formatHostError(search.failure.value) }}
           </p>
         </div>
+        <section class="find-partitions__found" :aria-labelledby="`${domPrefix}-found`">
+          <h3 :id="`${domPrefix}-found`" class="find-partitions__title">
+            {{ t('findPartitions.live.title', { count: search.found.value.length }) }}
+          </h3>
+          <ul v-if="search.found.value.length > 0" class="find-partitions__found-list">
+            <li
+              v-for="candidate in search.found.value"
+              :key="`${candidate.offset}-${candidate.length}-${candidate.filesystem}`"
+              class="find-partitions__found-item"
+            >
+              <FoundPartitionItem :candidate="candidate" />
+            </li>
+          </ul>
+          <p v-else class="wizard__note">{{ t('findPartitions.live.none') }}</p>
+          <p class="wizard__hint">{{ t('findPartitions.live.hint') }}</p>
+        </section>
       </div>
 
       <div v-else-if="isConfirming && writePlan.plan.value" class="wizard__panel">
@@ -454,6 +478,17 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
           <dd class="wizard__path-text">{{ sourceText }}</dd>
         </dl>
         <p class="wizard__note">{{ summaryText }}</p>
+        <div v-if="search.summary.value?.mode === 'quick'" class="find-partitions__deep">
+          <button
+            class="wizard__button wizard__button--secondary"
+            type="button"
+            :disabled="target === null || isPartitionBusy"
+            @click="searchDeep"
+          >
+            {{ t('findPartitions.results.deep') }}
+          </button>
+          <span class="wizard__hint">{{ t('findPartitions.results.deepHint') }}</span>
+        </div>
         <p class="wizard__hint wizard__hint--warning">{{ t('findPartitions.results.readOnly') }}</p>
         <div v-if="lastRecord" class="find-partitions__outcome">
           <p :class="lastRecord.outcome.done ? 'wizard__note' : 'wizard__error'" role="status">
@@ -514,27 +549,7 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
                     :value="index"
                     :disabled="isPartitionBusy || !browse.isOpen.value"
                   />
-                  <span class="find-partitions__item-body">
-                    <span class="find-partitions__item-name">
-                      {{ candidateName(candidate) }}
-                      <span class="find-partitions__item-label">
-                        {{ candidate.label ?? t('findPartitions.list.noLabel') }}
-                      </span>
-                    </span>
-                    <span class="find-partitions__item-start">
-                      {{ t('findPartitions.list.start', { offset: formatBytes(candidate.offset) }) }}
-                    </span>
-                    <span class="find-partitions__tags">
-                      <span
-                        v-for="tag in candidateTags(candidate)"
-                        :key="tag.kind"
-                        class="find-partitions__tag"
-                        :class="`find-partitions__tag--${tag.kind}`"
-                      >
-                        {{ tag.text }}
-                      </span>
-                    </span>
-                  </span>
+                  <FoundPartitionItem :candidate="candidate" />
                 </label>
               </li>
             </ul>
@@ -683,46 +698,32 @@ function candidateTags(candidate: FoundPartition): { kind: string; text: string 
   background: color-mix(in srgb, var(--color-accent) 16%, transparent);
 }
 
-.find-partitions__item-body {
+/* 搜索进行中已经找到的分区：按内容撑高，太多时在框里滚动 */
+.find-partitions__found {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  min-width: 0;
+  gap: var(--space-sm);
+  width: 100%;
 }
 
-.find-partitions__item-name {
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-
-.find-partitions__item-label {
-  margin-left: var(--space-xs);
-  font-weight: normal;
-}
-
-.find-partitions__item-start {
-  color: var(--color-text-muted);
-  font-size: var(--font-size-small);
-}
-
-.find-partitions__tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-xs);
-}
-
-.find-partitions__tag {
-  padding: 0 var(--space-xs);
-  font-size: var(--font-size-small);
+.find-partitions__found-list {
+  max-height: 40vh;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-control);
+  border-radius: var(--radius-card);
 }
 
-.find-partitions__tag--lost {
-  border-color: var(--color-warning);
+.find-partitions__found-item {
+  display: flex;
+  padding: var(--space-sm);
+  border-bottom: 1px solid var(--color-border);
 }
 
 .find-partitions__outcome,
+.find-partitions__deep,
 .find-partitions__write {
   display: flex;
   flex-wrap: wrap;

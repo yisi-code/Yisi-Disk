@@ -1624,7 +1624,10 @@ fn partition_search_finds_lost_partitions_then_browses_and_copies_one() {
     let mut searcher = Engine::start();
     assert_eq!(
         searcher
-            .call(SEARCH_PARTITIONS, json!({"jobId": "s1", "source": source}))
+            .call(
+                SEARCH_PARTITIONS,
+                json!({"jobId": "s1", "source": source, "mode": "deep"})
+            )
             .unwrap(),
         json!({})
     );
@@ -1807,6 +1810,92 @@ fn partition_search_finds_lost_partitions_then_browses_and_copies_one() {
 }
 
 #[test]
+fn quick_partition_search_lists_partitions_as_it_goes() {
+    use yisi_engine::protocol::{
+        JobPartitions, PARTITIONS, SEARCH_PARTITIONS, SearchMode, SearchSummary,
+    };
+
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-search-quick");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (image, disk) = lost_partitions_image(&dir);
+    let source = json!({"type": "image", "path": image, "sectorSize": 512});
+    let mut engine = Engine::start();
+    engine
+        .call(
+            SEARCH_PARTITIONS,
+            json!({"jobId": "sq", "source": source, "mode": "quick"}),
+        )
+        .unwrap();
+    let notifications = engine.notifications_until(COMPLETED);
+    assert!(engine.wait_exit().success());
+    let summary: SearchSummary =
+        serde_json::from_value(notifications.last().unwrap().1["result"].clone()).unwrap();
+    assert_eq!(summary.mode, SearchMode::Quick);
+    assert_eq!(summary.stopped_at, None);
+    // 快速搜索跳过 NTFS 分区里面，不会找到里面的 FAT12 镜像文件
+    let found: Vec<_> = summary
+        .candidates
+        .iter()
+        .map(|candidate| (candidate.offset, candidate.found_by.as_str()))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (disk.fat32.0, "both"),
+            (disk.ntfs.0, "backup"),
+            (disk.exfat.0, "both")
+        ]
+    );
+    let first: JobPartitions = serde_json::from_value(
+        notifications
+            .iter()
+            .find(|(method, _)| method == PARTITIONS)
+            .expect("搜索过程中没有交出找到的分区")
+            .1
+            .clone(),
+    )
+    .unwrap();
+    assert_eq!(first.candidates[0].offset, disk.fat32.0);
+}
+
+#[test]
+fn stopping_a_partition_search_keeps_what_was_found() {
+    use yisi_engine::protocol::{PARTITIONS, SEARCH_PARTITIONS, SearchSummary};
+
+    // 开头是丢了分区表的样本，后面补成 1 GiB（只设长度）：找到第一个分区时离搜完还远
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-search-stop");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (image, disk) = lost_partitions_image(&dir);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&image)
+        .unwrap()
+        .set_len(1 << 30)
+        .unwrap();
+    let source = json!({"type": "image", "path": image, "sectorSize": 512});
+    let mut engine = Engine::start();
+    engine
+        .call(
+            SEARCH_PARTITIONS,
+            json!({"jobId": "ss", "source": source, "mode": "deep"}),
+        )
+        .unwrap();
+    engine.notifications_until(PARTITIONS);
+    engine.call(CANCEL, json!({"jobId": "ss"})).unwrap();
+    let notifications = engine.notifications_until(COMPLETED);
+    assert!(engine.wait_exit().success());
+    assert!(notifications.iter().all(|(method, _)| method != CANCELLED));
+    let summary: SearchSummary =
+        serde_json::from_value(notifications.last().unwrap().1["result"].clone()).unwrap();
+    let stopped_at = summary.stopped_at.expect("应停在半路");
+    assert!(stopped_at < summary.size, "{stopped_at}");
+    assert_eq!(summary.candidates[0].offset, disk.fat32.0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn partition_search_pauses_and_resumes() {
     use yisi_engine::protocol::{SEARCH_PARTITIONS, SearchSummary};
 
@@ -1820,7 +1909,10 @@ fn partition_search_pauses_and_resumes() {
     let started = Instant::now();
     let mut engine = Engine::start();
     engine
-        .call(SEARCH_PARTITIONS, json!({"jobId": "sp", "source": source}))
+        .call(
+            SEARCH_PARTITIONS,
+            json!({"jobId": "sp", "source": source, "mode": "deep"}),
+        )
         .unwrap();
     engine.call(PAUSE, json!({"jobId": "sp"})).unwrap();
     engine.notifications_for(Duration::from_millis(300));

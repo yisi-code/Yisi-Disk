@@ -9,6 +9,7 @@ import {
   toHostError,
   type CopiedFile,
   type FoundFile,
+  type FoundPartition,
   type HostError,
   type ImagingStatus,
   type JobEvent,
@@ -26,13 +27,14 @@ export type JobStatus =
 
 /**
  * 各类任务自己的结果处理：任务完成时交出结果，深度恢复陆续交出找到的文件，复制陆续交出复制好的文件，
- * 制作镜像陆续交出读取进展
+ * 制作镜像陆续交出读取进展，丢失分区搜索陆续交出到目前为止找到的全部分区
  */
 export interface JobHandlers<TResult> {
   onCompleted: (result: TResult) => void
   onFound?: (files: FoundFile[]) => void
   onCopied?: (files: CopiedFile[]) => void
   onImaging?: (status: ImagingStatus) => void
+  onPartitions?: (candidates: FoundPartition[]) => void
 }
 
 /**
@@ -215,6 +217,9 @@ export function useJob<TResult>(
         break
       case 'imaging':
         handlers.onImaging?.(event.data)
+        break
+      case 'partitions':
+        handlers.onPartitions?.(event.data.candidates)
         break
       case 'reading':
         reading.value = event.data

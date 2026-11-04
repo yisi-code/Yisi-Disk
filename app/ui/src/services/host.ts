@@ -324,10 +324,16 @@ export interface FoundPartition {
   overlapsCandidate: boolean
 }
 
+/** 丢失分区怎么搜：quick 只看分区通常开始的位置、找到就跳过；deep 从头到尾读一遍 */
+export type SearchMode = 'quick' | 'deep'
+
 /** 丢失分区搜索的结果 */
 export interface SearchSummary {
   size: number
   sectorSize: number
+  mode: SearchMode
+  /** 被停下时搜到的位置（字节）；停下之前找到的分区照样列出。搜完时为 null */
+  stoppedAt: number | null
   /** 现有分区表：mbr、gpt、none；读不出时为 unreadable */
   scheme: 'mbr' | 'gpt' | 'none' | 'unreadable'
   /** 按起点排序 */
@@ -490,6 +496,8 @@ export type JobEvent<TResult = unknown> =
   | { jobId: string; kind: 'found'; data: { files: FoundFile[] } }
   | { jobId: string; kind: 'copied'; data: { files: CopiedFile[] } }
   | { jobId: string; kind: 'imaging'; data: ImagingStatus }
+  /** 丢失分区搜索到目前为止找到的全部分区（有变化时发出，最后一份在结果里） */
+  | { jobId: string; kind: 'partitions'; data: { candidates: FoundPartition[]; candidatesTruncated: boolean } }
   | { jobId: string; kind: 'reading'; data: ReadingStats }
   | { jobId: string; kind: 'log'; data: { level: string; message: string } }
   | { jobId: string; kind: 'completed'; data: { result: TResult } }
@@ -650,8 +658,9 @@ export function cancelScan(jobId: string, partition: number): Promise<void> {
 }
 
 /** 搜索丢失的分区（只读，可以暂停）；物理磁盘与扫描一样可能先等提权。结果经 completed 事件送达 */
-export function startPartitionSearch(jobId: string, target: JobTarget): Promise<void> {
-  return invoke<void>('job_start_partition_search', { jobId, target })
+/** 被取消时也以 completed 结束，结果里是停下之前找到的分区 */
+export function startPartitionSearch(jobId: string, target: JobTarget, mode: SearchMode): Promise<void> {
+  return invoke<void>('job_start_partition_search', { jobId, target, mode })
 }
 
 /**

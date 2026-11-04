@@ -267,9 +267,10 @@ fn dispatch_now(
             state.ensure_idle()?;
             let params: SearchParams = request.params()?;
             let device: Arc<dyn BlockDevice> = Arc::from(open_source(&params.source)?);
+            let mode = params.mode;
             state.job = Some(
                 start_job(params.job_id, outbox, events, move |context| {
-                    search_job::run(device, context)
+                    search_job::run(device, mode, context)
                 })
                 .pausable(),
             );

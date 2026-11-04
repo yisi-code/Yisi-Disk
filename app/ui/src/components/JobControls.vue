@@ -10,6 +10,8 @@ const props = defineProps<{
   status: JobStatus
   /** 给了就显示暂停 / 继续 */
   pause?: { isPaused: boolean; isToggling: boolean }
+  /** 取消后保留已经得到的结果（丢失分区搜索）：按钮写「停止」 */
+  keepsResult?: boolean
 }>()
 const emit = defineEmits<{ pause: []; resume: []; cancel: [] }>()
 
@@ -40,6 +42,7 @@ function togglePause() {
     :disabled="status !== 'running'"
     @click="emit('cancel')"
   >
-    {{ status === 'cancelling' ? t('common.cancelling') : t('common.cancel') }}
+    <template v-if="keepsResult">{{ status === 'cancelling' ? t('common.stopping') : t('common.stop') }}</template>
+    <template v-else>{{ status === 'cancelling' ? t('common.cancelling') : t('common.cancel') }}</template>
   </button>
 </template>

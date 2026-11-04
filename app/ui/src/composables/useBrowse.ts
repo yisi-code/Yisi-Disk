@@ -1,4 +1,4 @@
-import { computed, onBeforeUnmount, ref, shallowRef } from 'vue'
+import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import { useJob } from './useJob'
 import {
   cancelJob,
@@ -60,10 +60,24 @@ export function useBrowse() {
     })
   }
 
+  /**
+   * 关闭会话，等引擎真的结束这个任务再返回：关掉之后马上再打开（例如很快就搜完了又要浏览）时，
+   * open 才不会因为还在「正在取消」而什么也不做
+   */
   async function close() {
     opened.value = null
     resetScans()
     await job.cancel()
+    if (job.status.value === 'cancelling') {
+      await new Promise<void>((resolve) => {
+        const stop = watch(job.status, (status) => {
+          if (status !== 'cancelling') {
+            stop()
+            resolve()
+          }
+        })
+      })
+    }
   }
 
   /** 按位置打开一个不在分区表里的分区（丢失分区搜索找到的），之后用答复里的编号浏览 */
