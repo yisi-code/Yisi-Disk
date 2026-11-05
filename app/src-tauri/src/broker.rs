@@ -1,5 +1,4 @@
 //! 磁盘代理会话：第一次需要打开物理磁盘时弹出 UAC 启动代理，之后整个会话复用；宿主退出时代理随之退出。
-//! 界面选中物理磁盘或卷时就先启动代理（[`BrokerSession::prepare`]），开始任务时不用再等 UAC。
 
 #[cfg(windows)]
 use std::sync::Mutex;
@@ -37,21 +36,6 @@ impl BrokerSession {
     #[cfg(windows)]
     pub fn set_owner(&self, hwnd: isize) {
         self.owner.store(hwnd, Ordering::Relaxed);
-    }
-
-    /// 还没有代理时先提权启动它，之后的任务直接复用；已经有了就什么也不做。
-    #[cfg(windows)]
-    pub fn prepare(&self) -> Result<(), HostError> {
-        let mut connection = lock(&self.connection);
-        if connection.is_none() {
-            *connection = Some(launch(self.owner.load(Ordering::Relaxed))?);
-        }
-        Ok(())
-    }
-
-    #[cfg(not(windows))]
-    pub fn prepare(&self) -> Result<(), HostError> {
-        Ok(())
     }
 
     /// 请代理以只读方式打开 `path`，把句柄复制进 `target_pid` 进程，返回句柄在那个进程里的值。

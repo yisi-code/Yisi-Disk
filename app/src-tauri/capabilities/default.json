@@ -53,7 +53,6 @@
     "allow-write-history-list",
     "allow-job-start-fs-check",
     "allow-fs-check-save-report",
-    "allow-broker-prepare",
     "dialog:allow-open",
     "dialog:allow-save",
     "core:event:allow-listen",

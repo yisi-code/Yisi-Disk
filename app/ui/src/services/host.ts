@@ -570,14 +570,6 @@ export function getEngineCapabilities(): Promise<EngineCapabilities> {
   return invoke<EngineCapabilities>('engine_capabilities')
 }
 
-/**
- * 先提权启动磁盘代理（弹出 UAC），之后读物理磁盘或卷的任务不用再等；已经启动过时直接返回。
- * 用户拒绝时以 elevationCancelled 失败
- */
-export function prepareBroker(): Promise<void> {
-  return invoke<void>('broker_prepare')
-}
-
 /** 列出物理磁盘：只查询设备属性，不需要管理员权限 */
 export async function listDisks(): Promise<DiskSummary[]> {
   const list = await invoke<{ disks: DiskSummary[] }>('disk_list')
