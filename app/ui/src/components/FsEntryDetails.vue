@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import FilePreviewView from './FilePreviewView.vue'
 import type { TreeItem } from './FsBrowser.vue'
 import { useDelayedPreview } from '../composables/useDelayedPreview'
+import { useEntryAttributes } from '../composables/useEntryAttributes'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { usePositionText } from '../composables/usePositionText'
 import { previewFsFile, type HostError } from '../services/host'
@@ -27,6 +28,7 @@ const props = defineProps<{
 const emit = defineEmits<{ open: [item: TreeItem] }>()
 
 const { t, locale } = useI18n()
+const { attributesDetail } = useEntryAttributes()
 const { bytePosition } = usePositionText()
 const titleId = useId()
 const { formatHostError } = useHostErrorText()
@@ -87,6 +89,10 @@ const position = computed(() => {
           <dd class="wizard__path-text">/{{ item.path.join('/') }}</dd>
           <dt>{{ t('partitionFiles.details.state') }}</dt>
           <dd>{{ stateText }}</dd>
+          <template v-if="attributesDetail(item.entry)">
+            <dt>{{ t('partitionFiles.details.attributes') }}</dt>
+            <dd>{{ attributesDetail(item.entry) }}</dd>
+          </template>
           <template v-if="item.entry.unsupported">
             <dt>{{ t('partitionFiles.details.storage') }}</dt>
             <dd>{{ t(`partitionFiles.unsupportedDetail.${item.entry.unsupported}`) }}</dd>

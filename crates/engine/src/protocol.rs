@@ -632,6 +632,11 @@ pub struct FsEntry {
     /// 不在卷上的虚拟目录：`orphans` 是「找不到原目录的文件」。
     #[serde(default)]
     pub virtual_dir: Option<String>,
+    /// 带隐藏、系统属性（回收站 `$RECYCLE.BIN`、`System Volume Information` 等，资源管理器默认不显示）。
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default)]
+    pub system: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

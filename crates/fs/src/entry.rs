@@ -348,6 +348,23 @@ impl FileRef {
     }
 }
 
+/// 文件属性里与显示有关的两位：隐藏、系统（资源管理器默认不显示带这两位的回收站、`System Volume Information` 等）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FileAttributes {
+    pub hidden: bool,
+    pub system: bool,
+}
+
+impl FileAttributes {
+    /// 从卷上记的属性取（FAT 的属性字节、exFAT 的 16 位属性、NTFS 的 32 位文件属性，低几位含义相同）。
+    pub(crate) fn from_bits(bits: u32) -> Self {
+        Self {
+            hidden: bits & u32::from(crate::format::ATTR_HIDDEN) != 0,
+            system: bits & u32::from(crate::format::ATTR_SYSTEM) != 0,
+        }
+    }
+}
+
 /// 目录里的一项（不含 `.`、`..` 和卷标）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
@@ -367,6 +384,7 @@ pub struct Entry {
     pub position: Option<u64>,
     /// 内容的存放方式暂不支持，读出来不是原样。
     pub unsupported: Option<Unsupported>,
+    pub attributes: FileAttributes,
     pub file: FileRef,
 }
 

@@ -94,6 +94,8 @@ struct Node {
     /// 压缩的数据流记的压缩单元（[`NtfsImage::add_compressed`] 为 4；只 `mark_compressed` 时为 0，读不出）。
     compression_unit: u8,
     encrypted: bool,
+    /// 另加的文件属性位（隐藏 0x02、系统 0x04 等），写进 `$STANDARD_INFORMATION` 与 `$FILE_NAME`。
+    attributes: u32,
     /// 重分析点的内容（开头 4 字节是标记）。
     reparse: Option<Vec<u8>>,
     /// 备用数据流（有名字的 `$DATA`），放在基本记录里、无名数据流之后。
@@ -357,6 +359,11 @@ impl NtfsImage {
         self.nodes.get_mut(&record).unwrap().encrypted = true;
     }
 
+    /// 加上文件属性位（隐藏 0x02、系统 0x04 等）。
+    pub fn add_attributes(&mut self, record: u64, bits: u32) {
+        self.nodes.get_mut(&record).unwrap().attributes |= bits;
+    }
+
     /// 只带标记的重分析点（内容为空）。
     pub fn mark_reparse(&mut self, record: u64, tag: u32) {
         let mut value = vec![0u8; 8];
@@ -598,7 +605,7 @@ impl NtfsImage {
             Data::Resident(bytes) => bytes.len(),
             Data::NonResident { size, .. } => *size,
         } as u64;
-        let mut flags = 0u32;
+        let mut flags = node.attributes;
         if node.is_dir {
             flags |= 0x1000_0000;
         }
@@ -638,7 +645,7 @@ impl NtfsImage {
         for at in [0x00, 0x08, 0x10, 0x18] {
             value[at..at + 8].copy_from_slice(&SAMPLE_FILETIME.to_le_bytes());
         }
-        let mut attributes = 0x20u32;
+        let mut attributes = 0x20u32 | node.attributes;
         if node.encrypted {
             attributes |= 0x4000;
         }

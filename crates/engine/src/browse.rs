@@ -381,6 +381,8 @@ impl Session {
                     .map(|reason| unsupported_key(reason).to_owned()),
                 record: entry.file.record(),
                 virtual_dir: entry.file.is_orphans().then(|| "orphans".to_owned()),
+                hidden: entry.attributes.hidden,
+                system: entry.attributes.system,
                 name: entry.name,
                 short_name: entry.short_name,
                 name_uncertain: entry.name_uncertain,

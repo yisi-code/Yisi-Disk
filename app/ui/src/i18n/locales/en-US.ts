@@ -914,13 +914,22 @@ const enUS: typeof zhCN = {
     folderInvalid: 'Enter a full path with a drive letter, e.g. D:/Photos/2024 (network paths are not supported).',
   },
   partitionFiles: {
+    attributes: {
+      hidden: 'Hidden',
+      system: 'System',
+      detail: '{label}: File Explorer does not show it by default. {note}',
+      known: {
+        recycleBin: 'This is the Windows Recycle Bin: files deleted to the Recycle Bin are kept here in a subfolder per user, renamed to start with $R, with the original name and location recorded in the matching $I file.',
+        systemVolumeInformation: 'This is where Windows keeps restore points, shadow copies and the search index; there is usually no need to recover it.',
+      },
+    },
     browse: {
       partition: 'Partition',
-      view: {
-        label: 'Files to list',
-        all: 'All',
+      filter: {
+        label: 'Show',
         live: 'Not deleted',
         deleted: 'Deleted',
+        hidden: 'Hidden and system files',
       },
       liveHint:
         'This reads what is on the disk right now. While a partition is in use, recently written files may not have reached the disk yet; to recover deleted files, stop writing to this disk first.',
@@ -934,6 +943,7 @@ const enUS: typeof zhCN = {
       check: 'Select {name}',
       checkInherited: 'Its folder is selected, so it is copied too; to leave it out, clear the folder first',
       nameUncertain: 'Incomplete name: the first letter was lost when it was deleted',
+      contextDir: 'Folder that is not deleted: listed even when only "Deleted" is ticked; expand it to see the deleted files inside',
       orphans: 'Files without their folder',
       hint: 'Click a folder to expand or collapse it, click a file to see its details, double-click a file to open it with its default app. Arrow keys move, Space selects.',
       status: {
@@ -941,6 +951,8 @@ const enUS: typeof zhCN = {
         more: '{count} more, loading…',
         error: 'Read failed: {reason} (click to retry)',
         empty: 'Empty folder',
+        filtered: 'Nothing here matches the ticked options ({count} item not shown) | Nothing here matches the ticked options ({count} items not shown)',
+        nothingChecked: 'Tick "Not deleted" or "Deleted" above to list files',
         overwritten: 'This deleted folder has been overwritten; its contents cannot be listed',
         truncated: 'This folder has too many entries; not all are listed',
       },
@@ -987,6 +999,7 @@ const enUS: typeof zhCN = {
       shortName: 'Short name',
       path: 'Path',
       state: 'Status',
+      attributes: 'Attributes',
       size: 'Size',
       modified: 'Modified',
       created: 'Created',
@@ -1080,6 +1093,7 @@ const enUS: typeof zhCN = {
       preparing: 'Preparing the plan to write it back…',
       hint: 'A "lost" partition can be written back to the partition table: a backup is saved first, nothing is written until you confirm, and it can be rolled back. Windows mounts it afterwards and may write to it, so save the files you need first.',
       volumeUnsupported: 'A single drive letter is selected, so the partition table cannot be changed: choose the whole disk.',
+      inTable: 'This partition is in the partition table (partition {number}), so it is not lost and there is nothing to write back: if Windows can read it, it already has a drive letter. If it will not open or asks to be formatted, use "Repair a partition that will not open" to repair it in place, without saving files elsewhere.',
       structureOnly: 'Both boot sectors of this partition are gone; it was found by its master file table ($MFT) and is browsed with worked-out settings. Where the partition originally ended cannot be worked out exactly, so writing it back to the partition table is not offered. Save the files you need to another disk first.',
       outcome: '{action}: {outcome}',
       reopenHint: 'The partition table has changed, but "lost" in the results is not updated: search again to check, or look in "Repair a partition that will not open".',

@@ -29,7 +29,7 @@ use self::scan::Scan;
 use self::stream::Stream;
 use self::wof::{WOF_STREAM, WofAlgorithm, WofReader, wof_algorithm};
 use crate::bpb::NtfsBpb;
-use crate::entry::{Entry, FileRef, Listing, Location, Stamp, State, Unsupported};
+use crate::entry::{Entry, FileAttributes, FileRef, Listing, Location, Stamp, State, Unsupported};
 use crate::reader::{FileReader, Piece};
 use crate::region::Region;
 use crate::{FsError, MAX_ENTRIES, ScanSummary, bpb};
@@ -452,6 +452,7 @@ impl Ntfs {
                     state: State::Live,
                     position: None,
                     unsupported: None,
+                    attributes: FileAttributes::default(),
                     file: FileRef::orphans(),
                 });
             }
@@ -709,6 +710,7 @@ fn live_entries(keys: &[index::Key], dir: u64, scan: Option<&Scan>) -> Vec<Entry
             state: State::Live,
             position,
             unsupported,
+            attributes: FileAttributes::from_bits(name.flags),
             file: FileRef {
                 size,
                 is_dir,

@@ -13,7 +13,7 @@ use super::wof::wof_algorithm;
 use super::{
     BITMAP_RECORD, Ntfs, Value, file_names, reparse_point, truncated_on_delete, unsupported,
 };
-use crate::entry::{Entry, FileRef, Location, Stamp, State, Unsupported};
+use crate::entry::{Entry, FileAttributes, FileRef, Location, Stamp, State, Unsupported};
 use crate::{FsError, ScanSummary};
 
 /// 一次读这么多字节的 MFT 或分配位图。
@@ -134,6 +134,8 @@ struct DeletedName {
     short_name: Option<String>,
     created: u64,
     modified: u64,
+    /// `$FILE_NAME` 里的文件属性。
+    attributes: u32,
 }
 
 /// 在用的扩展记录里找到的数据流开头一段：基本记录里没有数据流时用它补长度与位置。
@@ -357,6 +359,7 @@ impl Scan {
             },
             position: summary.position(),
             unsupported: summary.unsupported(),
+            attributes: FileAttributes::from_bits(name.attributes),
             file: FileRef {
                 size,
                 is_dir,
@@ -519,6 +522,7 @@ impl Builder<'_> {
                 } else {
                     modified
                 },
+                attributes: name.flags,
             });
         }
     }

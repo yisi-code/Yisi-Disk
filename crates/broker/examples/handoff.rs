@@ -47,7 +47,7 @@ mod windows_demo {
         let device = args.next().context("缺少参数：设备路径")?;
 
         println!("本进程 pid={}", std::process::id());
-        let mut connection = BrokerConnection::launch(&broker, Duration::from_secs(120))?;
+        let mut connection = BrokerConnection::launch(&broker, Duration::from_secs(120), 0)?;
         println!("代理已连上并核对身份：pid={}", connection.broker_pid());
 
         let DiskOpened {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, ref, useId, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import FsBrowser, { type FileView, type TreeItem } from './FsBrowser.vue'
+import FsBrowser, { type FileFilter, type TreeItem } from './FsBrowser.vue'
 import FsEntryDetails from './FsEntryDetails.vue'
 import JobControls from './JobControls.vue'
 import FailureList from './FailureList.vue'
@@ -26,7 +26,7 @@ import {
 import { formatBytes, formatSeconds } from '../utils/format'
 
 /**
- * 一个分区里的文件：左边目录树（勾选、按全部 / 未删除 / 已删除筛选、另存为），右边详情与预览，下面是复制的进度与结果。
+ * 一个分区里的文件：左边目录树（勾选、按未删除 / 已删除 / 隐藏与系统文件筛选、另存为），右边详情与预览，下面是复制的进度与结果。
  * 「找回删除的文件」「找回丢失的分区」「修复打不开的分区」共用。根节点 display: contents，两栏与复制状态直接排进父级的网格：
  * 父级给出 grid-template-rows: auto 1fr auto（两栏各占三行、用 subgrid 对齐），最后两列是这两栏
  */
@@ -58,13 +58,17 @@ const props = defineProps<{
 const isBusy = defineModel<boolean>('busy', { default: false })
 
 const { t } = useI18n()
-const domPrefix = useId()
 const { formatHostError } = useHostErrorText()
 const copy = useCopy()
 
-const FILE_VIEWS: FileView[] = ['all', 'live', 'deleted']
+const FILTER_KEYS: (keyof FileFilter)[] = ['live', 'deleted', 'hidden']
 
-const fileView = ref<FileView>(props.revealPath === undefined ? 'all' : 'deleted')
+/** 默认只列平时在资源管理器里看得到的：未删除、不隐藏；选文件夹找回时只列已删除的 */
+const fileFilter = ref<FileFilter>({
+  live: props.revealPath === undefined,
+  deleted: props.revealPath !== undefined,
+  hidden: false,
+})
 /** 定位文件夹时没找到的那一级（可能已被删除或改名） */
 const revealMissing = ref<string | null>(null)
 const selectedItem = ref<TreeItem | null>(null)
@@ -262,22 +266,17 @@ async function revealOutput() {
       class="wizard__pane"
       :job-id="jobId"
       :partition="partition.number"
-      :view="fileView"
+      :filter="fileFilter"
       :reveal-path="revealPath"
       @open="openItem"
       @revealed="revealMissing = $event"
     >
       <template #tools>
-        <fieldset class="partition-files__views">
-          <legend class="wizard__visually-hidden">{{ t('partitionFiles.browse.view.label') }}</legend>
-          <label
-            v-for="view in FILE_VIEWS"
-            :key="view"
-            class="partition-files__view"
-            :class="{ 'partition-files__view--current': fileView === view }"
-          >
-            <input v-model="fileView" type="radio" :name="`${domPrefix}-view`" :value="view" />
-            {{ t(`partitionFiles.browse.view.${view}`) }}
+        <fieldset class="partition-files__filters">
+          <legend class="partition-files__filters-label">{{ t('partitionFiles.browse.filter.label') }}</legend>
+          <label v-for="key in FILTER_KEYS" :key="key" class="partition-files__filter">
+            <input v-model="fileFilter[key]" type="checkbox" />
+            {{ t(`partitionFiles.browse.filter.${key}`) }}
           </label>
         </fieldset>
       </template>
@@ -390,52 +389,29 @@ async function revealOutput() {
   grid-column: -3 / -1;
 }
 
-.partition-files__views {
+.partition-files__filters {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-xs) var(--space-md);
   margin: 0;
   padding: 0;
+  font-size: var(--font-size-small);
   border: 0;
 }
 
-/* 一组三个相连的切换按钮；单选框藏起来，键盘照样用方向键切换 */
-.partition-files__view {
-  position: relative;
-  padding: 2px var(--space-sm);
-  font-size: var(--font-size-small);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
+/* legend 不能直接排进 flex，浮起来才与勾选项同一行 */
+.partition-files__filters-label {
+  float: left;
+  padding: 0;
+  color: var(--color-text-muted);
+}
+
+.partition-files__filter {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
   cursor: pointer;
-}
-
-.partition-files__view + .partition-files__view {
-  margin-left: -1px;
-}
-
-.partition-files__view:first-of-type {
-  border-radius: var(--radius-control) 0 0 var(--radius-control);
-}
-
-.partition-files__view:last-of-type {
-  border-radius: 0 var(--radius-control) var(--radius-control) 0;
-}
-
-.partition-files__view input {
-  position: absolute;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.partition-files__view--current {
-  z-index: 1;
-  color: var(--color-on-accent);
-  background: var(--color-accent);
-  border-color: var(--color-accent);
-}
-
-.partition-files__view:has(input:focus-visible) {
-  z-index: 2;
-  outline: 2px solid var(--color-accent);
-  outline-offset: 1px;
 }
 
 .partition-files__save-as {

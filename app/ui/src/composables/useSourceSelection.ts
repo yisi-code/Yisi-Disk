@@ -1,5 +1,5 @@
-import { computed, ref } from 'vue'
-import type { JobTarget } from '../services/host'
+import { computed, ref, watch } from 'vue'
+import { prepareBroker, type JobTarget } from '../services/host'
 
 /** 选源的方式：镜像文件、物理磁盘或其中一个卷（盘符）、某个文件夹（读它所在的卷，找回里面的文件） */
 export type SourceKind = 'image' | 'disk' | 'folder'
@@ -24,6 +24,20 @@ export function parseFolder(text: string): FolderLocation | null {
     letter: letter.toUpperCase(),
     path: rest.split(/[\\/]+/).filter((name) => name !== ''),
   }
+}
+
+/** 本次运行里提前提权过了（不论用户同意还是拒绝）：只在第一次选中磁盘或卷时弹 UAC，拒绝了也不追着弹，开始任务时照常会问 */
+let hasPrepared = false
+
+/** 选中物理磁盘或卷时先请宿主提权启动磁盘代理，等用户点开始时 UAC 已经答完 */
+function prepareDeviceAccess() {
+  if (hasPrepared) {
+    return
+  }
+  hasPrepared = true
+  prepareBroker().catch(() => {
+    // 拒绝或启动失败都不在这里提示：开始任务时会再问一次，并按那时的结果报错
+  })
 }
 
 /**
@@ -52,6 +66,12 @@ export function useSourceSelection(initialKind: SourceKind = 'image') {
       }
     }
     return null
+  })
+
+  watch(target, (current) => {
+    if (current !== null && current.kind !== 'image') {
+      prepareDeviceAccess()
+    }
   })
 
   return { sourceKind, imagePath, device, folder, folderLocation, target }
