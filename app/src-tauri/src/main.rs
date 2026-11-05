@@ -666,12 +666,6 @@ fn fs_check_save_report(target: Target, path: String, text: String) -> Result<()
     save_fs_check_report(&target, &path, &text)
 }
 
-/// 界面选中物理磁盘或卷时先提权启动磁盘代理（弹出 UAC），开始任务时不用再等；已经启动过就直接返回。
-#[tauri::command(async)]
-fn broker_prepare(broker: State<'_, BrokerSession>) -> Result<(), HostError> {
-    broker.prepare()
-}
-
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -778,7 +772,6 @@ fn main() -> anyhow::Result<()> {
             write_plan_rollback,
             write_history_list,
             job_start_fs_check,
-            broker_prepare,
             fs_check_save_report
         ])
         .run(tauri::generate_context!())?;
