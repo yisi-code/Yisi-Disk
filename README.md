@@ -86,6 +86,8 @@ cargo test --workspace
 pnpm typecheck
 ```
 
+每次推送到 `main` 和每个拉取请求，GitHub Actions 会在干净的 Windows 环境里从头跑一遍界面构建（含类型检查）、格式、clippy 与全部测试（`.github/workflows/ci.yml`）。
+
 ## 目录结构
 
 ```

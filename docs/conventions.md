@@ -37,6 +37,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+CI（`.github/workflows/ci.yml`）在每次推送到 `main` 与每个拉取请求时，在干净的 Windows 环境里跑同样几项，外加界面依赖按锁文件安装与 `pnpm build`（含类型检查）。工具链版本在 CI 里写死（与本机开发用的一致），第三方 Action 按提交号固定；升级工具链或 Action 时一起改。只做 Windows，不跑其他平台。
+
 ## 3. 界面（Vue 3 + TypeScript）
 
 - 界面只运行在 Tauri 桌面窗口中，不考虑浏览器与移动端；窗口最小 960×640。开发服务器只绑定 `127.0.0.1`。
