@@ -95,7 +95,12 @@ const canWrite = computed(() => canWritePlan(search.target.value))
 /** 选中的是「丢失」、又不与别的候选重叠的分区：可以写回分区表 */
 const canWriteBack = computed(() => {
   const candidate = selectedCandidate.value
-  return candidate !== null && candidate.relation === 'lost' && !candidate.overlapsCandidate
+  return (
+    candidate !== null &&
+    candidate.relation === 'lost' &&
+    !candidate.overlapsCandidate &&
+    candidate.foundBy !== 'structure'
+  )
 })
 
 /** 结果页上正在确认写回分区表或回滚 */
@@ -539,23 +544,29 @@ async function openSelected() {
                 </label>
               </li>
             </ul>
-            <p class="wizard__hint">{{ t('findPartitions.list.hint') }}</p>
-            <div v-if="canWriteBack" class="find-partitions__write">
-              <template v-if="canWrite">
-                <button
-                  class="wizard__button wizard__button--secondary"
-                  type="button"
-                  :disabled="isPartitionBusy"
-                  @click="proposeWriteBack"
-                >
-                  {{ t('findPartitions.write.start') }}
-                </button>
-                <p v-if="writePlan.isPreparing.value" class="wizard__note" aria-live="polite">
-                  {{ t('findPartitions.write.preparing') }}
-                </p>
-                <p v-else class="wizard__hint">{{ t('findPartitions.write.hint') }}</p>
-              </template>
-              <p v-else class="wizard__hint">{{ t('findPartitions.write.volumeUnsupported') }}</p>
+            <!-- 这一栏按三行排（标题、列表、下面这些），下面的提示与写回放在同一格里 -->
+            <div class="find-partitions__footer">
+              <p class="wizard__hint">{{ t('findPartitions.list.hint') }}</p>
+              <p v-if="selectedCandidate?.foundBy === 'structure'" class="wizard__hint">
+                {{ t('findPartitions.write.structureOnly') }}
+              </p>
+              <div v-if="canWriteBack" class="find-partitions__write">
+                <template v-if="canWrite">
+                  <button
+                    class="wizard__button wizard__button--secondary"
+                    type="button"
+                    :disabled="isPartitionBusy"
+                    @click="proposeWriteBack"
+                  >
+                    {{ t('findPartitions.write.start') }}
+                  </button>
+                  <p v-if="writePlan.isPreparing.value" class="wizard__note" aria-live="polite">
+                    {{ t('findPartitions.write.preparing') }}
+                  </p>
+                  <p v-else class="wizard__hint">{{ t('findPartitions.write.hint') }}</p>
+                </template>
+                <p v-else class="wizard__hint">{{ t('findPartitions.write.volumeUnsupported') }}</p>
+              </div>
             </div>
           </section>
 
@@ -696,6 +707,12 @@ async function openSelected() {
   display: flex;
   padding: var(--space-sm);
   border-bottom: 1px solid var(--color-border);
+}
+
+.find-partitions__footer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
 }
 
 .find-partitions__outcome,

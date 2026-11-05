@@ -2,12 +2,17 @@
 
 use std::collections::HashMap;
 
+use crate::font::{Sfnt, Woff};
+use crate::iff::{AIFF, DJVU};
+use crate::metafile::{Emf, Wmf};
 use crate::mp4::{Cr3, Heic, Mp4};
 use crate::plugin::{FileFormat, Recovering};
 use crate::riff::{AVI, WAV, WEBP};
 use crate::{
-    bmp::Bmp, gif::Gif, jpg::Jpg, mkv::Mkv, mp3::Mp3, ole::Ole, pdf::Pdf, png::Png, rar::Rar,
-    sevenzip::SevenZip, sqlite::Sqlite, tiff::Tiff, zip::Zip,
+    asf::Asf, bmp::Bmp, cab::Cab, chm::Chm, evtx::Evtx, flv::Flv, gif::Gif, ico::Ico, jpg::Jpg,
+    midi::Midi, mkv::Mkv, mp3::Mp3, ogg::Ogg, ole::Ole, pdf::Pdf, pe::Pe, png::Png, psd::Psd,
+    pst::Pst, raf::Raf, rar::Rar, regf::Regf, sevenzip::SevenZip, sqlite::Sqlite, swf::Swf,
+    tar::Tar, tiff::Tiff, zip::Zip,
 };
 
 /// 一块的开头命中了某个格式的文件头。
@@ -83,6 +88,27 @@ impl Registry {
             Box::new(SevenZip),
             Box::new(Rar),
             Box::new(Sqlite),
+            Box::new(Ogg),
+            Box::new(AIFF),
+            Box::new(DJVU),
+            Box::new(Midi),
+            Box::new(Flv),
+            Box::new(Asf),
+            Box::new(Cab),
+            Box::new(Tar),
+            Box::new(Pe),
+            Box::new(Sfnt),
+            Box::new(Woff),
+            Box::new(Ico),
+            Box::new(Psd),
+            Box::new(Pst),
+            Box::new(Swf),
+            Box::new(Raf),
+            Box::new(Evtx),
+            Box::new(Regf),
+            Box::new(Chm),
+            Box::new(Emf),
+            Box::new(Wmf),
         ])
     }
 
@@ -208,6 +234,30 @@ mod tests {
             ("rar", samples::rar5(&[10])),
             ("rar", samples::rar4(&[10], true)),
             ("sqlite", samples::sqlite(512, 1)),
+            ("ogg", samples::ogg(&[b"\x01vorbis"], 2, 1)),
+            ("aif", samples::iff(b"", b"AIFF", &[(b"COMM", 18)])),
+            ("djvu", samples::iff(b"AT&T", b"DJVU", &[(b"INFO", 10)])),
+            ("mid", samples::midi(&[20], false)),
+            ("flv", samples::flv(2)),
+            ("asf", samples::asf(false, 100)),
+            ("cab", samples::cab(1, 50)),
+            ("tar", samples::tar(&[("a.txt", 10)], false, false)),
+            ("exe", samples::pe(&samples::PeLayout::default())),
+            ("ttf", samples::sfnt(b"\0\x01\0\0", &[(b"head", 54)])),
+            ("ttc", samples::ttc(1, false)),
+            ("woff", samples::woff(false, 200)),
+            ("woff2", samples::woff(true, 200)),
+            ("ico", samples::ico(&[(true, 80)], false)),
+            ("cur", samples::ico(&[(false, 80)], true)),
+            ("psd", samples::psd(&samples::PsdLayout::default())),
+            ("pst", samples::pst(false, false, 1000)),
+            ("swf", samples::swf(&[4])),
+            ("raf", samples::raf(100, 100)),
+            ("evtx", samples::evtx(1)),
+            ("dat", samples::regf(1)),
+            ("chm", samples::chm(2, 10)),
+            ("emf", samples::emf(1, 0)),
+            ("wmf", samples::wmf(false, 1)),
         ];
         for (extension, sample) in cases {
             let position = registry.position(extension).unwrap();

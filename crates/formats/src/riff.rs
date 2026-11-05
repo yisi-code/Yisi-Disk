@@ -75,8 +75,9 @@ static SIGNATURES: [Signature; 1] = [Signature {
     bytes: b"RIFF",
 }];
 
-/// 从 `at` 起的这个 RIFF 一共多长（含补齐的字节）。
-fn riff_end(at: u64, size: u32) -> u64 {
+/// 从 `at` 起的这个 RIFF 一共多长（含补齐的字节）。RIFF 沿用 IFF 的块：4 字节类型、4 字节长度、内容，
+/// 奇数长度补一个字节；IFF 的 `FORM`（AIFF、DjVu）也按它算结尾，只是长度是大端。
+pub(crate) fn riff_end(at: u64, size: u32) -> u64 {
     at + 8 + u64::from(size) + u64::from(size & 1)
 }
 

@@ -4,6 +4,12 @@
 //! 两种搜法只是读哪些位置不同，认分区、比对分区表用同一套代码（[`Finder`]、[`Search::candidates`]）：
 //! - 深度搜索从头到尾读一遍设备，逐个 512 字节看；
 //! - 快速搜索只看分区通常开始的位置（[`next_start`]），找到一个分区就跳到它的末尾接着找。
+//!
+//! 主备引导扇区都没了的 NTFS 卷按结构找（[`Finder::examine_mft`]）：`$MFT` 与 `$MFTMirr` 的第一条记录内容相同，
+//! 各记着两份的簇号，一份的位置减去簇号乘簇大小就是分区起点，另一份要正好落在算出的位置上；卷的长度取 `$BadClus`
+//! 里 `$Bad` 流的长度（簇数乘簇大小）加上放备份引导扇区的一个扇区。这样找到的分区按推算的引导扇区打开
+//! （[`crate::boot_rebuild`]，与修复引导扇区同一套推算），只用来浏览、复制：分区原来的末尾零头推不出来。
+//! FAT、exFAT 的两份引导扇区都没了时，保留区大小与卷长度推不出唯一的解，不按结构找。
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -12,10 +18,15 @@ use std::time::Instant;
 use yisi_fs::boot::exfat_region_checksum_ok;
 use yisi_fs::boot_write::EXFAT_BOOT_REGION_SECTORS;
 use yisi_fs::format::{FatWidth, fat_entry_raw, fat_media_ok};
-use yisi_fs::{BootCopy, BootLayout, BootSector, FsKind, Volume, inspect_boot, mft_self_record_ok};
+use yisi_fs::{
+    BootCopy, BootLayout, BootSector, FsKind, Volume, bpb, inspect_boot, mft_bad_clusters_length,
+    mft_record_layout, mft_self_record_ok,
+};
 use yisi_io::{BlockDevice, ScanControl, ranges_overlap as overlaps, scan_device};
 use yisi_part::boot_sector::{has_signature, starts_with_jump};
-use yisi_part::{PartitionKind, PartitionTable, Role};
+use yisi_part::{Partition, PartitionKind, PartitionTable, Role};
+
+use crate::boot_rebuild::overlay_rebuilt;
 
 /// exFAT 的 FAT 第 0 项固定记介质描述符 `F8`（exFAT 的引导扇区里没有这一项）。
 const EXFAT_MEDIA: u8 = 0xF8;
@@ -32,6 +43,12 @@ const TRACK: u64 = 63 * 512;
 const SMALL_ALIGNMENT: u64 = 64 << 10;
 /// 一个分区结束之后，下一个分区常在这几处开始：紧接着、隔一个磁道（旧式的 EBR 与空隙）、隔 64 KiB、隔 1 MiB。
 const FOLLOW_GAPS: [u64; 4] = [0, TRACK, SMALL_ALIGNMENT, ALIGNMENT];
+/// `$MFT` 的记录最大 4 KiB（[`bpb::ntfs_size_ok`]）：按结构找时读这么多来看第 0、1 条记录。
+const MAX_MFT_RECORD: usize = 4096;
+/// `$BadClus` 是第 8 条记录。
+const BAD_CLUSTERS_RECORD: u64 = 8;
+/// 按推算的引导扇区打开时用的卷序列号：只为取卷标，不写盘。
+const PREVIEW_SERIAL: u64 = 0;
 /// 快速搜索在每个起点读的范围（按扇区数）：起点前一个扇区（到这里结束的 NTFS 卷的备份）、起点上的主引导扇区、
 /// FAT32 第 6 扇区的备份、exFAT 第 12 扇区起的备份引导区。
 const WINDOW_BEFORE: u64 = 1;
@@ -60,6 +77,8 @@ pub enum FoundBy {
     /// 主引导扇区已坏，靠备份引导扇区找到。
     Backup,
     Both,
+    /// 主备引导扇区都没了，按 `$MFT` 与 `$MFTMirr` 的结构找到（只有 NTFS）。
+    Structure,
 }
 
 /// 候选分区与现有分区表的关系。
@@ -83,6 +102,8 @@ pub struct Candidate {
     pub found_by: FoundBy,
     /// 浏览、复制时按哪一份引导扇区打开：只靠备份找到的（主引导扇区已坏）用备份，否则用主引导扇区。
     pub boot: BootCopy,
+    /// 按结构找到的：按推算的引导扇区打开（[`overlay_rebuilt`]），`boot` 不用。
+    pub rebuilt: bool,
     /// 卷超出了设备末尾，长度已截短。
     pub truncated: bool,
     pub relation: Relation,
@@ -220,6 +241,18 @@ impl Search {
         for (index, sector) in bytes.as_chunks::<SECTOR>().0.iter().enumerate() {
             let at = offset + (index * SECTOR) as u64;
             self.finder.examine(self.device.as_ref(), at, sector);
+            if may_be_first_record(sector) {
+                // 第 0、1 条记录要连着看；块末尾不够时从设备上补读
+                let start = index * SECTOR;
+                let records = match bytes.get(start..start + MAX_MFT_RECORD) {
+                    Some(records) => records.to_vec(),
+                    None => match read(self.device.as_ref(), at, MAX_MFT_RECORD) {
+                        Some(records) => records,
+                        None => continue,
+                    },
+                };
+                self.finder.examine_mft(self.device.as_ref(), at, &records);
+            }
         }
     }
 
@@ -267,10 +300,22 @@ impl Search {
     fn candidates(&mut self) -> Vec<Candidate> {
         let size = self.device.size();
         let mut candidates = Vec::with_capacity(self.finder.found.len());
+        // 起点处有引导扇区找到的分区：同一处按结构又找到一次的不再列（长度算法不同，键对不上）
+        let by_boot: BTreeSet<(u64, u8)> = self
+            .finder
+            .found
+            .iter()
+            .filter(|(_, found)| !found.structure)
+            .map(|(key, _)| (key.offset, key.kind))
+            .collect();
         for (key, found) in &self.finder.found {
+            if found.structure && by_boot.contains(&(key.offset, key.kind)) {
+                continue;
+            }
             let room = size.saturating_sub(key.offset);
             let length = key.volume_bytes.min(room);
             let found_by = match (found.primary, found.backup) {
+                _ if found.structure => FoundBy::Structure,
                 (true, true) => FoundBy::Both,
                 (false, true) => FoundBy::Backup,
                 _ => FoundBy::Primary,
@@ -285,7 +330,12 @@ impl Search {
                 .labels
                 .entry((*key, boot == BootCopy::Backup))
                 .or_insert_with(|| {
-                    Volume::open_with(Arc::clone(device), key.offset, length, boot)
+                    let view = if found.structure {
+                        rebuilt_view(device, key.offset, length)
+                    } else {
+                        Arc::clone(device)
+                    };
+                    Volume::open_with(view, key.offset, length, boot)
                         .ok()
                         .and_then(|volume| volume.label().map(str::to_owned))
                 })
@@ -297,6 +347,7 @@ impl Search {
                 label,
                 found_by,
                 boot,
+                rebuilt: found.structure,
                 truncated: key.volume_bytes > room,
                 relation: relation(self.table.as_ref(), key.offset, length),
                 overlaps_candidate: false,
@@ -305,6 +356,18 @@ impl Search {
         mark_overlapping(&mut candidates);
         candidates
     }
+}
+
+/// 把 `offset` 起 `length` 字节的分区换成推算出的引导扇区的视图（不写盘）。按结构找到的分区用它取卷标，
+/// 浏览、复制时引擎按同样的推算打开。
+fn rebuilt_view(device: &Arc<dyn BlockDevice>, offset: u64, length: u64) -> Arc<dyn BlockDevice> {
+    let partition = Partition {
+        number: 0,
+        offset,
+        length,
+        kind: PartitionKind::Whole,
+    };
+    overlay_rebuilt(device, &[partition], PREVIEW_SERIAL)
 }
 
 /// 在 `end`（一个分区的末尾）之后的几处接着看。
@@ -352,6 +415,8 @@ struct Found {
     primary: bool,
     /// 有备份引导扇区核对通过。
     backup: bool,
+    /// 按 `$MFT` 与 `$MFTMirr` 的结构找到。
+    structure: bool,
 }
 
 #[derive(Default)]
@@ -404,6 +469,7 @@ impl Finder {
             kind: boot.kind,
             primary: false,
             backup: false,
+            structure: false,
         });
         let flag = match backup {
             Some(_) => &mut found.backup,
@@ -412,6 +478,113 @@ impl Finder {
         self.changed |= !*flag;
         *flag = true;
     }
+}
+
+impl Finder {
+    /// `at` 处以 `FILE` 开头：是 `$MFT`（或它在 `$MFTMirr` 里的副本）的第一条记录、后面紧跟着第二条的话，
+    /// 按各种簇大小推算分区起点：另一份第一条记录要正好在算出的位置上，`$BadClus` 给得出卷长度，才记下。
+    fn examine_mft(&mut self, device: &dyn BlockDevice, at: u64, records: &[u8]) {
+        let Some((mft_lcn, record_size)) = mft_head(records) else {
+            return;
+        };
+        let Some((mirror_lcn, _)) = usize::try_from(record_size)
+            .ok()
+            .and_then(|size| records.get(size..size.checked_mul(2)?))
+            .and_then(|second| mft_record_layout(second, 1))
+        else {
+            return;
+        };
+        let sector = u64::from(device.sector_size()).max(SECTOR as u64);
+        for (here, there) in [(mft_lcn, mirror_lcn), (mirror_lcn, mft_lcn)] {
+            let mut cluster_size = sector;
+            while cluster_size <= bpb::MAX_NTFS_CLUSTER {
+                if let Some(start) = here
+                    .checked_mul(cluster_size)
+                    .and_then(|offset| at.checked_sub(offset))
+                    .filter(|start| start.is_multiple_of(sector))
+                {
+                    let other = there
+                        .checked_mul(cluster_size)
+                        .and_then(|offset| start.checked_add(offset));
+                    let same = other
+                        .and_then(|other| read(device, other, MAX_MFT_RECORD))
+                        .and_then(|bytes| mft_head(&bytes))
+                        == Some((mft_lcn, record_size));
+                    if same
+                        && let Some(volume_bytes) =
+                            ntfs_volume_bytes(device, start, mft_lcn, cluster_size, record_size)
+                    {
+                        self.add_structure(start, volume_bytes.saturating_add(sector));
+                    }
+                }
+                cluster_size *= 2;
+            }
+        }
+    }
+
+    fn add_structure(&mut self, offset: u64, volume_bytes: u64) {
+        let key = Key {
+            offset,
+            volume_bytes,
+            kind: kind_rank(FsKind::Ntfs),
+        };
+        if self.found.contains_key(&key) {
+            return;
+        }
+        if self.found.len() >= MAX_CANDIDATES {
+            self.truncated = true;
+            return;
+        }
+        self.found.insert(
+            key,
+            Found {
+                kind: FsKind::Ntfs,
+                primary: false,
+                backup: false,
+                structure: true,
+            },
+        );
+        self.changed = true;
+    }
+}
+
+/// 可能是第 0 条 MFT 记录：以 `FILE` 开头，记录头里记了记录号的（Windows XP 起）要是 0。
+/// 先这样筛一遍，MFT 里成千上万条别的记录就不用逐条解析。
+fn may_be_first_record(sector: &[u8]) -> bool {
+    use yisi_part::bytes::{le16, le32};
+    sector.starts_with(b"FILE")
+        && match le16(sector, 4) {
+            Some(usa_offset) if usa_offset >= 0x30 => le32(sector, 0x2C) == Some(0),
+            Some(_) => true,
+            None => false,
+        }
+}
+
+/// `$MFT` 的第一条记录（与打开卷同一个判断）：它记的 `$MFT` 簇号与记录大小。
+fn mft_head(records: &[u8]) -> Option<(u64, u64)> {
+    let size = usize::try_from(yisi_part::bytes::le32(records, 0x1C)?).ok()?;
+    let first = records.get(..size)?;
+    if !mft_self_record_ok(first) {
+        return None;
+    }
+    mft_record_layout(first, 0)
+}
+
+/// 卷的字节数：`$BadClus` 里 `$Bad` 流的长度，要是簇大小的整数倍。
+fn ntfs_volume_bytes(
+    device: &dyn BlockDevice,
+    start: u64,
+    mft_lcn: u64,
+    cluster_size: u64,
+    record_size: u64,
+) -> Option<u64> {
+    let at = mft_lcn
+        .checked_mul(cluster_size)?
+        .checked_add(BAD_CLUSTERS_RECORD.checked_mul(record_size)?)?
+        .checked_add(start)?;
+    let bytes = read(device, at, usize::try_from(record_size).ok()?)?;
+    mft_bad_clusters_length(&bytes)
+        .filter(|&length| length > 0 && length.is_multiple_of(cluster_size))
 }
 
 fn kind_rank(kind: FsKind) -> u8 {
@@ -570,6 +743,68 @@ mod tests {
         fn progress(&self, done: u64, total: u64) {
             self.last.set((done, total));
         }
+    }
+
+    /// 1 MiB 处放一个 NTFS 样本卷（没有分区表），前后各留 1 MiB 空白；`wipe` 时抹掉主备引导扇区。
+    fn ntfs_disk(wipe: bool) -> (Arc<dyn BlockDevice>, u64) {
+        use yisi_fs::samples::{NTFS_ROOT, NtfsImage};
+        const MIB: usize = 1 << 20;
+        let mut sample = NtfsImage::new();
+        sample.add_file(NTFS_ROOT, "kept.txt", b"still here");
+        let mut volume = sample.finish();
+        if wipe {
+            let last = volume.len() - 512;
+            volume[..512].fill(0);
+            volume[last..].fill(0);
+        }
+        let mut image = vec![0u8; MIB];
+        image.extend_from_slice(&volume);
+        image.resize(image.len() + MIB, 0);
+        (Arc::new(MemoryDisk::new(image, 512)), MIB as u64)
+    }
+
+    #[test]
+    fn ntfs_without_boot_sectors_is_found_by_its_master_file_table() {
+        let (device, start) = ntfs_disk(true);
+        // 快速搜索只看引导扇区，找不到
+        assert!(run_on(&device, SearchMode::Quick).candidates.is_empty());
+        let report = run_on(&device, SearchMode::Deep);
+        let [found] = report.candidates.as_slice() else {
+            panic!("{:#?}", report.candidates);
+        };
+        // 卷长度：$Bad 记的 2047 个簇加上放备份引导扇区的一个扇区
+        assert_eq!(
+            (found.offset, found.length, found.kind),
+            (start, 2047 * 4096 + 512, FsKind::Ntfs)
+        );
+        assert_eq!((found.found_by, found.rebuilt), (FoundBy::Structure, true));
+        assert_eq!(found.relation, Relation::Lost);
+        assert_eq!(found.label.as_deref(), Some("NTFS SAMPLE"));
+        // 按推算的引导扇区打开，文件都在
+        let view = rebuilt_view(&device, found.offset, found.length);
+        let volume =
+            Volume::open_with(view, found.offset, found.length, BootCopy::Primary).unwrap();
+        let names: Vec<String> = volume
+            .list(&volume.root())
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        assert_eq!(names, ["kept.txt"]);
+    }
+
+    #[test]
+    fn ntfs_with_boot_sectors_is_not_listed_twice() {
+        let (device, start) = ntfs_disk(false);
+        let report = run_on(&device, SearchMode::Deep);
+        let [found] = report.candidates.as_slice() else {
+            panic!("{:#?}", report.candidates);
+        };
+        assert_eq!(
+            (found.offset, found.found_by, found.rebuilt),
+            (start, FoundBy::Both, false)
+        );
     }
 
     fn memory(disk: &SearchDisk) -> Arc<dyn BlockDevice> {

@@ -237,7 +237,7 @@ impl Control for Quiet {
 
 /// 检查一遍分区，交出结论。[`Quiet`] 从不取消，检查总有结果；万一没有，按认不出文件系统处理。
 fn inspect(
-    device: &dyn BlockDevice,
+    device: &Arc<dyn BlockDevice>,
     offset: u64,
     length: u64,
 ) -> Result<(Report, Findings, FatLayout), FsFixError> {
@@ -345,7 +345,7 @@ pub fn available(findings: &Findings) -> Vec<FixCount> {
 
 /// 分区里的丢失簇（另存用）。卷不是 FAT / exFAT、按备份检查的、没有跟踪认领时报错。
 pub fn lost_clusters(
-    device: &dyn BlockDevice,
+    device: &Arc<dyn BlockDevice>,
     offset: u64,
     length: u64,
 ) -> Result<LostClusters, FsFixError> {
@@ -365,7 +365,7 @@ pub fn lost_clusters(
 
 /// 分区里的空闲簇（找坏簇时读它们）。条件同 [`lost_clusters`]。
 pub fn free_clusters(
-    device: &dyn BlockDevice,
+    device: &Arc<dyn BlockDevice>,
     offset: u64,
     length: u64,
 ) -> Result<LostClusters, FsFixError> {
@@ -389,7 +389,7 @@ pub fn rate_fat_copies(
     offset: u64,
     length: u64,
 ) -> Result<Vec<FatRating>, FsFixError> {
-    let (_, findings, layout) = inspect(device.as_ref(), offset, length)?;
+    let (_, findings, layout) = inspect(device, offset, length)?;
     if findings.from_backup {
         return Err(FsFixError::FromBackup);
     }
@@ -399,7 +399,7 @@ pub fn rate_fat_copies(
         let count = unify_fats(&mut patch, &findings, &layout, fix)?;
         let writes = patch.writes();
         let overlay: Arc<dyn BlockDevice> = Arc::new(Overlay::new(Arc::clone(device), &writes));
-        let (after, _, _) = inspect(overlay.as_ref(), offset, length)?;
+        let (after, _, _) = inspect(&overlay, offset, length)?;
         ratings.push(FatRating {
             fix,
             totals: after.totals,
@@ -423,7 +423,7 @@ pub fn plan_fs_fix(
         .copied()
         .filter(|fix| fixes.contains(fix))
         .collect();
-    let (report, findings, layout) = inspect(device.as_ref(), offset, length)?;
+    let (report, findings, layout) = inspect(device, offset, length)?;
     if findings.from_backup {
         return Err(FsFixError::FromBackup);
     }
@@ -1138,7 +1138,7 @@ fn rehearse(
     planned: &[IssueKind],
 ) -> Result<(), FsFixError> {
     let overlay: Arc<dyn BlockDevice> = Arc::new(Overlay::new(Arc::clone(device), writes));
-    let (after, _, _) = inspect(overlay.as_ref(), offset, length)?;
+    let (after, _, _) = inspect(&overlay, offset, length)?;
     let count = |report: &Report, kind: IssueKind| {
         report
             .issues

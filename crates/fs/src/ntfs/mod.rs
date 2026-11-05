@@ -2,6 +2,7 @@
 //! 扫一遍 MFT 找出「未使用」的记录，按父目录引用挂回目录树，用 `$Bitmap` 判断它们的簇是否已被占用。
 //! 依据公开的 NTFS 结构资料实现，只读。
 
+mod audit;
 mod huffman;
 mod index;
 pub(crate) mod lznt1;
@@ -16,6 +17,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use yisi_part::bytes::{le16, le16_units, le32, le64};
 
+pub use self::audit::{
+    AuditStage, Listed, NtfsAudit, SharedClusters, UnmarkedClusters, audit_ntfs,
+};
 use self::record::{
     ATTRIBUTE_LIST, Body, DATA, Extent, FILE_NAME, INDEX_ROOT, NAMESPACE_DOS, REPARSE_POINT,
     Record, STANDARD_INFORMATION, VOLUME_NAME, compression_unit_clusters, decode_runs,
@@ -35,6 +39,7 @@ const MFT_RECORD: u64 = 0;
 const VOLUME_RECORD: u64 = 3;
 const ROOT_RECORD: u64 = 5;
 const BITMAP_RECORD: u64 = 6;
+const BAD_CLUSTERS_RECORD: u64 = 8;
 /// 0 到 15 号记录留给系统文件，不列出。
 const FIRST_USER_RECORD: u64 = 16;
 
@@ -166,6 +171,19 @@ pub fn root_index_block_size(bytes: &[u8]) -> Option<u64> {
     let record = Record::parse(bytes.to_vec(), ROOT_RECORD)?;
     let value = record.find(INDEX_ROOT, &utf16("$I30"))?.resident_value()?;
     Some(u64::from(le32(value, 0x08)?))
+}
+
+/// `$BadClus`（第 8 条记录）里 `$Bad` 流的长度：这个稀疏流盖住整个卷，长度是卷的簇数乘簇大小。
+/// 主备引导扇区都没了时，丢失分区搜索按它定卷有多长。
+pub fn mft_bad_clusters_length(bytes: &[u8]) -> Option<u64> {
+    let record = Record::parse(bytes.to_vec(), BAD_CLUSTERS_RECORD)?;
+    if !record.in_use() {
+        return None;
+    }
+    match record.find(DATA, &utf16("$Bad"))?.body {
+        Body::NonResident(ref body) if body.lowest_vcn == 0 => Some(body.size),
+        _ => None,
+    }
 }
 
 /// 第 `number` 条 MFT 记录本身完整：签名 `FILE`、更新序列对得上、记录头合理、记的记录号（有的话）就是它。

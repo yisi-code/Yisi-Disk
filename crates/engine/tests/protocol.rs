@@ -379,7 +379,7 @@ fn carve_recovers_all_five_formats_from_an_image() {
         .call(
             CARVE_START,
             json!({"jobId": "c0", "source": {"type": "image", "path": image_path, "sectorSize": 512},
-                   "outputDir": dir, "extensions": ["exe"]}),
+                   "outputDir": dir, "extensions": ["no-such-format"]}),
         )
         .unwrap_err();
     assert_eq!(unknown.code, rpc_error::INVALID_PARAMS);

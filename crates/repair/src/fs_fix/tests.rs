@@ -29,7 +29,7 @@ fn apply(image: &mut [u8], plan: &FsFixPlan) {
 }
 
 fn kinds(image: &[u8]) -> Vec<IssueKind> {
-    let disk = MemoryDisk::new(image.to_vec(), 512);
+    let disk: Arc<dyn BlockDevice> = Arc::new(MemoryDisk::new(image.to_vec(), 512));
     check(&disk, 0, image.len() as u64, &Quiet)
         .unwrap()
         .issues
@@ -637,7 +637,7 @@ fn available_lists_what_the_check_found() {
     let mut image = image.finish();
     set_fat(&mut image, kind, clusters[3], clusters[1], None);
     set_fat(&mut image, kind, 6000, end_marker(kind), None);
-    let disk = MemoryDisk::new(image.clone(), 512);
+    let disk: Arc<dyn BlockDevice> = Arc::new(MemoryDisk::new(image.clone(), 512));
     let (_, findings) = check_for_repair(&disk, 0, image.len() as u64, &Quiet).unwrap();
     let fixes: Vec<FsFix> = available(&findings).iter().map(|count| count.fix).collect();
     assert_eq!(fixes, [FsFix::Lost, FsFix::Chains]);
@@ -728,7 +728,7 @@ fn a_missing_allocation_bitmap_is_rebuilt_from_the_tree() {
         plan(&image, &[FsFix::RebuildBitmap, FsFix::Dirty]),
         Err(FsFixError::BitmapAlone)
     ));
-    let disk = MemoryDisk::new(image.clone(), 512);
+    let disk: Arc<dyn BlockDevice> = Arc::new(MemoryDisk::new(image.clone(), 512));
     let (_, findings) = check_for_repair(&disk, 0, image.len() as u64, &Quiet).unwrap();
     let fixes: Vec<FsFix> = available(&findings).iter().map(|count| count.fix).collect();
     assert_eq!(fixes, [FsFix::RebuildBitmap]);

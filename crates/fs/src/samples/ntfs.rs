@@ -14,7 +14,8 @@ const TOTAL_CLUSTERS: usize = 2048;
 const MFT_LCN: usize = 4;
 const MFT_RECORDS: usize = 128;
 const MIRROR_LCN: usize = 40;
-const BITMAP_LCN: usize = 44;
+/// `$Bitmap` 所在的簇（测试按它改坏位图）。
+pub const BITMAP_LCN: usize = 44;
 /// 文件数据从这个簇起分配。
 const DATA_LCN: usize = 64;
 const INDEX_BLOCK: usize = 4096;
@@ -25,6 +26,28 @@ const SAMPLE_FILETIME: u64 = 116_444_736_000_000_000 + 1_709_646_330 * 10_000_00
 
 pub const ROOT: u64 = 5;
 pub const TAG_WOF: u32 = 0x8000_0017;
+
+/// 引导区（`$Boot`，8 KiB）占两个簇；MFT 镜像只放前 4 条记录，一个簇。
+const BOOT_CLUSTERS: usize = 2;
+const MIRROR_CLUSTERS: usize = 1;
+/// 系统文件：记录号与名字。都在根目录里，序号等于记录号（0 号为 1）。
+const SYSTEM_FILES: [(u64, &str); 6] = [
+    (0, "$MFT"),
+    (1, "$MFTMirr"),
+    (3, "$Volume"),
+    (6, "$Bitmap"),
+    (7, "$Boot"),
+    (8, "$BadClus"),
+];
+/// 卷的簇数：最后一个扇区留给备份引导扇区，最后一个簇不完整、不算。
+const VOLUME_CLUSTERS: usize = TOTAL_CLUSTERS - 1;
+/// 系统文件占的簇：起点与簇数。
+const SYSTEM_CLUSTERS: [(usize, usize); 4] = [
+    (0, BOOT_CLUSTERS),
+    (MFT_LCN, MFT_RECORDS * RECORD / CLUSTER),
+    (MIRROR_LCN, MIRROR_CLUSTERS),
+    (BITMAP_LCN, 1),
+];
 
 #[derive(Debug, Clone, Default)]
 enum Data {
@@ -88,6 +111,8 @@ pub struct NtfsImage {
     next_cluster: usize,
     next_record: u64,
     label: String,
+    /// `$MFT` 的记录位图（一位一条记录），`finish` 时按在用的记录生成。
+    record_bitmap: Vec<u8>,
 }
 
 impl Default for NtfsImage {
@@ -99,9 +124,12 @@ impl Default for NtfsImage {
 impl NtfsImage {
     pub fn new() -> Self {
         let mut bitmap = vec![false; TOTAL_CLUSTERS];
-        // 引导区、MFT、MFT 镜像、位图与预留区都算已占用
-        for slot in bitmap.iter_mut().take(DATA_LCN) {
-            *slot = true;
+        // 系统文件的簇（引导区、MFT、MFT 镜像、位图）已占用，与它们记录里的运行表一致；
+        // 其余到 DATA_LCN 为止的簇空着不用
+        for (lcn, count) in SYSTEM_CLUSTERS {
+            for slot in &mut bitmap[lcn..lcn + count] {
+                *slot = true;
+            }
         }
         let mut nodes = BTreeMap::new();
         nodes.insert(
@@ -126,6 +154,7 @@ impl NtfsImage {
             next_cluster: DATA_LCN,
             next_record: 16,
             label: "NTFS SAMPLE".to_owned(),
+            record_bitmap: Vec::new(),
         }
     }
 
@@ -487,6 +516,11 @@ impl NtfsImage {
                     .push((reference, key));
             }
         }
+        for (number, name) in SYSTEM_FILES {
+            let reference = number | u64::from(system_sequence(number)) << 48;
+            let key = self.file_name_value_raw(name, ROOT, 5);
+            children.entry(ROOT).or_default().push((reference, key));
+        }
         let mut records: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
         let numbers: Vec<u64> = self.nodes.keys().copied().collect();
         for record in numbers {
@@ -506,9 +540,20 @@ impl NtfsImage {
                 records.insert(number, bytes);
             }
         }
-        records.insert(0, self.system_record(0, "$MFT"));
-        records.insert(3, self.system_record(3, "$Volume"));
-        records.insert(6, self.system_record(6, "$Bitmap"));
+        let mut record_bitmap = vec![0u8; MFT_RECORDS / 8];
+        let in_use = self
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.in_use)
+            .map(|(&number, _)| number)
+            .chain(SYSTEM_FILES.map(|(number, _)| number));
+        for number in in_use {
+            record_bitmap[number as usize / 8] |= 1 << (number % 8);
+        }
+        self.record_bitmap = record_bitmap;
+        for (number, name) in SYSTEM_FILES {
+            records.insert(number, self.system_record(number, name));
+        }
         for (number, bytes) in &records {
             let at = MFT_LCN * CLUSTER + *number as usize * RECORD;
             self.image[at..at + RECORD].copy_from_slice(bytes);
@@ -818,7 +863,7 @@ impl NtfsImage {
     fn system_record(&self, number: u64, name: &str) -> Vec<u8> {
         let node = Node {
             in_use: true,
-            sequence: number.max(1) as u16,
+            sequence: system_sequence(number),
             ..Node::default()
         };
         let file_name = self.file_name_value_raw(name, ROOT, 5);
@@ -827,16 +872,19 @@ impl NtfsImage {
             resident(0x30, "", 1, &file_name),
         ];
         match number {
-            0 => attributes.push(non_resident(
-                0x80,
-                "",
-                2,
-                0,
-                0,
-                &[(Some(MFT_LCN), MFT_RECORDS * RECORD / CLUSTER)],
-                MFT_RECORDS * RECORD / CLUSTER,
-                MFT_RECORDS * RECORD,
-            )),
+            0 => {
+                attributes.push(non_resident(
+                    0x80,
+                    "",
+                    2,
+                    0,
+                    0,
+                    &[(Some(MFT_LCN), MFT_RECORDS * RECORD / CLUSTER)],
+                    MFT_RECORDS * RECORD / CLUSTER,
+                    MFT_RECORDS * RECORD,
+                ));
+                attributes.push(resident(0xB0, "", 3, &self.record_bitmap));
+            }
             3 => {
                 let label: Vec<u8> = self
                     .label
@@ -845,6 +893,16 @@ impl NtfsImage {
                     .collect();
                 attributes.push(resident(0x60, "", 2, &label));
             }
+            1 => attributes.push(non_resident(
+                0x80,
+                "",
+                2,
+                0,
+                0,
+                &[(Some(MIRROR_LCN), MIRROR_CLUSTERS)],
+                MIRROR_CLUSTERS,
+                4 * RECORD,
+            )),
             6 => attributes.push(non_resident(
                 0x80,
                 "",
@@ -854,6 +912,27 @@ impl NtfsImage {
                 &[(Some(BITMAP_LCN), 1)],
                 1,
                 TOTAL_CLUSTERS / 8,
+            )),
+            7 => attributes.push(non_resident(
+                0x80,
+                "",
+                2,
+                0,
+                0,
+                &[(Some(0), BOOT_CLUSTERS)],
+                BOOT_CLUSTERS,
+                BOOT_CLUSTERS * CLUSTER,
+            )),
+            // 没有坏簇：`$Bad` 是盖住整个卷的稀疏流
+            8 => attributes.push(non_resident(
+                0x80,
+                "$Bad",
+                2,
+                0,
+                0,
+                &[(None, VOLUME_CLUSTERS)],
+                VOLUME_CLUSTERS,
+                VOLUME_CLUSTERS * CLUSTER,
             )),
             _ => {}
         }
@@ -871,6 +950,10 @@ impl NtfsImage {
         }
         value
     }
+}
+
+fn system_sequence(number: u64) -> u16 {
+    number.max(1) as u16
 }
 
 /// 写进扩展记录、属性列表里的序号：删除后序号已加 1，记的是删除前的值。

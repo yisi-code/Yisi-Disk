@@ -86,7 +86,10 @@ impl FileFormat for Bmp {
 
     fn header_check(&self, block: &[u8]) -> Option<Box<dyn Recovering>> {
         let length = file_length(block)?;
-        Some(Box::new(Walker::new(INFO.max_size, KnownLength(length))))
+        Some(Box::new(Walker::new(
+            INFO.max_size,
+            KnownLength::new(length),
+        )))
     }
 }
 

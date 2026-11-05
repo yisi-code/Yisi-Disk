@@ -29,7 +29,7 @@ impl Control for Quiet {
 }
 
 fn run(image: &[u8]) -> Report {
-    let disk = MemoryDisk::new(image.to_vec(), 512);
+    let disk: Arc<dyn BlockDevice> = Arc::new(MemoryDisk::new(image.to_vec(), 512));
     check(&disk, 0, image.len() as u64, &Quiet::default()).unwrap()
 }
 
@@ -366,7 +366,7 @@ fn volumes_larger_than_the_partition_are_reported() {
 
     // FAT：分区比卷短一半，后半的簇读不到
     let image = fat_sample(FatType::Fat16).image.finish();
-    let disk = MemoryDisk::new(image.clone(), 512);
+    let disk: Arc<dyn BlockDevice> = Arc::new(MemoryDisk::new(image.clone(), 512));
     let half = image.len() as u64 / 2;
     let report = check(&disk, 0, half, &Quiet::default()).unwrap();
     let truncated = find(&report, IssueKind::VolumeTruncated);
@@ -555,10 +555,10 @@ fn unreadable_sectors_are_recorded_and_the_check_goes_on() {
     let heap = (reserved + fats * sectors + root_sectors) * 512;
     let docs_cluster = 2u64;
     let at = heap as u64 + (docs_cluster - 2) * 1024;
-    let disk = FlakyDisk {
+    let disk: Arc<dyn BlockDevice> = Arc::new(FlakyDisk {
         inner: MemoryDisk::new(image.clone(), 512),
         bad: (at + 512, at + 1024),
-    };
+    });
     let report = check(&disk, 0, image.len() as u64, &Quiet::default()).unwrap();
     let unreadable = find(&report, IssueKind::Unreadable);
     assert_eq!(unreadable.path.as_deref(), Some("/Documents"));
@@ -581,7 +581,7 @@ fn cancel_stops_the_check() {
         fn progress(&self, _: Stage, _: u64, _: u64) {}
     }
     let image = fat_sample(FatType::Fat32).image.finish();
-    let disk = MemoryDisk::new(image.clone(), 512);
+    let disk: Arc<dyn BlockDevice> = Arc::new(MemoryDisk::new(image.clone(), 512));
     assert!(check(&disk, 0, image.len() as u64, &Cancelled).is_none());
 }
 
@@ -607,6 +607,98 @@ fn ntfs_boot_and_mft_are_checked() {
     let report = run(&image);
     find(&report, IssueKind::MftInvalid);
     assert_eq!(find(&report, IssueKind::MftMirrorMismatch).count, Some(1));
+}
+
+#[test]
+fn ntfs_records_indexes_and_clusters_are_audited() {
+    use yisi_fs::samples::{NTFS_BITMAP_LCN, NTFS_ROOT};
+    const CLUSTER: usize = 4096;
+    let mut sample = NtfsImage::new();
+    let a = sample.add_file(NTFS_ROOT, "a.bin", &pattern(1, 3 * CLUSTER));
+    let shared = sample.first_lcn(a);
+    // 交叉链接：b.bin 放在 a.bin 的第一个簇上
+    sample.add_file_at(NTFS_ROOT, "b.bin", &pattern(2, CLUSTER), shared);
+    // 上级目录删了，文件还在用
+    let gone = sample.mkdir(NTFS_ROOT, "gone");
+    sample.add_file(gone, "orphan.txt", b"left behind");
+    sample.delete(gone);
+    let stale = sample.add_file(NTFS_ROOT, "stale.bin", &pattern(3, CLUSTER));
+    let stale_lcn = sample.first_lcn(stale);
+    let damaged = sample.add_file(NTFS_ROOT, "damaged.txt", b"x");
+    let mut image = sample.finish();
+    // 造样本时就有的两项；下面再改坏记录与位图
+    assert_eq!(
+        kinds(&run(&image)),
+        vec![IssueKind::NtfsOrphan, IssueKind::NtfsCrossLink]
+    );
+
+    let mft = u64::from_le_bytes(image[0x30..0x38].try_into().unwrap()) as usize * CLUSTER;
+    let record = |number: u64| mft + number as usize * 1024;
+    // stale.bin 的记录改成没在用：索引项、记录位图、它的簇都对不上了
+    image[record(stale) + 0x16] &= !1;
+    // damaged.txt 的记录签名坏了
+    image[record(damaged)] = b'X';
+    // a.bin 的第二个簇在位图里漏标，没人用的 2000 号簇多标
+    let bitmap = NTFS_BITMAP_LCN * CLUSTER;
+    let unmarked = shared + 1;
+    image[bitmap + unmarked / 8] &= !(1 << (unmarked % 8));
+    image[bitmap + 2000 / 8] |= 1 << (2000 % 8);
+
+    let report = run(&image);
+    let mut found = kinds(&report);
+    found.dedup();
+    assert_eq!(
+        found,
+        vec![
+            IssueKind::MftRecordDamaged,
+            IssueKind::RecordsMarkedFree,
+            IssueKind::NtfsOrphan,
+            IssueKind::IndexEntryStale,
+            IssueKind::NtfsCrossLink,
+            IssueKind::NtfsNotInBitmap,
+            IssueKind::NtfsLostClusters,
+        ],
+        "{:#?}",
+        report.issues
+    );
+    assert_eq!(
+        find(&report, IssueKind::MftRecordDamaged).actual,
+        Some(damaged)
+    );
+    assert_eq!(find(&report, IssueKind::RecordsMarkedFree).count, Some(1));
+    assert_eq!(
+        find(&report, IssueKind::NtfsOrphan).path.as_deref(),
+        Some("/gone/orphan.txt")
+    );
+    let stale_entries: Vec<_> = report
+        .issues
+        .iter()
+        .filter(|issue| issue.kind == IssueKind::IndexEntryStale)
+        .filter_map(|issue| issue.path.as_deref())
+        .collect();
+    assert_eq!(stale_entries, ["/stale.bin", "/damaged.txt"]);
+    let cross = find(&report, IssueKind::NtfsCrossLink);
+    let mut pair = [
+        cross.path.clone().unwrap(),
+        cross.other_path.clone().unwrap(),
+    ];
+    pair.sort();
+    assert_eq!(pair, ["/a.bin", "/b.bin"]);
+    assert_eq!((cross.cluster, cross.count), (Some(shared as u64), Some(1)));
+    let unmarked_issue = find(&report, IssueKind::NtfsNotInBitmap);
+    assert_eq!(unmarked_issue.path.as_deref(), Some("/a.bin"));
+    assert_eq!(
+        (unmarked_issue.cluster, unmarked_issue.count),
+        (Some(unmarked as u64), Some(1))
+    );
+    let lost = find(&report, IssueKind::NtfsLostClusters);
+    assert_eq!(
+        (lost.cluster, lost.count, lost.actual),
+        (Some(stale_lcn as u64), Some(2), Some(2))
+    );
+    for item in [CheckItem::MftRecords, CheckItem::Indexes, CheckItem::Bitmap] {
+        assert!(report.checked.contains(&item), "{:?}", report.checked);
+    }
 }
 
 #[test]
@@ -643,7 +735,7 @@ fn issues_beyond_the_limit_are_counted() {
 #[test]
 fn progress_is_reported() {
     let image = exfat_sample().image;
-    let disk = MemoryDisk::new(image.clone(), 512);
+    let disk: Arc<dyn BlockDevice> = Arc::new(MemoryDisk::new(image.clone(), 512));
     let quiet = Quiet::default();
     check(&disk, 0, image.len() as u64, &quiet).unwrap();
     assert!(quiet.stages.get() >= 4);

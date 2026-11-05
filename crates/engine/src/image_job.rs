@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use yisi_engine::protocol::{
     ByteRange, ERRORS_IN_A_ROW_NOTICE, IMAGING, ImageStarted, ImageSummary, ImagingTuning,
     JobImaging, MAX_IMAGING_BLOCK, MAX_IMAGING_RETRIES, MAX_IMAGING_SKIP, MAX_UNREADABLE_RANGES,
-    MIN_IMAGING_BLOCK, RegionProgress, error_code,
+    MIN_IMAGING_BLOCK, ReadMapCell, RegionProgress, error_code,
 };
 use yisi_io::{
     BadMap, BlockDevice, ImageStore, ImagingControl, ImagingOptions, ImagingOutcome, IoError,
@@ -25,6 +25,7 @@ use yisi_part::Partition;
 use yisi_rpc::{ErrorObject, error_code as rpc_error_code};
 
 use crate::job::{JobContext, JobOutcome};
+use crate::read_scan::map_cell_bytes;
 use crate::runtime::error_chain;
 
 /// 两次进展通知之间至少隔这么久，即每秒最多 5 次。
@@ -141,6 +142,53 @@ fn scope_progress(map: &BadMap, scope: &Scope) -> RegionProgress {
             trim_bytes: sum.trim_bytes + part.trim_bytes,
             scrape_bytes: sum.scrape_bytes + part.scrape_bytes,
         })
+}
+
+/// 坏区图换成整个源的扇区图，格子的分法与读取扫描相同；返回各格与一格的字节数。
+/// 各区段只走一遍，每段按格切开、计入所在的格。
+pub fn read_map(map: &BadMap) -> (Vec<ReadMapCell>, u64) {
+    let size = map.header().size;
+    let cell_bytes = map_cell_bytes(size);
+    let count = usize::try_from(size.div_ceil(cell_bytes)).unwrap_or(0);
+    // 每格读出、读不出、没读过的字节数；待修边、待细读的不用单独数
+    let mut tally = vec![[0u64; 3]; count];
+    for segment in map.segments() {
+        let slot = match segment.state {
+            SegmentState::Done => 0,
+            SegmentState::Bad => 1,
+            SegmentState::Untried => 2,
+            SegmentState::Trim | SegmentState::Scrape => continue,
+        };
+        let end = segment.offset + segment.length;
+        let mut at = segment.offset;
+        while at < end {
+            let index = at / cell_bytes;
+            let piece_end = ((index + 1) * cell_bytes).min(end);
+            if let Some(cell) = usize::try_from(index).ok().and_then(|i| tally.get_mut(i)) {
+                cell[slot] += piece_end - at;
+            }
+            at = piece_end;
+        }
+    }
+    let cells = tally
+        .iter()
+        .enumerate()
+        .map(|(index, &[done, bad, untried])| {
+            let length = cell_bytes.min(size - index as u64 * cell_bytes);
+            if bad >= length {
+                ReadMapCell::Unreadable
+            } else if bad > 0 {
+                ReadMapCell::Partly
+            } else if done >= length {
+                ReadMapCell::Good
+            } else if untried >= length {
+                ReadMapCell::Untried
+            } else {
+                ReadMapCell::Pending
+            }
+        })
+        .collect();
+    (cells, cell_bytes)
 }
 
 /// 还没读完的字节数（未读、待修边、待细读）。
@@ -555,6 +603,7 @@ fn summarize(
     let bad_ranges_truncated = bad_ranges.len() > MAX_UNREADABLE_RANGES;
     let device_size = map.header().size;
     let device = progress_between(map, 0, device_size);
+    let (cells, map_cell_bytes) = read_map(map);
     ImageSummary {
         image_path: image_path.display().to_string(),
         map_path: map_path.display().to_string(),
@@ -578,6 +627,8 @@ fn summarize(
             _ => None,
         },
         elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        map: cells,
+        map_cell_bytes,
     }
 }
 
@@ -691,6 +742,7 @@ impl<'a> Reporter<'a> {
             unfinished(&progress)
         };
         self.context.stage_progress(round, size - pending, size);
+        let (cells, map_cell_bytes) = read_map(map);
         self.context.notify(
             IMAGING,
             JobImaging {
@@ -706,6 +758,8 @@ impl<'a> Reporter<'a> {
                 copy_only: self.copy_only,
                 errors_in_a_row: self.errors_in_a_row.get(),
                 check_connection: self.errors_in_a_row.get() >= ERRORS_IN_A_ROW_NOTICE,
+                map: cells,
+                map_cell_bytes,
             },
         );
     }
@@ -1250,6 +1304,25 @@ mod tests {
             ..ImageRequest::default()
         };
         assert!(resume(damaged(), &image_path, "fake".to_owned(), &request).is_ok());
+    }
+
+    #[test]
+    fn read_map_marks_each_cell_by_what_the_bad_map_says() {
+        use ReadMapCell::{Good, Partly, Pending, Unreadable, Untried};
+        // 6 MiB 的源一格 1 MiB：读出、部分读不出、整格读不出、待修边、没读、读了一半
+        let mut map = BadMap::new(MapHeader {
+            size: 6 * MIB,
+            sector_size: SECTOR as u32,
+            source: "fake".to_owned(),
+        });
+        map.set(0, 2 * MIB, SegmentState::Done);
+        map.set(MIB + SECTOR, SECTOR, SegmentState::Bad);
+        map.set(2 * MIB, MIB, SegmentState::Bad);
+        map.set(3 * MIB, MIB, SegmentState::Trim);
+        map.set(5 * MIB, MIB / 2, SegmentState::Done);
+        let (cells, cell_bytes) = read_map(&map);
+        assert_eq!(cell_bytes, MIB);
+        assert_eq!(cells, [Good, Partly, Unreadable, Pending, Untried, Pending]);
     }
 
     #[test]

@@ -74,9 +74,11 @@ fn found_partition(candidate: &Candidate) -> FoundPartition {
             FoundBy::Primary => "primary",
             FoundBy::Backup => "backup",
             FoundBy::Both => "both",
+            FoundBy::Structure => "structure",
         }
         .to_owned(),
         boot: match candidate.boot {
+            _ if candidate.rebuilt => BootCopy::Rebuilt,
             yisi_fs::BootCopy::Primary => BootCopy::Primary,
             yisi_fs::BootCopy::Backup => BootCopy::Backup,
         },

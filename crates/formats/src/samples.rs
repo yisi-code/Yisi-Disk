@@ -853,3 +853,838 @@ fn mp4_box(out: &mut Vec<u8>, kind: &[u8; 4], payload: &[u8]) {
     out.extend_from_slice(kind);
     out.extend_from_slice(payload);
 }
+
+fn put_be16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+fn put_be32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+fn be32_at(data: &[u8], at: usize) -> u32 {
+    u32::from_be_bytes(data[at..at + 4].try_into().unwrap())
+}
+
+/// Ogg 页的 CRC（多项式 0x04C11DB7、不反射、初值 0，CRC 字段按 0 算），逐位算，与插件里查表的算法互相印证。
+pub fn ogg_crc(page: &[u8]) -> u32 {
+    let mut crc = 0u32;
+    for (index, &byte) in page.iter().enumerate() {
+        let byte = if (22..26).contains(&index) { 0 } else { byte };
+        crc ^= u32::from(byte) << 24;
+        for _ in 0..8 {
+            crc = if crc & 0x8000_0000 != 0 {
+                (crc << 1) ^ 0x04C1_1DB7
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
+}
+
+fn ogg_page(out: &mut Vec<u8>, flags: u8, serial: u32, sequence: u32, body: &[u8]) {
+    let mut lacing = Vec::new();
+    let mut left = body.len();
+    loop {
+        if left >= 255 {
+            lacing.push(255);
+            left -= 255;
+        } else {
+            lacing.push(left as u8);
+            break;
+        }
+    }
+    let mut page = b"OggS\0".to_vec();
+    page.push(flags);
+    page.extend_from_slice(&(u64::from(sequence) * 1000).to_le_bytes()); // 粒度位置
+    put32(&mut page, serial);
+    put32(&mut page, sequence);
+    put32(&mut page, 0);
+    page.push(lacing.len() as u8);
+    page.extend_from_slice(&lacing);
+    page.extend_from_slice(body);
+    let crc = ogg_crc(&page);
+    page[22..26].copy_from_slice(&crc.to_le_bytes());
+    out.extend(page);
+}
+
+/// Ogg：`links` 段首尾相接；每段里 `streams` 是各逻辑流第一个包的开头，先是全部 BOS 页，
+/// 之后各流轮流 `pages` 个数据页，每个流的最后一页带 EOS 标志。
+pub fn ogg(streams: &[&[u8]], pages: usize, links: usize) -> Vec<u8> {
+    let mut noise = Noise::new(0x004F_4747);
+    let mut out = Vec::new();
+    for link in 0..links {
+        let serial = |index: usize| 0x1000 * (link as u32 + 1) + index as u32;
+        for (index, packet) in streams.iter().enumerate() {
+            let mut body = packet.to_vec();
+            body.extend(noise.bytes(20));
+            ogg_page(&mut out, 0x02, serial(index), 0, &body);
+        }
+        for page in 1..=pages {
+            for index in 0..streams.len() {
+                let flags = if page == pages { 0x04 } else { 0 };
+                let len = 50 + (noise.next_u64() % 600) as usize;
+                let body = noise.bytes(len);
+                ogg_page(&mut out, flags, serial(index), page as u32, &body);
+            }
+        }
+    }
+    out
+}
+
+/// IFF 的 `FORM`（AIFF、DjVu）：`prefix` 之后是 `FORM`、大端长度、`form`，`chunks` 是（类型、数据长度），奇数补一个字节。
+pub fn iff(prefix: &[u8], form: &[u8; 4], chunks: &[(&[u8; 4], usize)]) -> Vec<u8> {
+    let mut noise = Noise::new(0x0049_4646);
+    let mut body = form.to_vec();
+    for &(kind, len) in chunks {
+        body.extend_from_slice(kind);
+        put_be32(&mut body, len as u32);
+        body.extend(noise.bytes(len));
+        if len % 2 == 1 {
+            body.push(0);
+        }
+    }
+    let mut out = prefix.to_vec();
+    out.extend_from_slice(b"FORM");
+    put_be32(&mut out, body.len() as u32);
+    out.extend(body);
+    out
+}
+
+/// MIDI：一个音轨时格式 0，否则格式 1；每个音轨是 `tracks` 字节随机事件加「音轨结束」；`alien` 时头块之后夹一个不认识的块。
+pub fn midi(tracks: &[usize], alien: bool) -> Vec<u8> {
+    let mut noise = Noise::new(0x004D_4944);
+    let mut out = b"MThd\0\0\0\x06".to_vec();
+    put_be16(&mut out, if tracks.len() == 1 { 0 } else { 1 });
+    put_be16(&mut out, tracks.len() as u16);
+    put_be16(&mut out, 480);
+    if alien {
+        out.extend_from_slice(b"XFIH\0\0\0\x05");
+        out.extend(noise.bytes(5));
+    }
+    for &len in tracks {
+        out.extend_from_slice(b"MTrk");
+        put_be32(&mut out, len as u32 + 4);
+        out.extend(noise.bytes(len));
+        out.extend_from_slice(&[0x00, 0xFF, 0x2F, 0x00]);
+    }
+    out
+}
+
+/// FLV：文件头、第一个长度 0，之后 `tags` 个标签（先脚本数据，再视频、音频交替），每个后面跟着它的长度。
+pub fn flv(tags: usize) -> Vec<u8> {
+    let mut noise = Noise::new(0x0046_4C56);
+    let mut out = b"FLV\x01\x05\0\0\0\x09\0\0\0\0".to_vec();
+    for index in 0..tags {
+        let kind = match index {
+            0 => 18,
+            index if index % 2 == 1 => 9,
+            _ => 8,
+        };
+        let len = 20 + (noise.next_u64() % 400) as usize;
+        out.push(kind);
+        out.extend_from_slice(&(len as u32).to_be_bytes()[1..]);
+        out.extend_from_slice(&((index * 40) as u32).to_be_bytes()[1..]);
+        out.extend_from_slice(&[0, 0, 0, 0]); // 时间戳扩展、流 ID
+        out.extend(noise.bytes(len));
+        put_be32(&mut out, 11 + len as u32);
+    }
+    out
+}
+
+/// ASF 样本里文件属性对象的位置：头对象的第一个子对象。
+pub const ASF_FILE_PROPERTIES_AT: usize = 30;
+
+/// ASF：头对象里依次是文件属性、流属性（`video` 时是视频流，否则音频流）、一个不认识的对象；
+/// 之后是带 `packets` 字节数据的数据对象与一个索引对象。文件属性记着整个文件的长度。
+pub fn asf(video: bool, packets: usize) -> Vec<u8> {
+    use crate::asf::{
+        AUDIO_MEDIA, DATA_OBJECT, FILE_PROPERTIES, HEADER_OBJECT, STREAM_PROPERTIES, VIDEO_MEDIA,
+    };
+    let mut noise = Noise::new(0x0041_5346);
+    let object = |guid: &[u8; 16], body: &[u8]| {
+        let mut out = guid.to_vec();
+        out.extend_from_slice(&(24 + body.len() as u64).to_le_bytes());
+        out.extend_from_slice(body);
+        out
+    };
+    let mut stream = vec![0u8; 78 - 24];
+    stream[..16].copy_from_slice(if video { &VIDEO_MEDIA } else { &AUDIO_MEDIA });
+    let stream = object(&STREAM_PROPERTIES, &stream);
+    let other = object(&[0x11; 16], &noise.bytes(40));
+    let mut data = noise.bytes(16); // 文件 ID
+    data.extend_from_slice(&3u64.to_le_bytes()); // 包数
+    data.extend_from_slice(&[1, 1]);
+    data.extend(noise.bytes(packets));
+    let data = object(&DATA_OBJECT, &data);
+    let index = object(&[0x22; 16], &noise.bytes(32));
+    let header_len = 30 + 104 + stream.len() + other.len();
+    let file_size = header_len + data.len() + index.len();
+
+    let mut properties = noise.bytes(16); // 文件 ID
+    properties.extend_from_slice(&(file_size as u64).to_le_bytes());
+    properties.extend(noise.bytes(40)); // 创建时间、包数、播放与发送时长、预卷
+    put32(&mut properties, 0x02); // 可定位，不是广播
+    properties.extend(noise.bytes(12));
+    let properties = object(&FILE_PROPERTIES, &properties);
+
+    let mut out = HEADER_OBJECT.to_vec();
+    out.extend_from_slice(&(header_len as u64).to_le_bytes());
+    put32(&mut out, 3);
+    out.extend_from_slice(&[1, 2]);
+    out.extend(properties);
+    out.extend(stream);
+    out.extend(other);
+    out.extend(data);
+    out.extend(index);
+    out
+}
+
+/// CAB：一个文件夹、`files` 个文件，一个 CFDATA 块装 `data_len` 字节（不压缩）。
+pub fn cab(files: usize, data_len: usize) -> Vec<u8> {
+    let mut noise = Noise::new(0x0043_4142);
+    let names: Vec<Vec<u8>> = (0..files)
+        .map(|index| format!("file{index}.txt\0").into_bytes())
+        .collect();
+    let files_at = 36 + 8;
+    let data_at = files_at + names.iter().map(|name| 16 + name.len()).sum::<usize>();
+    let total = data_at + 8 + data_len;
+    let mut out = b"MSCF\0\0\0\0".to_vec();
+    put32(&mut out, total as u32);
+    put32(&mut out, 0);
+    put32(&mut out, files_at as u32);
+    put32(&mut out, 0);
+    out.extend_from_slice(&[3, 1]);
+    put16(&mut out, 1);
+    put16(&mut out, files as u16);
+    put16(&mut out, 0); // 标志
+    put16(&mut out, 0x1234); // 分卷组号
+    put16(&mut out, 0);
+    // CFFOLDER
+    put32(&mut out, data_at as u32);
+    put16(&mut out, 1);
+    put16(&mut out, 0); // 不压缩
+    let per_file = data_len / files.max(1);
+    for (index, name) in names.iter().enumerate() {
+        put32(&mut out, per_file as u32);
+        put32(&mut out, (index * per_file) as u32);
+        put16(&mut out, 0);
+        put16(&mut out, 0x5A21);
+        put16(&mut out, 0x6000);
+        put16(&mut out, 0x20);
+        out.extend_from_slice(name);
+    }
+    // CFDATA
+    put32(&mut out, 0);
+    put16(&mut out, data_len as u16);
+    put16(&mut out, data_len as u16);
+    out.extend(noise.bytes(data_len));
+    out
+}
+
+/// TAR：每项是（名字、长度），名字以 `/` 结尾的是目录；`gnu` 时用 GNU 的标识；
+/// 结尾两个全 0 块，`padded` 时再补 0 到 10240 字节的整数倍。
+pub fn tar(entries: &[(&str, usize)], padded: bool, gnu: bool) -> Vec<u8> {
+    let mut noise = Noise::new(0x0054_4152);
+    let mut out = Vec::new();
+    for &(name, size) in entries {
+        let directory = name.ends_with('/');
+        let mut header = [0u8; 512];
+        header[..name.len()].copy_from_slice(name.as_bytes());
+        header[100..108].copy_from_slice(if directory {
+            b"0000755\0"
+        } else {
+            b"0000644\0"
+        });
+        header[108..116].copy_from_slice(b"0001750\0");
+        header[116..124].copy_from_slice(b"0001750\0");
+        header[124..136].copy_from_slice(format!("{size:011o}\0").as_bytes());
+        header[136..148].copy_from_slice(b"14000000000\0");
+        header[156] = if directory { b'5' } else { b'0' };
+        if gnu {
+            header[257..265].copy_from_slice(b"ustar  \0");
+        } else {
+            header[257..265].copy_from_slice(b"ustar\x0000");
+        }
+        header[265..269].copy_from_slice(b"user");
+        header[148..156].copy_from_slice(b"        ");
+        let sum: u32 = header.iter().map(|&byte| u32::from(byte)).sum();
+        header[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        out.extend_from_slice(&header);
+        out.extend(noise.bytes(size));
+        out.resize(out.len().next_multiple_of(512), 0);
+    }
+    out.extend_from_slice(&[0; 1024]);
+    if padded {
+        out.resize(out.len().next_multiple_of(10240), 0);
+    }
+    out
+}
+
+/// PE 映像的布局：`sections` 是各节的原始数据长度（0 表示只有未初始化数据），
+/// `certificate` 大于 0 时在最后放这么长的证书表，`symbols` 是 COFF 符号个数与字符串表长度。
+pub struct PeLayout {
+    pub plus: bool,
+    pub dll: bool,
+    pub subsystem: u16,
+    pub sections: Vec<usize>,
+    pub certificate: usize,
+    pub symbols: Option<(u32, u32)>,
+}
+
+impl Default for PeLayout {
+    fn default() -> Self {
+        Self {
+            plus: false,
+            dll: false,
+            subsystem: 2,
+            sections: vec![700, 300],
+            certificate: 0,
+            symbols: None,
+        }
+    }
+}
+
+/// PE：DOS 头、PE 头在 0x80，节按 0x200 对齐依次排在头后面，之后是符号表与字符串表、证书表。
+pub fn pe(layout: &PeLayout) -> Vec<u8> {
+    const LFANEW: usize = 0x80;
+    const ALIGN: usize = 0x200;
+    let mut noise = Noise::new(0x0050_4500);
+    let optional_len: usize = if layout.plus { 0xF0 } else { 0xE0 };
+    let count = layout.sections.len();
+    let headers_len = (LFANEW + 24 + optional_len + 40 * count).next_multiple_of(ALIGN);
+    let mut sections = Vec::new();
+    let mut at = headers_len;
+    for &size in &layout.sections {
+        let len = size.next_multiple_of(ALIGN);
+        sections.push((if len == 0 { 0 } else { at }, len));
+        at += len;
+    }
+    let symbols_at = at;
+    let (symbols_len, strings_len) = layout.symbols.map_or((0, 0), |(count, strings)| {
+        (18 * count as usize, strings as usize)
+    });
+    let mut end = symbols_at + symbols_len + strings_len;
+    let certificate_at = end.next_multiple_of(8);
+    if layout.certificate > 0 {
+        end = certificate_at + layout.certificate;
+    }
+    let mut out = noise.bytes(end);
+    out[..LFANEW].fill(0);
+    out[..2].copy_from_slice(b"MZ");
+    out[0x3C..0x40].copy_from_slice(&(LFANEW as u32).to_le_bytes());
+    let mut headers = b"PE\0\0".to_vec();
+    put16(&mut headers, if layout.plus { 0x8664 } else { 0x014C });
+    put16(&mut headers, count as u16);
+    put32(&mut headers, 0x6000_0000);
+    put32(
+        &mut headers,
+        if layout.symbols.is_some() {
+            symbols_at as u32
+        } else {
+            0
+        },
+    );
+    put32(&mut headers, layout.symbols.map_or(0, |(count, _)| count));
+    put16(&mut headers, optional_len as u16);
+    put16(&mut headers, 0x0102 | if layout.dll { 0x2000 } else { 0 });
+    let mut optional = vec![0u8; optional_len];
+    let magic: u16 = if layout.plus { 0x20B } else { 0x10B };
+    optional[..2].copy_from_slice(&magic.to_le_bytes());
+    optional[32..36].copy_from_slice(&0x1000u32.to_le_bytes());
+    optional[36..40].copy_from_slice(&(ALIGN as u32).to_le_bytes());
+    optional[56..60].copy_from_slice(&(at as u32).to_le_bytes());
+    optional[60..64].copy_from_slice(&(headers_len as u32).to_le_bytes());
+    optional[68..70].copy_from_slice(&layout.subsystem.to_le_bytes());
+    let directories = if layout.plus { 112 } else { 96 };
+    optional[directories - 4..directories].copy_from_slice(&16u32.to_le_bytes());
+    if layout.certificate > 0 {
+        let entry = directories + 8 * 4;
+        optional[entry..entry + 4].copy_from_slice(&(certificate_at as u32).to_le_bytes());
+        optional[entry + 4..entry + 8].copy_from_slice(&(layout.certificate as u32).to_le_bytes());
+    }
+    headers.extend(optional);
+    for (index, &(raw_at, raw_len)) in sections.iter().enumerate() {
+        let mut section = format!(".s{index}\0\0\0\0\0").into_bytes();
+        section.truncate(8);
+        put32(&mut section, 0x1000);
+        put32(&mut section, 0x1000 * (index as u32 + 1));
+        put32(&mut section, raw_len as u32);
+        put32(&mut section, raw_at as u32);
+        section.extend_from_slice(&[0; 12]);
+        put32(&mut section, 0x6000_0020);
+        headers.extend(section);
+    }
+    out[LFANEW..LFANEW + headers.len()].copy_from_slice(&headers);
+    out[LFANEW + headers.len()..headers_len].fill(0);
+    if layout.symbols.is_some() {
+        let strings_at = symbols_at + symbols_len;
+        out[strings_at..strings_at + 4].copy_from_slice(&(strings_len as u32).to_le_bytes());
+    }
+    out
+}
+
+/// sfnt 的偏移表与表记录；`tables` 是（标签、位置、长度）。
+fn sfnt_directory(version: &[u8; 4], tables: &[(&[u8; 4], usize, usize)]) -> Vec<u8> {
+    let count = tables.len() as u16;
+    let selector = 15 - count.leading_zeros() as u16;
+    let range = (1u16 << selector) * 16;
+    let mut out = version.to_vec();
+    for value in [count, range, selector, count * 16 - range] {
+        put_be16(&mut out, value);
+    }
+    for &(tag, at, len) in tables {
+        out.extend_from_slice(tag);
+        put_be32(&mut out, 0); // 校验和
+        put_be32(&mut out, at as u32);
+        put_be32(&mut out, len as u32);
+    }
+    out
+}
+
+/// 一张表的内容：`head` 表照规范写版本与魔数，其余随机。
+fn sfnt_table(noise: &mut Noise, tag: &[u8; 4], len: usize) -> Vec<u8> {
+    let mut table = noise.bytes(len);
+    if tag == b"head" {
+        table[..4].copy_from_slice(&[0, 1, 0, 0]);
+        table[12..16].copy_from_slice(&0x5F0F_3CF5u32.to_be_bytes());
+    }
+    table
+}
+
+/// TrueType / OpenType：`tables` 是（标签、长度），按顺序排在表记录之后，每张按 4 字节对齐。
+pub fn sfnt(version: &[u8; 4], tables: &[(&[u8; 4], usize)]) -> Vec<u8> {
+    let mut noise = Noise::new(0x0054_5446);
+    let mut at = 12 + 16 * tables.len();
+    let mut placed = Vec::new();
+    for &(tag, len) in tables {
+        placed.push((tag, at, len));
+        at = (at + len).next_multiple_of(4);
+    }
+    let mut out = sfnt_directory(version, &placed);
+    for &(tag, table_at, len) in &placed {
+        out.resize(table_at, 0);
+        out.extend(sfnt_table(&mut noise, tag, len));
+    }
+    out.resize(out.len().next_multiple_of(4), 0);
+    out
+}
+
+/// 字体集：`fonts` 个字体，各有 cmap、glyf、head 三张表；`signature` 时用 2.0 版的头，在最后放数字签名表。
+pub fn ttc(fonts: usize, signature: bool) -> Vec<u8> {
+    let mut noise = Noise::new(0x0054_5443);
+    let header_len = 12 + 4 * fonts + if signature { 12 } else { 0 };
+    let directory_len = 12 + 16 * 3;
+    let mut out = vec![0u8; header_len + fonts * directory_len];
+    out[..4].copy_from_slice(b"ttcf");
+    out[4..6].copy_from_slice(&(if signature { 2u16 } else { 1 }).to_be_bytes());
+    out[8..12].copy_from_slice(&(fonts as u32).to_be_bytes());
+    for font in 0..fonts {
+        let directory_at = header_len + font * directory_len;
+        out[12 + 4 * font..16 + 4 * font].copy_from_slice(&(directory_at as u32).to_be_bytes());
+        let mut placed = Vec::new();
+        for (tag, len) in [
+            (b"cmap", 40 + 8 * font),
+            (b"glyf", 500 + 100 * font),
+            (b"head", 54),
+        ] {
+            let at = out.len();
+            out.extend(sfnt_table(&mut noise, tag, len));
+            out.resize(out.len().next_multiple_of(4), 0);
+            placed.push((tag, at, len));
+        }
+        let directory = sfnt_directory(b"\0\x01\0\0", &placed);
+        out[directory_at..directory_at + directory_len].copy_from_slice(&directory);
+    }
+    if signature {
+        let dsig_at = out.len();
+        out.extend(noise.bytes(100));
+        let at = 12 + 4 * fonts;
+        out[at..at + 4].copy_from_slice(b"DSIG");
+        out[at + 4..at + 8].copy_from_slice(&100u32.to_be_bytes());
+        out[at + 8..at + 12].copy_from_slice(&(dsig_at as u32).to_be_bytes());
+    }
+    out
+}
+
+/// WOFF / WOFF2：一共 `len` 字节，头里写着这个长度，一张表；没有元数据与私有数据。
+pub fn woff(woff2: bool, len: usize) -> Vec<u8> {
+    let mut noise = Noise::new(0x0057_4F46);
+    let mut out = noise.bytes(len);
+    out[..4].copy_from_slice(if woff2 { b"wOF2" } else { b"wOFF" });
+    out[4..8].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    out[8..12].copy_from_slice(&(len as u32).to_be_bytes());
+    out[12..14].copy_from_slice(&1u16.to_be_bytes());
+    out[14..16].fill(0);
+    out[16..20].copy_from_slice(&128u32.to_be_bytes());
+    if woff2 {
+        out[20..24].copy_from_slice(&(len as u32 - 58).to_be_bytes());
+        out[28..48].fill(0);
+    } else {
+        out[24..44].fill(0);
+        let table = len as u32 - 64;
+        out[44..48].copy_from_slice(b"glyf");
+        out[48..52].copy_from_slice(&64u32.to_be_bytes());
+        out[52..56].copy_from_slice(&table.to_be_bytes());
+        out[56..60].copy_from_slice(&(table + 10).to_be_bytes());
+    }
+    out
+}
+
+/// ICO / CUR：每个图像是（是否 PNG、数据长度），依次紧跟在目录后面；不是 PNG 的以位图信息头开始。
+pub fn ico(images: &[(bool, usize)], cursor: bool) -> Vec<u8> {
+    let mut noise = Noise::new(0x0049_434F);
+    let mut out = vec![0, 0, if cursor { 2 } else { 1 }, 0];
+    put16(&mut out, images.len() as u16);
+    let mut at = 6 + 16 * images.len();
+    let mut data = Vec::new();
+    for &(png, len) in images {
+        out.extend_from_slice(&[32, 32, 0, 0]);
+        if cursor {
+            put16(&mut out, 5);
+            put16(&mut out, 7);
+        } else {
+            put16(&mut out, 1);
+            put16(&mut out, 32);
+        }
+        put32(&mut out, len as u32);
+        put32(&mut out, at as u32);
+        let mut image = noise.bytes(len);
+        if png {
+            image[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        } else {
+            image[..4].copy_from_slice(&40u32.to_le_bytes());
+        }
+        data.extend(image);
+        at += len;
+    }
+    out.extend(data);
+    out
+}
+
+/// Photoshop 文档的布局：PSB、合并图像用 RLE、通道数、有没有图像资源。图像 20 × 10、每通道 8 位、RGB。
+pub struct PsdLayout {
+    pub big: bool,
+    pub rle: bool,
+    pub channels: u16,
+    pub resources: bool,
+}
+
+impl Default for PsdLayout {
+    fn default() -> Self {
+        Self {
+            big: false,
+            rle: false,
+            channels: 3,
+            resources: true,
+        }
+    }
+}
+
+pub fn psd(layout: &PsdLayout) -> Vec<u8> {
+    let (width, height) = (20usize, 10usize);
+    let mut noise = Noise::new(0x0038_4250);
+    let mut out = b"8BPS".to_vec();
+    put_be16(&mut out, if layout.big { 2 } else { 1 });
+    out.extend_from_slice(&[0; 6]);
+    put_be16(&mut out, layout.channels);
+    put_be32(&mut out, height as u32);
+    put_be32(&mut out, width as u32);
+    put_be16(&mut out, 8);
+    put_be16(&mut out, 3);
+    put_be32(&mut out, 0); // 颜色模式数据
+    if layout.resources {
+        let mut resources = b"8BIM".to_vec();
+        put_be16(&mut resources, 0x0408);
+        resources.extend_from_slice(&[0, 0]); // 空名字，补齐到偶数
+        put_be32(&mut resources, 20);
+        resources.extend(noise.bytes(20));
+        put_be32(&mut out, resources.len() as u32);
+        out.extend(resources);
+    } else {
+        put_be32(&mut out, 0);
+    }
+    if layout.big {
+        out.extend_from_slice(&60u64.to_be_bytes());
+    } else {
+        put_be32(&mut out, 60);
+    }
+    out.extend(noise.bytes(60));
+    let rows = usize::from(layout.channels) * height;
+    if layout.rle {
+        put_be16(&mut out, 1);
+        let counts: Vec<usize> = (0..rows)
+            .map(|_| 2 + (noise.next_u64() % 20) as usize)
+            .collect();
+        for &count in &counts {
+            if layout.big {
+                put_be32(&mut out, count as u32);
+            } else {
+                put_be16(&mut out, count as u16);
+            }
+        }
+        out.extend(noise.bytes(counts.iter().sum()));
+    } else {
+        put_be16(&mut out, 0);
+        out.extend(noise.bytes(rows * width));
+    }
+    out
+}
+
+/// [`psd`] 样本里合并图像数据（压缩方式字段）的位置。
+pub fn psd_image_at(sample: &[u8]) -> usize {
+    let big = sample[5] == 2;
+    let mut at = 26;
+    at += 4 + be32_at(sample, at) as usize;
+    at += 4 + be32_at(sample, at) as usize;
+    if big {
+        at + 8 + u64::from_be_bytes(sample[at..at + 8].try_into().unwrap()) as usize
+    } else {
+        at + 4 + be32_at(sample, at) as usize
+    }
+}
+
+/// 初值为 0、最后不取反的 CRC-32，逐位算（PST 文件头的 CRC 用它）。
+pub fn raw_crc32(data: &[u8]) -> u32 {
+    let mut crc = 0u32;
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    crc
+}
+
+/// Outlook 数据文件：一共 `len` 字节，ANSI 或 Unicode 格式的文件头记着这个长度，`ost` 时是脱机文件。
+pub fn pst(unicode: bool, ost: bool, len: usize) -> Vec<u8> {
+    let mut noise = Noise::new(0x0050_5354);
+    let mut out = noise.bytes(len);
+    out[..4].copy_from_slice(b"!BDN");
+    out[8..10].copy_from_slice(if ost { b"SO" } else { b"SM" });
+    out[10..12].copy_from_slice(&(if unicode { 23u16 } else { 14 }).to_le_bytes());
+    out[12..14].copy_from_slice(&19u16.to_le_bytes());
+    out[14..16].copy_from_slice(&[1, 1]);
+    if unicode {
+        out[184..192].copy_from_slice(&(len as u64).to_le_bytes());
+    } else {
+        out[168..172].copy_from_slice(&(len as u32).to_le_bytes());
+    }
+    let crc = raw_crc32(&out[8..8 + 471]);
+    out[4..8].copy_from_slice(&crc.to_le_bytes());
+    out
+}
+
+/// 未压缩的 SWF：`tags` 是各标签的数据长度（63 以上用长标签头），最后是 End 标签；文件头写着总长度。
+pub fn swf(tags: &[usize]) -> Vec<u8> {
+    let mut noise = Noise::new(0x0053_5746);
+    let mut out = b"FWS\x0A\0\0\0\0".to_vec();
+    // 舞台大小：每个坐标 15 位，5 + 60 = 65 位，占 9 字节
+    out.push(15 << 3);
+    out.extend(noise.bytes(8));
+    out.extend_from_slice(&[0x00, 0x18]); // 帧率 24
+    put16(&mut out, 1);
+    for (index, &len) in tags.iter().enumerate() {
+        let code = 9 + index as u16;
+        if len >= 0x3F {
+            put16(&mut out, (code << 6) | 0x3F);
+            put32(&mut out, len as u32);
+        } else {
+            put16(&mut out, (code << 6) | len as u16);
+        }
+        out.extend(noise.bytes(len));
+    }
+    put16(&mut out, 0);
+    let total = out.len() as u32;
+    out[4..8].copy_from_slice(&total.to_le_bytes());
+    out
+}
+
+/// 富士 RAF：文件头之后依次是 `jpeg` 字节的 JPEG 预览、200 字节的 CFA 头、`cfa` 字节的 CFA 数据。
+pub fn raf(jpeg: usize, cfa: usize) -> Vec<u8> {
+    let mut noise = Noise::new(0x0052_4146);
+    let jpeg_at = 0x94;
+    let cfa_header_at = jpeg_at + jpeg;
+    let cfa_at = cfa_header_at + 200;
+    let mut out = noise.bytes(cfa_at + cfa);
+    out[..16].copy_from_slice(b"FUJIFILMCCD-RAW ");
+    out[0x10..0x14].copy_from_slice(b"0201");
+    out[0x14..0x1C].copy_from_slice(b"FF129502");
+    out[0x1C..0x3C].fill(0);
+    out[0x1C..0x20].copy_from_slice(b"X-T3");
+    out[0x3C..0x40].copy_from_slice(b"0100");
+    for (index, (at, len)) in [(jpeg_at, jpeg), (cfa_header_at, 200), (cfa_at, cfa)]
+        .into_iter()
+        .enumerate()
+    {
+        let field = 0x54 + 8 * index;
+        out[field..field + 4].copy_from_slice(&(at as u32).to_be_bytes());
+        out[field + 4..field + 8].copy_from_slice(&(len as u32).to_be_bytes());
+    }
+    out[jpeg_at..jpeg_at + 4].copy_from_slice(&[0xFF, 0xD8, 0xFF, 0xE1]);
+    out
+}
+
+/// EVTX：文件头块与 `chunks` 个块。
+pub fn evtx(chunks: u16) -> Vec<u8> {
+    let mut noise = Noise::new(0x0045_5654);
+    let mut out = vec![0u8; 4096];
+    out[..8].copy_from_slice(b"ElfFile\0");
+    out[16..24].copy_from_slice(&u64::from(chunks - 1).to_le_bytes());
+    out[24..32].copy_from_slice(&(u64::from(chunks) * 100 + 1).to_le_bytes());
+    out[32..36].copy_from_slice(&128u32.to_le_bytes());
+    out[36..38].copy_from_slice(&1u16.to_le_bytes());
+    out[38..40].copy_from_slice(&3u16.to_le_bytes());
+    out[40..42].copy_from_slice(&4096u16.to_le_bytes());
+    out[42..44].copy_from_slice(&chunks.to_le_bytes());
+    let crc = crc32(&[&out[..120]]);
+    out[124..128].copy_from_slice(&crc.to_le_bytes());
+    for _ in 0..chunks {
+        let mut chunk = noise.bytes(65536);
+        chunk[..8].copy_from_slice(b"ElfChnk\0");
+        out.extend(chunk);
+    }
+    out
+}
+
+/// 注册表配置单元：基本块与 `bins` 个 4096 字节的 hive bin。
+pub fn regf(bins: u32) -> Vec<u8> {
+    let mut noise = Noise::new(0x0052_4547);
+    let mut out = vec![0u8; 4096];
+    out[..4].copy_from_slice(b"regf");
+    out[4..8].copy_from_slice(&7u32.to_le_bytes());
+    out[8..12].copy_from_slice(&7u32.to_le_bytes());
+    out[20..24].copy_from_slice(&1u32.to_le_bytes());
+    out[24..28].copy_from_slice(&5u32.to_le_bytes());
+    out[32..36].copy_from_slice(&1u32.to_le_bytes());
+    out[36..40].copy_from_slice(&0x20u32.to_le_bytes());
+    out[40..44].copy_from_slice(&(bins * 4096).to_le_bytes());
+    out[44..48].copy_from_slice(&1u32.to_le_bytes());
+    for (index, unit) in "SYSTEM".encode_utf16().enumerate() {
+        out[48 + 2 * index..50 + 2 * index].copy_from_slice(&unit.to_le_bytes());
+    }
+    let mut checksum = out[..508]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .fold(0u32, |sum, word| sum ^ u32::from_le_bytes(*word));
+    if checksum == u32::MAX {
+        checksum -= 1;
+    } else if checksum == 0 {
+        checksum = 1;
+    }
+    out[508..512].copy_from_slice(&checksum.to_le_bytes());
+    for index in 0..bins {
+        let mut bin = noise.bytes(4096);
+        bin[..4].copy_from_slice(b"hbin");
+        bin[4..8].copy_from_slice(&(index * 4096).to_le_bytes());
+        bin[8..12].copy_from_slice(&4096u32.to_le_bytes());
+        out.extend(bin);
+    }
+    out
+}
+
+/// CHM：版本 2 或 3 的文件头、头段 0、目录段（`ITSP` 头加一段随机数据），之后 `content` 字节的内容。
+pub fn chm(version: u32, content: usize) -> Vec<u8> {
+    let mut noise = Noise::new(0x0043_484D);
+    let header_len = if version == 3 { 0x60 } else { 0x58 };
+    let section0_at = header_len;
+    let directory_at = section0_at + 0x18;
+    let directory_len = 0x54 + 200;
+    let total = directory_at + directory_len + content;
+    let mut out = noise.bytes(total);
+    out[..4].copy_from_slice(b"ITSF");
+    out[4..8].copy_from_slice(&version.to_le_bytes());
+    out[8..12].copy_from_slice(&(header_len as u32).to_le_bytes());
+    out[0x0C..0x10].copy_from_slice(&1u32.to_le_bytes());
+    out[0x38..0x40].copy_from_slice(&(section0_at as u64).to_le_bytes());
+    out[0x40..0x48].copy_from_slice(&0x18u64.to_le_bytes());
+    out[0x48..0x50].copy_from_slice(&(directory_at as u64).to_le_bytes());
+    out[0x50..0x58].copy_from_slice(&(directory_len as u64).to_le_bytes());
+    if version == 3 {
+        out[0x58..0x60].copy_from_slice(&((directory_at + directory_len) as u64).to_le_bytes());
+    }
+    out[section0_at..section0_at + 0x18].fill(0);
+    out[section0_at..section0_at + 4].copy_from_slice(&0x01FEu32.to_le_bytes());
+    out[section0_at + 8..section0_at + 16].copy_from_slice(&(total as u64).to_le_bytes());
+    out[directory_at..directory_at + 4].copy_from_slice(b"ITSP");
+    out
+}
+
+/// EMF：头记录、`records` 条画线记录、带 `palette` 项调色板的结束记录。
+pub fn emf(records: usize, palette: usize) -> Vec<u8> {
+    let mut noise = Noise::new(0x0045_4D46);
+    let mut out = Vec::new();
+    put32(&mut out, 1);
+    put32(&mut out, 88);
+    out.extend(noise.bytes(32)); // 外框与画框
+    out.extend_from_slice(b" EMF");
+    put32(&mut out, 0x0001_0000);
+    put32(&mut out, 0); // 文件字节数，最后填
+    put32(&mut out, records as u32 + 2);
+    put16(&mut out, 1);
+    put16(&mut out, 0);
+    put32(&mut out, 0);
+    put32(&mut out, 0);
+    put32(&mut out, palette as u32);
+    out.extend_from_slice(&[0x80, 7, 0, 0, 0x38, 4, 0, 0]); // 设备像素
+    out.extend_from_slice(&[0x40, 1, 0, 0, 0xB4, 0, 0, 0]); // 设备毫米
+    for _ in 0..records {
+        put32(&mut out, 54); // EMR_LINETO
+        put32(&mut out, 16);
+        out.extend(noise.bytes(8));
+    }
+    let eof_len = 20 + 4 * palette;
+    put32(&mut out, 14);
+    put32(&mut out, eof_len as u32);
+    put32(&mut out, palette as u32);
+    put32(&mut out, if palette > 0 { 16 } else { 0 });
+    out.extend(noise.bytes(4 * palette));
+    put32(&mut out, eof_len as u32);
+    let total = out.len() as u32;
+    out[48..52].copy_from_slice(&total.to_le_bytes());
+    out
+}
+
+/// WMF：`placeable` 时带可放置头；META_HEADER、`records` 条画线记录、结束记录。
+pub fn wmf(placeable: bool, records: usize) -> Vec<u8> {
+    let mut noise = Noise::new(0x0057_4D46);
+    let mut body = Vec::new();
+    put16(&mut body, 1);
+    put16(&mut body, 9);
+    put16(&mut body, 0x0300);
+    put32(&mut body, 0); // 总字数，最后填
+    put16(&mut body, 1);
+    put32(&mut body, if records > 0 { 5 } else { 3 });
+    put16(&mut body, 0);
+    for _ in 0..records {
+        put32(&mut body, 5);
+        put16(&mut body, 0x0213); // META_LINETO
+        body.extend(noise.bytes(4));
+    }
+    put32(&mut body, 3);
+    put16(&mut body, 0);
+    let words = (body.len() / 2) as u32;
+    body[6..10].copy_from_slice(&words.to_le_bytes());
+    if !placeable {
+        return body;
+    }
+    let mut out = vec![0xD7, 0xCD, 0xC6, 0x9A, 0, 0];
+    for value in [0u16, 0, 1000, 800, 1440] {
+        put16(&mut out, value);
+    }
+    put32(&mut out, 0);
+    let checksum = out
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .fold(0u16, |sum, word| sum ^ u16::from_le_bytes(*word));
+    put16(&mut out, checksum);
+    out.extend(body);
+    out
+}

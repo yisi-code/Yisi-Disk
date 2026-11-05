@@ -395,9 +395,9 @@ fn dispatch_now(
         SCAN_FREE => {
             state.ensure_idle()?;
             let params: ScanFreeParams = request.params()?;
-            let device = open_source(&params.source)?;
+            let device: Arc<dyn BlockDevice> = Arc::from(open_source(&params.source)?);
             browse::verify_partition(device.as_ref(), params.partition)?;
-            let free = fs_fix_plan::free(device.as_ref(), params.partition)?;
+            let free = fs_fix_plan::free(&device, params.partition)?;
             let partition = params.partition;
             state.job = Some(start_job(params.job_id, outbox, events, move |context| {
                 free_scan_job::run(device.as_ref(), partition, &free, context)
@@ -412,7 +412,7 @@ fn dispatch_now(
             let device: Arc<dyn BlockDevice> =
                 Arc::from(open_source_for_output(&params.source, &output_dir)?);
             browse::verify_partition(device.as_ref(), params.partition)?;
-            let lost = fs_fix_plan::lost(device.as_ref(), params.partition)?;
+            let lost = fs_fix_plan::lost(&device, params.partition)?;
             std::fs::create_dir_all(&output_dir)
                 .map_err(|error| output_unavailable(&output_dir, &error))?;
             let started = CopyStarted {
@@ -535,12 +535,12 @@ fn dispatch_now(
         FS_CHECK => {
             state.ensure_idle()?;
             let params: FsCheckParams = request.params()?;
-            let device = open_source(&params.source)?;
+            let device: Arc<dyn BlockDevice> = Arc::from(open_source(&params.source)?);
             browse::verify_partition(device.as_ref(), params.partition)?;
             let partition = params.partition;
             state.job = Some(
                 start_job(params.job_id, outbox, events, move |context| {
-                    fs_check_job::run(device.as_ref(), partition, context)
+                    fs_check_job::run(&device, partition, context)
                 })
                 .pausable(),
             );
