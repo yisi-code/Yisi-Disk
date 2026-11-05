@@ -18,7 +18,7 @@
 - **分区表**：MBR（含扩展分区）、GPT、Apple 分区图、Sun、Xbox、Humax、无分区表。
 - **文件系统识别**：APFS、BeFS、BSD disklabel、Btrfs、CramFS、exFAT、ext2/3/4、FAT12/16/32、FATX、F2FS、JFS、GFS2、HFS、HFS+、HPFS、LUKS、LVM/LVM2、Linux RAID、NetWare NSS、NTFS、ReFS、ReiserFS、Sun、Linux Swap、System V、UFS/UFS2、VMFS、WBFS、XFS、ZFS。
 - **镜像格式**：raw/dd、分段 raw、E01。
-- **平台**：Windows 10/11、macOS、Linux 桌面。
+- **平台**：目前只做 Windows 10/11。macOS、Linux 桌面以后需要时再做；架构为它们留了位置（`io` 的设备后端、磁盘代理的提权与句柄传递，第 4.1 节），代码里已有的 Unix 分支不再随改动维护，到时再补。
 
 ### 1.2 质量目标
 
@@ -145,7 +145,7 @@ created → running ⇄ waiting_decision → completed
 
 ### 4.1 只读句柄传递
 
-磁盘代理以特权打开设备，把**只读**句柄交给引擎：
+磁盘代理以特权打开设备，把**只读**句柄交给引擎（目前只实现了 Windows，Linux 与 macOS 两行是以后的做法）：
 
 | 平台 | 提权方式 | 句柄传递 |
 |---|---|---|
