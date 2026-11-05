@@ -20,15 +20,17 @@ use tauri::{AppHandle, Emitter};
 use yisi_broker::protocol::{physical_drive_path, volume_path};
 use yisi_engine::protocol::{
     BROWSE_OPEN, BrowseOpened, BrowseParams, CANCEL, CANCEL_SCAN, CANCELLED, CAPABILITIES,
-    CARVE_EXTRACT, CARVE_START, COMPLETED, COPIED, COPY_FILES, Capabilities, CarveParams,
-    CarveStarted, CopyItem, CopyParams, CopyStarted, DiskList, ExtractItem, ExtractParams, FAILED,
-    FOUND, FileListPage, FilePreview, FileTypeList, HEARTBEAT, IMAGING, JobRef, LIST_DISKS,
-    LIST_FILE_TYPES, LIST_FILES, LOG, ListFilesParams, PARTIAL_SUFFIX, PARTITIONS, PAUSE,
-    PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS, PartitionRef, PreviewFsParams,
-    PreviewParams, PreviewRangeParams, READ_SCAN, READING, RESUME, ReadScanParams, SCAN_DELETED,
-    ScanParams, ScanResult, Source, error_code,
+    CARVE_EXTRACT, CARVE_START, CHECKPOINT, COMPLETED, COPIED, COPY_FILES, Capabilities,
+    CarveParams, CarveStarted, CopyItem, CopyParams, CopyStarted, DiskList, ExtractItem,
+    ExtractParams, FAILED, FOUND, FileListPage, FilePreview, FileTypeList, FoundFile, HEARTBEAT,
+    IMAGING, JobRef, LIST_DISKS, LIST_FILE_TYPES, LIST_FILES, LOG, ListFilesParams, PARTIAL_SUFFIX,
+    PARTITIONS, PAUSE, PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS, PartitionRef,
+    PreviewFsParams, PreviewParams, PreviewRangeParams, READ_SCAN, READING, RESUME, ReadScanParams,
+    SCAN_DELETED, ScanParams, ScanResult, Source, error_code,
 };
 
+use crate::carve_history::{CarveHistory, CarveRecord, CarveRecorder, CarveStatus};
+use crate::record_file::now_ms;
 use yisi_engine::protocol::{BootCopy, BootDiagnosis, DIAGNOSE_BOOT, DiagnoseBootParams};
 use yisi_engine::protocol::{BootFix, BootSectorPlan, PLAN_BOOT_SECTOR, PlanBootSectorParams};
 use yisi_engine::protocol::{
@@ -128,6 +130,12 @@ impl Target {
     }
 }
 
+/// 任务事件的旁听者：事件发给界面之前先交给它（深度恢复用它记扫描记录，见 `carve_history`）。
+/// 在读引擎输出的线程里调用，同一任务的事件按引擎发出的顺序到达；引擎没发终结事件就退出时，宿主补发的那个也会到。
+pub trait JobObserver: Send + Sync {
+    fn event(&self, kind: &str, data: &Value);
+}
+
 /// 发给界面的任务事件。`kind` 为 progress、found、copied、imaging、reading、log、completed、failed、cancelled、
 /// unresponsive、responsive。
 #[derive(Debug, Clone, Serialize)]
@@ -184,33 +192,144 @@ impl Engines {
     }
 
     /// 深度恢复。源为物理磁盘时，引擎在开始前核对输出目录不在这块盘上，否则拒绝（`outputOnSource`）。
+    /// 深度恢复：开始一次新的扫描，记进扫描记录（记录 ID 就是任务 ID，`source_label` 是界面给的来源描述）。
+    /// 先记下记录再启动引擎，引擎一开始发的通知也能记上；没能启动时撤回记录。
+    #[expect(clippy::too_many_arguments, reason = "与界面命令的参数一一对应")]
     pub fn start_carve(
         &self,
         app: AppHandle,
         broker: &BrokerSession,
+        history: &Arc<CarveHistory>,
         job_id: String,
         target: Target,
         output_dir: Option<String>,
         extensions: Vec<String>,
+        source_label: String,
     ) -> Result<(), HostError> {
         // 磁盘编号不合法时不启动引擎
         target.validate()?;
+        validate_job_id(&job_id)?;
+        let now = now_ms();
+        let record = CarveRecord {
+            id: job_id.clone(),
+            target: target.clone(),
+            source_label,
+            extensions: extensions.clone(),
+            output_dir: None,
+            status: CarveStatus::Running,
+            resume_at: 0,
+            size: 0,
+            files: 0,
+            started_at_ms: now,
+            updated_at_ms: now,
+        };
+        history.begin(record.clone())?;
+        let observer: Arc<dyn JobObserver> =
+            Arc::new(CarveRecorder::new(Arc::clone(history), &record));
         let params_job_id = job_id.clone();
         let source_target = target.clone();
-        let started = self.start_job(app, job_id.clone(), CARVE_START, |engine_pid| {
-            to_params(&CarveParams {
-                job_id: params_job_id,
-                source: resolve_source(target, broker, engine_pid)?,
-                output_dir,
-                extensions: Some(extensions),
-            })
-        })?;
+        let started = self.start_job_observed(
+            app,
+            job_id.clone(),
+            CARVE_START,
+            REQUEST_TIMEOUT,
+            Some(observer),
+            |engine_pid| {
+                to_params(&CarveParams {
+                    job_id: params_job_id,
+                    source: resolve_source(target, broker, engine_pid)?,
+                    output_dir,
+                    extensions: Some(extensions),
+                    start_at: 0,
+                    continue_dir: None,
+                })
+            },
+        );
+        let started = started.inspect_err(|_| history.abandon(&job_id, true))?;
         let CarveStarted { output_dir } = from_value(started)?;
-        if let Some(output_dir) = output_dir {
-            lock(&self.recovered_dirs).insert(job_id.clone(), PathBuf::from(output_dir));
+        if let Some(output_dir) = &output_dir
+            && let Err(error) = history.update(&job_id, |record| {
+                record.output_dir = Some(output_dir.clone());
+            })
+        {
+            tracing::warn!(?error, "没能在扫描记录里记下保存位置");
         }
-        lock(&self.carve_targets).insert(job_id, source_target);
+        self.register_carve(&job_id, source_target, output_dir.map(PathBuf::from));
         Ok(())
+    }
+
+    /// 接着扫一次停下的扫描（扫描记录 `record_id`）：同样的源与格式，从最后一个检查点接着扫；
+    /// 边扫边保存的接着存进上次的目录。找到的文件记进同一条记录。
+    pub fn resume_carve(
+        &self,
+        app: AppHandle,
+        broker: &BrokerSession,
+        history: &Arc<CarveHistory>,
+        job_id: String,
+        record_id: &str,
+    ) -> Result<(), HostError> {
+        let record = history
+            .find(record_id)
+            .ok_or_else(|| HostError::new("carveRecordNotFound", record_id))?;
+        if matches!(record.status, CarveStatus::Running | CarveStatus::Completed) {
+            return Err(HostError::new("carveNotResumable", record_id));
+        }
+        record.target.validate()?;
+        validate_job_id(&job_id)?;
+        history.resume(record_id)?;
+        let observer: Arc<dyn JobObserver> =
+            Arc::new(CarveRecorder::new(Arc::clone(history), &record));
+        let params_job_id = job_id.clone();
+        let target = record.target.clone();
+        let started = self.start_job_observed(
+            app,
+            job_id.clone(),
+            CARVE_START,
+            REQUEST_TIMEOUT,
+            Some(observer),
+            |engine_pid| {
+                to_params(&CarveParams {
+                    job_id: params_job_id,
+                    source: resolve_source(target, broker, engine_pid)?,
+                    output_dir: None,
+                    extensions: Some(record.extensions.clone()),
+                    start_at: record.resume_at,
+                    continue_dir: record.output_dir.clone(),
+                })
+            },
+        );
+        started.inspect_err(|_| history.abandon(record_id, false))?;
+        let output_dir = record.output_dir.map(PathBuf::from);
+        self.register_carve(&job_id, record.target.clone(), output_dir.clone());
+        self.register_carve(record_id, record.target, output_dir);
+        Ok(())
+    }
+
+    /// 打开一条扫描记录：按记录 ID 记下它的源与保存目录（之后预览、另存、打开恢复出的文件都按记录 ID），
+    /// 给出记录与找到的文件。
+    pub fn open_carve_record(
+        &self,
+        history: &CarveHistory,
+        record_id: &str,
+    ) -> Result<(CarveRecord, Vec<FoundFile>), HostError> {
+        let record = history
+            .find(record_id)
+            .ok_or_else(|| HostError::new("carveRecordNotFound", record_id))?;
+        let files = history.files(record_id)?;
+        self.register_carve(
+            record_id,
+            record.target.clone(),
+            record.output_dir.as_ref().map(PathBuf::from),
+        );
+        Ok((record, files))
+    }
+
+    /// 记下深度恢复任务（或扫描记录）`id` 的源与保存目录：预览、另存要回到源上读，打开恢复出的文件要找目录。
+    fn register_carve(&self, id: &str, target: Target, output_dir: Option<PathBuf>) {
+        if let Some(output_dir) = output_dir {
+            lock(&self.recovered_dirs).insert(id.to_owned(), output_dir);
+        }
+        lock(&self.carve_targets).insert(id.to_owned(), target);
     }
 
     /// 预览只扫描、还没保存的文件：另起一个引擎回到扫描任务 `scan_job_id` 的源上读这一段。
@@ -222,7 +341,7 @@ impl Engines {
         length: u64,
     ) -> Result<FilePreview, HostError> {
         let target = self.carve_target(scan_job_id)?;
-        let process = EngineProcess::spawn(None, || {})?;
+        let process = EngineProcess::spawn(None, None, || {})?;
         let result = resolve_source(target, broker, process.pid)
             .and_then(|source| {
                 to_params(&PreviewRangeParams {
@@ -634,13 +753,26 @@ impl Engines {
         timeout: Duration,
         params: impl FnOnce(u32) -> Result<Value, HostError>,
     ) -> Result<Value, HostError> {
+        self.start_job_observed(app, job_id, method, timeout, None, params)
+    }
+
+    /// 同 [`start_job_with`](Self::start_job_with)，任务的事件先交给 `observer`。
+    fn start_job_observed(
+        &self,
+        app: AppHandle,
+        job_id: String,
+        method: &str,
+        timeout: Duration,
+        observer: Option<Arc<dyn JobObserver>>,
+        params: impl FnOnce(u32) -> Result<Value, HostError>,
+    ) -> Result<Value, HostError> {
         validate_job_id(&job_id)?;
         if lock(&self.jobs).contains_key(&job_id) {
             return Err(HostError::new("jobExists", job_id));
         }
         let jobs = Arc::clone(&self.jobs);
         let finished_id = job_id.clone();
-        let process = EngineProcess::spawn(Some((app, job_id.clone())), move || {
+        let process = EngineProcess::spawn(Some((app, job_id.clone())), observer, move || {
             lock(&jobs).remove(&finished_id);
         })?;
         lock(&self.jobs).insert(job_id.clone(), Arc::clone(&process));
@@ -713,12 +845,14 @@ struct EngineProcess {
     /// 已发出终结事件（或不再需要发），之后不再为这个任务发事件。
     finished: AtomicBool,
     cancel_requested: AtomicBool,
+    observer: Option<Arc<dyn JobObserver>>,
 }
 
 impl EngineProcess {
-    /// 启动引擎。`job` 为界面与任务 ID 时，引擎的通知转成该任务的事件；`on_exit` 在引擎退出后调用。
+    /// 启动引擎。`job` 为界面与任务 ID 时，引擎的通知转成该任务的事件（先交给 `observer`）；`on_exit` 在引擎退出后调用。
     fn spawn(
         job: Option<(AppHandle, String)>,
+        observer: Option<Arc<dyn JobObserver>>,
         on_exit: impl FnOnce() + Send + 'static,
     ) -> Result<Arc<Self>, HostError> {
         let path = sibling_program("yisi-engine", "engineNotFound")?;
@@ -751,6 +885,7 @@ impl EngineProcess {
             last_heartbeat: Mutex::new(Instant::now()),
             finished: AtomicBool::new(job.is_none()),
             cancel_requested: AtomicBool::new(false),
+            observer,
         });
         if let Some((app, job_id)) = &job {
             spawn_watchdog(Arc::clone(&process), app.clone(), job_id.clone());
@@ -844,7 +979,14 @@ impl EngineProcess {
                     json!({ "reason": "engineExited", "exitCode": exit_code }),
                 )
             };
+            self.observe(kind, &data);
             emit(app, job_id, kind, data);
+        }
+    }
+
+    fn observe(&self, kind: &str, data: &Value) {
+        if let Some(observer) = &self.observer {
+            observer.event(kind, data);
         }
     }
 
@@ -855,6 +997,7 @@ impl EngineProcess {
         let kind = match method {
             PROGRESS => "progress",
             FOUND => "found",
+            CHECKPOINT => "checkpoint",
             COPIED => "copied",
             IMAGING => "imaging",
             PARTITIONS => "partitions",
@@ -879,6 +1022,7 @@ impl EngineProcess {
         if let Some(object) = data.as_object_mut() {
             object.remove("jobId");
         }
+        self.observe(kind, &data);
         emit(app, job_id, kind, data);
     }
 
@@ -999,7 +1143,7 @@ fn query_source_timed<P: Serialize, T: DeserializeOwned>(
     params: impl FnOnce(Source) -> P,
 ) -> Result<T, HostError> {
     target.validate()?;
-    let process = EngineProcess::spawn(None, || {})?;
+    let process = EngineProcess::spawn(None, None, || {})?;
     let result = resolve_source(target, broker, process.pid)
         .and_then(|source| to_params(&params(source)))
         .and_then(|params| process.request(method, params, timeout));
@@ -1030,7 +1174,7 @@ fn query<T: DeserializeOwned>(method: &str) -> Result<T, HostError> {
 }
 
 fn query_with<T: DeserializeOwned>(method: &str, params: Value) -> Result<T, HostError> {
-    let process = EngineProcess::spawn(None, || {})?;
+    let process = EngineProcess::spawn(None, None, || {})?;
     let result = process.request(method, params, REQUEST_TIMEOUT);
     process.abandon();
     from_value(result?)

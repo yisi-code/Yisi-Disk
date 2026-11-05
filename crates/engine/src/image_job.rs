@@ -13,8 +13,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use yisi_engine::protocol::{
-    ByteRange, ERRORS_IN_A_ROW_NOTICE, IMAGING, ImageStarted, ImageSummary, JobImaging,
-    MAX_UNREADABLE_RANGES, RegionProgress, error_code,
+    ByteRange, ERRORS_IN_A_ROW_NOTICE, IMAGING, ImageStarted, ImageSummary, ImagingTuning,
+    JobImaging, MAX_IMAGING_BLOCK, MAX_IMAGING_RETRIES, MAX_IMAGING_SKIP, MAX_UNREADABLE_RANGES,
+    MIN_IMAGING_BLOCK, RegionProgress, error_code,
 };
 use yisi_io::{
     BadMap, BlockDevice, ImageStore, ImagingControl, ImagingOptions, ImagingOutcome, IoError,
@@ -35,13 +36,14 @@ const RATE_MIN_SPAN: Duration = Duration::from_secs(1);
 /// 只读一部分时总会一起读的分区表区域：开头、末尾、每个分区之前各这么多字节。
 const TABLE_AREA: u64 = 1 << 20;
 
-/// 这一次怎样做：读哪些范围、先清掉哪些范围的进度、是否只做复制这一轮。
+/// 这一次怎样做：读哪些范围、先清掉哪些范围的进度、是否只做复制这一轮、读取参数。
 #[derive(Debug, Clone, Default)]
 pub struct ImageRequest {
     /// 不给时读整个源。
     pub ranges: Option<Vec<ByteRange>>,
     pub reset: Vec<ByteRange>,
     pub copy_only: bool,
+    pub tuning: ImagingTuning,
 }
 
 /// 准备好的镜像任务：源、坏区图、打开的镜像文件，以及这一次的范围。
@@ -52,6 +54,7 @@ pub struct ImageJob {
     image_path: PathBuf,
     scope: Scope,
     copy_only: bool,
+    tuning: ImagingTuning,
 }
 
 impl ImageJob {
@@ -196,6 +199,7 @@ pub fn create(
     source: String,
     request: &ImageRequest,
 ) -> Result<ImageJob, ErrorObject> {
+    check_tuning(&request.tuning, device.sector_size())?;
     let map_path = map_path(image_path);
     let exists = |path: &Path| fs::symlink_metadata(path).is_ok();
     if exists(image_path) || exists(&map_path) {
@@ -246,6 +250,7 @@ pub fn create(
             image_path: image_path.to_path_buf(),
             scope,
             copy_only: request.copy_only,
+            tuning: request.tuning.clone(),
         }),
         Err(message) => {
             // 文件是这一次刚建的，先关闭再删掉，不留下会挡住下次新建的空壳
@@ -271,6 +276,7 @@ pub fn resume(
     source: String,
     request: &ImageRequest,
 ) -> Result<ImageJob, ErrorObject> {
+    check_tuning(&request.tuning, device.sector_size())?;
     let map_path = map_path(image_path);
     let text = fs::read_to_string(&map_path)
         .map_err(|error| mismatch(format!("读不到坏区图 {}：{error}", map_path.display())))?;
@@ -316,7 +322,48 @@ pub fn resume(
         image_path: image_path.to_path_buf(),
         scope,
         copy_only: request.copy_only,
+        tuning: request.tuning.clone(),
     })
+}
+
+/// 读取参数要在规定的范围里，块与跳过量是扇区大小的整数倍。
+fn check_tuning(tuning: &ImagingTuning, sector_size: u32) -> Result<(), ErrorObject> {
+    let sector = u64::from(sector_size);
+    let block_ok = (MIN_IMAGING_BLOCK..=MAX_IMAGING_BLOCK).contains(&tuning.block_bytes)
+        && tuning.block_bytes.is_multiple_of(sector);
+    let skip_ok = (sector..=MAX_IMAGING_SKIP).contains(&tuning.skip_bytes)
+        && tuning.skip_bytes.is_multiple_of(sector);
+    if !block_ok {
+        return Err(invalid(format!(
+            "每次读取的大小 {} 不对",
+            tuning.block_bytes
+        )));
+    }
+    if !skip_ok {
+        return Err(invalid(format!(
+            "读错后跳过的大小 {} 不对",
+            tuning.skip_bytes
+        )));
+    }
+    if tuning.retries > MAX_IMAGING_RETRIES {
+        return Err(invalid(format!("重试遍数最多 {MAX_IMAGING_RETRIES}")));
+    }
+    Ok(())
+}
+
+/// 读取参数换成镜像核心的选项。毫秒数为 0 的两项表示不启用。
+fn imaging_options(tuning: &ImagingTuning, scope: &Scope, copy_only: bool) -> ImagingOptions {
+    let millis = |ms: u64| (ms > 0).then(|| Duration::from_millis(ms));
+    ImagingOptions {
+        block_size: tuning.block_bytes,
+        skip_min: tuning.skip_bytes,
+        scope: Some(scope.clone()),
+        copy_only,
+        retries: tuning.retries,
+        slow_read: millis(tuning.slow_read_ms),
+        stall_limit: millis(tuning.stall_limit_ms),
+        ..ImagingOptions::default()
+    }
 }
 
 /// 这一次的范围：不限范围时是整个源；只读一部分时加上分区表区域，而且镜像必须是稀疏文件——
@@ -434,24 +481,26 @@ pub fn run(job: ImageJob, context: &JobContext) -> Result<JobOutcome, String> {
         image_path,
         scope,
         copy_only,
+        tuning,
     } = job;
     let started = Instant::now();
     let reporter = Reporter::new(context, &scope, copy_only);
-    let options = ImagingOptions {
-        scope: Some(scope.clone()),
-        copy_only,
-        ..ImagingOptions::default()
-    };
+    let options = imaging_options(&tuning, &scope, copy_only);
     let outcome = run_imaging(device.as_ref(), &mut map, &mut store, &reporter, &options);
     // 终结通知之前把最后的进展发出去
     reporter.send(&map);
-    let elapsed = started.elapsed();
-    let source_lost_at = match outcome {
-        Ok(ImagingOutcome::Finished) => None,
+    // 暂停的时长不算
+    let elapsed = started.elapsed().saturating_sub(context.paused_total());
+    let stop = match outcome {
+        Ok(ImagingOutcome::Finished) => Stop::Finished,
         Ok(ImagingOutcome::Cancelled) => return Ok(JobOutcome::Cancelled),
         Ok(ImagingOutcome::SourceLost { offset, error }) => {
             tracing::warn!(offset, error = %error_chain(&error), "源设备读不到了，停下");
-            Some(offset)
+            Stop::SourceLost(offset)
+        }
+        Ok(ImagingOutcome::Stalled { offset }) => {
+            tracing::warn!(offset, "很久没有读成功，停下");
+            Stop::Stalled(offset)
         }
         Err(error) => return Err(format!("写镜像失败：{error}")),
     };
@@ -461,12 +510,22 @@ pub fn run(job: ImageJob, context: &JobContext) -> Result<JobOutcome, String> {
         copy_only,
         &image_path,
         &store.map_path,
-        source_lost_at,
+        stop,
         elapsed,
     );
     serde_json::to_value(summary)
         .map(JobOutcome::Completed)
         .map_err(|error| format!("无法编码镜像结果：{error}"))
+}
+
+/// 本次运行怎样结束（取消不出结果）。
+#[derive(Debug, Clone, Copy)]
+enum Stop {
+    Finished,
+    /// 设备多半断开了，在这个偏移处停下。
+    SourceLost(u64),
+    /// 很久没有读成功，在这个偏移处停下。
+    Stalled(u64),
 }
 
 fn summarize(
@@ -475,7 +534,7 @@ fn summarize(
     copy_only: bool,
     image_path: &Path,
     map_path: &Path,
-    source_lost_at: Option<u64>,
+    stop: Stop,
     elapsed: Duration,
 ) -> ImageSummary {
     let progress = scope_progress(map, scope);
@@ -510,7 +569,14 @@ fn summarize(
         device_size,
         device_read_bytes: device.read_bytes,
         device_unfinished_bytes: unfinished(&device),
-        source_lost_at,
+        source_lost_at: match stop {
+            Stop::SourceLost(offset) => Some(offset),
+            _ => None,
+        },
+        stalled_at: match stop {
+            Stop::Stalled(offset) => Some(offset),
+            _ => None,
+        },
         elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
     }
 }
@@ -520,6 +586,7 @@ fn round_name(round: Round) -> &'static str {
         Round::Copy => "copy",
         Round::Trim => "trim",
         Round::Scrape => "scrape",
+        Round::Retry => "retry",
     }
 }
 
@@ -664,8 +731,14 @@ fn read_rate(samples: &mut VecDeque<(Instant, u64)>, now: Instant) -> Option<u64
 }
 
 impl ImagingControl for Reporter<'_> {
+    /// 暂停时在这里等着，不读盘（镜像核心在这之前已经保存了坏区图）。
     fn is_cancelled(&self) -> bool {
+        self.context.wait_while_paused();
         self.context.is_cancelled()
+    }
+
+    fn pause_requested(&self) -> bool {
+        self.context.is_paused()
     }
 
     fn progress(&self, round: Round, map: &BadMap) {
@@ -815,11 +888,7 @@ mod tests {
 
     /// 在已准备好的任务上按它的范围跑到底（或到取消点），返回结束方式。
     fn run_to(job: &mut ImageJob, cancel_after: Option<usize>) -> ImagingOutcome {
-        let options = ImagingOptions {
-            scope: Some(job.scope.clone()),
-            copy_only: job.copy_only,
-            ..ImagingOptions::default()
-        };
+        let options = imaging_options(&job.tuning, &job.scope, job.copy_only);
         run_imaging(
             job.device.as_ref(),
             &mut job.map,
@@ -841,9 +910,43 @@ mod tests {
             job.copy_only,
             image_path,
             &job.store.map_path,
-            None,
+            Stop::Finished,
             Duration::ZERO,
         )
+    }
+
+    #[test]
+    fn out_of_range_tuning_is_refused_before_anything_is_created() {
+        let dir = test_dir("tuning");
+        let image_path = dir.join("disk.img");
+        for tuning in [
+            ImagingTuning {
+                block_bytes: 1000,
+                ..ImagingTuning::default()
+            },
+            ImagingTuning {
+                block_bytes: 16 << 20,
+                ..ImagingTuning::default()
+            },
+            ImagingTuning {
+                skip_bytes: 0,
+                ..ImagingTuning::default()
+            },
+            ImagingTuning {
+                retries: MAX_IMAGING_RETRIES + 1,
+                ..ImagingTuning::default()
+            },
+        ] {
+            let request = ImageRequest {
+                tuning,
+                ..ImageRequest::default()
+            };
+            let Err(error) = create(damaged(), &image_path, "fake".to_owned(), &request) else {
+                panic!("应当拒绝");
+            };
+            assert_eq!(error.code, rpc_error_code::INVALID_PARAMS);
+            assert!(!image_path.exists());
+        }
     }
 
     #[test]

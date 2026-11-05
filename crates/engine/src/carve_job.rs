@@ -1,10 +1,14 @@
-//! 深度恢复任务：把 `yisi-carve` 的进度、找到的文件转成任务通知，找到的文件分批发出。
+//! 深度恢复任务：把 `yisi-carve` 的进度、找到的文件转成任务通知，找到的文件分批发出；
+//! 检查点每秒最多发一次，发之前先把攒着的文件发完，宿主收到检查点时它之前的文件都已收到。
 
+use std::cell::Cell;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use yisi_carve::{CarveControl, CarveOptions, RecoveredFile, Sink, carve};
 use yisi_engine::protocol::{
-    CarveSummary, FOUND, FileType, FileTypeList, FoundFile, JobFound, TypeTotal,
+    CHECKPOINT, CarveSummary, FOUND, FileType, FileTypeList, FoundFile, JobCheckpoint, JobFound,
+    TypeTotal,
 };
 use yisi_formats::Registry;
 use yisi_io::BlockDevice;
@@ -20,6 +24,11 @@ pub fn file_types(registry: &Registry) -> FileTypeList {
             let info = format.info();
             FileType {
                 extension: info.extension.to_owned(),
+                variants: info
+                    .variants
+                    .iter()
+                    .map(|&variant| variant.to_owned())
+                    .collect(),
                 description: info.description.to_owned(),
                 max_size: info.max_size,
                 enabled_by_default: info.enabled_by_default,
@@ -53,10 +62,14 @@ pub fn enabled_formats(
     Ok(enabled)
 }
 
+/// 检查点最多这么久发一次。
+const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(1);
+
 pub fn run(
     device: &dyn BlockDevice,
     registry: &Registry,
     enabled: Vec<bool>,
+    start_at: u64,
     sink: &mut (dyn Sink + Send),
     output_dir: Option<&Path>,
     context: &JobContext,
@@ -64,14 +77,20 @@ pub fn run(
     let control = Reporter {
         context,
         batch: Batcher::new(),
+        checkpoint: Cell::new(None),
+        checkpoint_sent: Cell::new(None),
     };
     let options = CarveOptions {
         block_size: device.sector_size(),
         enabled,
+        start: start_at,
     };
     let outcome = carve(device, registry, &options, sink, &control);
-    // 终结通知之前把剩下的文件发完
+    // 终结通知之前把剩下的文件发完；被取消时再发最后的检查点
     control.flush();
+    if matches!(outcome, Ok(None)) {
+        control.send_checkpoint();
+    }
     match outcome {
         Ok(Some(report)) => {
             let summary = CarveSummary {
@@ -109,6 +128,9 @@ pub fn run(
 struct Reporter<'a> {
     context: &'a JobContext,
     batch: Batcher<FoundFile>,
+    /// 最近一个检查点，以及上次发出的时间。
+    checkpoint: Cell<Option<u64>>,
+    checkpoint_sent: Cell<Option<Instant>>,
 }
 
 impl Reporter<'_> {
@@ -124,6 +146,22 @@ impl Reporter<'_> {
 
     fn flush(&self) {
         self.batch.flush(|files| self.send(files));
+    }
+
+    /// 先把攒着的文件发完，再发检查点。
+    fn send_checkpoint(&self) {
+        let Some(resume_at) = self.checkpoint.get() else {
+            return;
+        };
+        self.flush();
+        self.context.notify(
+            CHECKPOINT,
+            JobCheckpoint {
+                job_id: self.context.id().to_owned(),
+                resume_at,
+            },
+        );
+        self.checkpoint_sent.set(Some(Instant::now()));
     }
 }
 
@@ -147,5 +185,16 @@ impl CarveControl for Reporter<'_> {
             length: file.length,
         };
         self.batch.push(found, |files| self.send(files));
+    }
+
+    fn checkpoint(&self, resume_at: u64) {
+        self.checkpoint.set(Some(resume_at));
+        let due = self
+            .checkpoint_sent
+            .get()
+            .is_none_or(|sent| sent.elapsed() >= CHECKPOINT_INTERVAL);
+        if due {
+            self.send_checkpoint();
+        }
     }
 }

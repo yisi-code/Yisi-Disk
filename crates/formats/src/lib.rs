@@ -2,14 +2,24 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
+mod bmp;
+mod gif;
 mod jpg;
+mod mkv;
+mod mp3;
 mod mp4;
+mod ole;
 mod pdf;
 mod plugin;
 mod png;
+mod rar;
 mod registry;
+mod riff;
 #[cfg(any(test, feature = "test-samples"))]
 pub mod samples;
+mod sevenzip;
+mod sqlite;
+mod tiff;
 mod walker;
 mod zip;
 
@@ -52,6 +62,37 @@ mod robustness {
             samples::mp4(200, true),
             samples::mp4_fragmented(&[120, 60], Some(0), 16, true),
             samples::mp4_fragmented(&[80, 90, 40], Some(1), 0, false),
+            samples::iso_media(b"heic", &[(b"meta", 80), (b"mdat", 200)]),
+            samples::gif(3, true),
+            samples::bmp(9, 4, 8),
+            samples::tiff(&samples::TiffLayout {
+                make: Some(b"NIKON CORPORATION"),
+                preview: true,
+                sub_ifd: true,
+                ..samples::TiffLayout::default()
+            }),
+            samples::tiff(&samples::TiffLayout {
+                big: true,
+                ifd_last: true,
+                ..samples::TiffLayout::default()
+            }),
+            samples::riff(b"AVI ", &[(b"LIST", 90), (b"idx1", 16)]),
+            samples::riff(b"WAVE", &[(b"fmt ", 16), (b"data", 101)]),
+            samples::mkv("webm", 300, false),
+            samples::mp3(3, 1, 8, true, 0),
+            samples::ole(3, 20, "Workbook", false),
+            samples::sevenzip(200, 30),
+            samples::rar5(&[100, 30]),
+            samples::rar4(&[60, 10], false),
+            samples::sqlite(1024, 2),
+            samples::zip_with(
+                &[(
+                    "mimetype",
+                    b"application/vnd.oasis.opendocument.text".to_vec(),
+                    false,
+                )],
+                b"",
+            ),
         ];
         for round in 0..3000 {
             let seed = &seeds[round % seeds.len()];

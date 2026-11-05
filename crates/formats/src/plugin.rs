@@ -5,11 +5,18 @@
 pub struct FormatInfo {
     /// 扩展名，同时作为格式的标识，不带点。
     pub extension: &'static str,
+    /// 按内容可能改用的扩展名（[`Recovering::extension`]），例如 ZIP 里装的是 Word 文档时存成 docx。
+    /// 注册表按它们也能找回这个格式（另存时按扫描时的扩展名重新识别）。
+    pub variants: &'static [&'static str],
     /// 英文简述；界面按扩展名取本地化文案，取不到时显示它。
     pub description: &'static str,
     /// 超过这个大小仍未结束的候选文件视为误识别。
     pub max_size: u64,
     pub enabled_by_default: bool,
+    /// 里面可能装着别的格式的完整文件、而且可能正好落在块边界上（压缩包、复合文档里的图片、TIFF 与 RAW 的 JPEG 预览、
+    /// 数据库里存的图片）。为 `false` 的格式（音视频、单张图片）在按文件头声明的长度取数据时，
+    /// 中途某个块开头认出了别的文件头，说明这个文件后面已经被别的文件覆盖：放弃它，从那个块重新找。
+    pub nests_files: bool,
 }
 
 /// 文件头签名：文件开头第 `offset` 字节起是 `bytes`。
@@ -56,6 +63,12 @@ pub trait Recovering: Send {
     /// 正在等待的数据位置（相对文件开头）。调用方据此尽早排除长度离谱的误识别：
     /// 位置已超出设备末尾或格式的最大尺寸时，不必再读下去。
     fn waiting_at(&self) -> Option<u64> {
+        None
+    }
+
+    /// 按内容定的扩展名，是格式的 [`FormatInfo::variants`] 之一；没有更具体的说法时为 `None`，
+    /// 用格式本身的扩展名。文件完整（[`DataCheck::Complete`] 或 [`finish`](Self::finish) 给出长度）之后调用。
+    fn extension(&self) -> Option<&'static str> {
         None
     }
 }

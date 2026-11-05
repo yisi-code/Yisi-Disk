@@ -7,7 +7,7 @@ defineProps<{ types: FileType[]; disabled: boolean }>()
 const selectedExtensions = defineModel<string[]>({ required: true })
 
 const { t } = useI18n()
-const { fileTypeName } = useFileTypeName()
+const { formatName } = useFileTypeName()
 </script>
 
 <template>
@@ -23,9 +23,11 @@ const { fileTypeName } = useFileTypeName()
             :value="type.extension"
           />
           <span class="file-type-picker__name">
-            {{ fileTypeName(type.extension, type.description) }}
+            {{ formatName(type) }}
           </span>
-          <span class="file-type-picker__extension">.{{ type.extension }}</span>
+          <span class="file-type-picker__extension">{{
+            [type.extension, ...type.variants].map((extension) => `.${extension}`).join(' ')
+          }}</span>
         </label>
       </li>
     </ul>

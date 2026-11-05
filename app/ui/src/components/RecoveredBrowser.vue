@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, useId, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useFileTypeName } from '../composables/useFileTypeName'
+import { formatIndex, useFileTypeName } from '../composables/useFileTypeName'
 import { useTreeNavigation } from '../composables/useTreeNavigation'
 import type { FileType, FoundFile } from '../services/host'
 import { formatBytes } from '../utils/format'
@@ -63,7 +63,7 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
-const { fileTypeName } = useFileTypeName()
+const { foundTypeName } = useFileTypeName()
 const domPrefix = useId()
 
 const groupMode = ref<GroupMode>('type')
@@ -275,17 +275,15 @@ function groupByType(): FileGroup[] {
       bucket.push(file)
     }
   }
-  // 按格式列表的顺序排列；格式列表里没有的扩展名排在最后
-  const order = props.fileTypes.map((type) => type.extension)
+  // 按格式列表的顺序排列（按内容改用的扩展名跟着它的格式）；格式列表里没有的扩展名排在最后
   const extensions = [...byExtension.keys()].sort(
-    (a, b) => rank(order, a) - rank(order, b) || a.localeCompare(b),
+    (a, b) => rank(a) - rank(b) || a.localeCompare(b),
   )
   return extensions.map((extension) => {
     const files = byExtension.get(extension) ?? []
-    const description = props.fileTypes.find((type) => type.extension === extension)?.description
     return {
       key: `type:${extension}`,
-      label: fileTypeName(extension, description),
+      label: foundTypeName(props.fileTypes, extension),
       files,
       bytes: sumBytes(files),
     }
@@ -331,9 +329,9 @@ function positionSpan(): number {
   return span
 }
 
-function rank(order: string[], extension: string): number {
-  const index = order.indexOf(extension)
-  return index < 0 ? order.length : index
+function rank(extension: string): number {
+  const index = formatIndex(props.fileTypes, extension)
+  return index < 0 ? props.fileTypes.length : index
 }
 
 function sumBytes(files: FoundFile[]): number {
@@ -344,8 +342,7 @@ function fileDetail(file: FoundFile): string {
   if (groupMode.value === 'type') {
     return t('carve.browser.at', { position: formatBytes(file.offset) })
   }
-  const description = props.fileTypes.find((type) => type.extension === file.extension)?.description
-  return fileTypeName(file.extension, description)
+  return foundTypeName(props.fileTypes, file.extension)
 }
 </script>
 

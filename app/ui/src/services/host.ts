@@ -98,6 +98,8 @@ export function sameTarget(a: JobTarget | null, b: JobTarget | null): boolean {
 /** 深度恢复支持的一种格式；扩展名同时是格式的标识 */
 export interface FileType {
   extension: string
+  /** 按内容可能改用的扩展名（ZIP 里是 Word 文档时存成 docx）；找到的文件的扩展名可能是其中之一 */
+  variants: string[]
   /** 英文简述：界面按扩展名取本地化文案，取不到时显示它 */
   description: string
   maxSize: number
@@ -468,6 +470,8 @@ export interface ImageSummary {
   deviceUnfinishedBytes: number
   /** 源设备读不到了（多半是断开），在这个偏移处停下；检查连接后可以续做 */
   sourceLostAt: number | null
+  /** 很久没有读成功，在这个偏移处停下；可以续做 */
+  stalledAt: number | null
   elapsedMs: number
 }
 
@@ -574,13 +578,60 @@ export function startReadScan(jobId: string, target: JobTarget): Promise<void> {
  * 之后用 previewCarveRange 预览、startExtract 保存选中的文件。物理磁盘与读取扫描一样可能先等提权；
  * 输出目录在被扫描的盘上（或无法确认不在）时宿主返回 outputOnSource
  */
+/** 开始一次深度恢复，记进扫描记录（记录 ID 就是任务 ID）；sourceLabel 是来源描述，源没接上时也认得出 */
 export function startCarve(
   jobId: string,
   target: JobTarget,
   outputDir: string | null,
   extensions: string[],
+  sourceLabel: string,
 ): Promise<void> {
-  return invoke<void>('job_start_carve', { jobId, target, outputDir, extensions })
+  return invoke<void>('job_start_carve', { jobId, target, outputDir, extensions, sourceLabel })
+}
+
+/** 扫描记录的状态：正在扫、停下了（可以接着扫）、扫完了、出错停下（可以接着扫） */
+export type CarveStatus = 'running' | 'stopped' | 'completed' | 'failed'
+
+/** 一次深度恢复扫描（含之后的续扫）的记录，程序关掉以后还在 */
+export interface CarveRecord {
+  id: string
+  target: JobTarget
+  sourceLabel: string
+  extensions: string[]
+  /** 边扫边保存时实际的目录（recovered-…）；只扫描时为 null */
+  outputDir: string | null
+  status: CarveStatus
+  /** 接着扫的位置（字节） */
+  resumeAt: number
+  size: number
+  files: number
+  startedAtMs: number
+  updatedAtMs: number
+}
+
+export interface CarveRecordOpened {
+  record: CarveRecord
+  files: FoundFile[]
+}
+
+/** 扫描记录，最近开始的在前 */
+export function listCarveHistory(): Promise<CarveRecord[]> {
+  return invoke<CarveRecord[]>('carve_history_list')
+}
+
+/** 打开一条扫描记录：之后按记录 ID 预览、另存、打开恢复出的文件 */
+export function openCarveRecord(recordId: string): Promise<CarveRecordOpened> {
+  return invoke<CarveRecordOpened>('carve_history_open', { recordId })
+}
+
+/** 删掉一条扫描记录（只删记录与找到的文件清单，不碰恢复出的文件）；正在扫的不能删（carveRecordRunning） */
+export function removeCarveRecord(recordId: string): Promise<void> {
+  return invoke<void>('carve_history_remove', { recordId })
+}
+
+/** 接着扫一次停下的扫描：同样的源与格式，从最后一个检查点接着扫，找到的文件记进同一条记录 */
+export function resumeCarve(jobId: string, recordId: string): Promise<void> {
+  return invoke<void>('job_resume_carve', { jobId, recordId })
 }
 
 /** 只扫描时找到的一个文件的位置、长度与格式；name 是另存为时起的文件名，不给时用恢复时起的 */
@@ -1032,6 +1083,22 @@ export interface ImagePlan {
   ranges?: ByteRange[]
   reset?: ByteRange[]
   copyOnly?: boolean
+  /** 读取参数；不给的项用引擎的默认值 */
+  tuning?: Partial<ImagingTuning>
+}
+
+/** 制作镜像的读取参数（「高级选项」），引擎核对范围（不对时 invalidParams） */
+export interface ImagingTuning {
+  /** 第 1 轮每次读多少字节：64 KiB 到 8 MiB */
+  blockBytes: number
+  /** 第 1 轮读错后起步跳过多少字节（连续出错时加倍） */
+  skipBytes: number
+  /** 第 4 轮把坏扇区再读几遍，0 不做（最多 10） */
+  retries: number
+  /** 一次读超过这么多毫秒，当作走到了坏区边上：数据照收，跳过一段先读别处；0 不看 */
+  slowReadMs: number
+  /** 连续这么多毫秒没有一次读成功就停下（可以续做）；0 不停 */
+  stallLimitMs: number
 }
 
 /**

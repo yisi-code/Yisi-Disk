@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use yisi_fs::{Entry, FileRef, FsKind, State, Unsupported, Volume};
+use yisi_fs::{Entry, FileRef, FsKind, State, Volume};
 use yisi_io::{BlockDevice, RawImage};
 
 struct Expected {
@@ -128,12 +128,12 @@ fn check_file(volume: &Volume, expected: &Expected, failures: &mut Vec<String>) 
     }
     let must_match = match expected.kind.as_str() {
         "live" | "live-fragmented" => true,
-        // NTFS 压缩暂不支持读出，要明确标出来
-        "live-compressed" => {
-            if entry.unsupported != Some(Unsupported::Compressed) {
-                failures.push(format!("{shown}：没有标为 NTFS 压缩"));
+        // NTFS 压缩（LZNT1）与系统压缩（WOF）都能读出，不该标为不支持
+        "live-compressed" | "live-wof" => {
+            if let Some(reason) = entry.unsupported {
+                failures.push(format!("{shown}：标成了不支持（{reason}）"));
             }
-            false
+            true
         }
         // 已删除且判为「可能完整」的连续文件，内容应当对得上
         "deleted" | "deleted-shortname" => entry.state == State::Intact,

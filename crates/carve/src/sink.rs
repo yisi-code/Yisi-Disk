@@ -22,8 +22,9 @@ pub trait Sink {
 pub trait SinkFile {
     fn write(&mut self, data: &[u8]) -> io::Result<()>;
 
-    /// 确认是完整文件，截到 `length` 字节保存。
-    fn commit(self: Box<Self>, length: u64) -> io::Result<RecoveredFile>;
+    /// 确认是完整文件，截到 `length` 字节保存。`extension` 是格式插件按内容定的扩展名
+    /// （例如 ZIP 里装的是 Word 文档时是 docx），给出时文件名用它，否则用 [`Sink::create`] 时的扩展名。
+    fn commit(self: Box<Self>, length: u64, extension: Option<&str>) -> io::Result<RecoveredFile>;
 
     /// 不是完整文件，丢弃已写的内容。
     fn discard(self: Box<Self>) -> io::Result<()>;
@@ -82,7 +83,14 @@ impl Sink for DirectorySink {
         let name = recovered_name(offset, extension);
         let final_path = self.directory.join(&name);
         let partial_path = partial_path(&final_path);
-        let file = File::create_new(&partial_path)?;
+        let file = match File::create_new(&partial_path) {
+            // 上次中途退出留下的半份（续扫时会碰到）：换掉
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                fs::remove_file(&partial_path)?;
+                File::create_new(&partial_path)?
+            }
+            result => result?,
+        };
         Ok(Box::new(DirectoryFile {
             writer: BufWriter::new(file),
             partial_path,
@@ -108,7 +116,7 @@ impl SinkFile for DirectoryFile {
         self.writer.write_all(data)
     }
 
-    fn commit(self: Box<Self>, length: u64) -> io::Result<RecoveredFile> {
+    fn commit(self: Box<Self>, length: u64, extension: Option<&str>) -> io::Result<RecoveredFile> {
         let file = self
             .writer
             .into_inner()
@@ -118,10 +126,25 @@ impl SinkFile for DirectoryFile {
         // 最近改名的文件可能内容不全，源盘只读，重扫即可。
         file.set_len(length)?;
         drop(file);
-        rename_new(&self.partial_path, &self.final_path)?;
+        let (name, extension, final_path) = match extension {
+            Some(extension) => {
+                let name = recovered_name(self.offset, extension);
+                let final_path = self.final_path.with_file_name(&name);
+                (name, extension.to_owned(), final_path)
+            }
+            None => (self.name, self.extension, self.final_path),
+        };
+        match rename_new(&self.partial_path, &final_path) {
+            Ok(()) => {}
+            // 续扫（从检查点接着扫）又找到了上次已经存好的文件：名字由起点定，同一个起点就是同一个文件，留着原来那份
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                fs::remove_file(&self.partial_path)?;
+            }
+            Err(error) => return Err(error),
+        }
         Ok(RecoveredFile {
-            name: self.name,
-            extension: self.extension,
+            name,
+            extension,
             offset: self.offset,
             length,
         })
@@ -159,10 +182,14 @@ impl SinkFile for ScanOnlyFile {
         Ok(())
     }
 
-    fn commit(self: Box<Self>, length: u64) -> io::Result<RecoveredFile> {
+    fn commit(self: Box<Self>, length: u64, extension: Option<&str>) -> io::Result<RecoveredFile> {
+        let (name, extension) = match extension {
+            Some(extension) => (recovered_name(self.offset, extension), extension.to_owned()),
+            None => (self.name, self.extension),
+        };
         Ok(RecoveredFile {
-            name: self.name,
-            extension: self.extension,
+            name,
+            extension,
             offset: self.offset,
             length,
         })

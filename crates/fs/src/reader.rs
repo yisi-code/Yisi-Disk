@@ -1,12 +1,84 @@
 //! 读出一个文件：按簇（FAT、exFAT）或按 NTFS 的运行表，也可以是存放在 MFT 记录里的小文件；
-//! NTFS 压缩的部分读到时按压缩单元解开。
+//! NTFS 压缩的部分读到时按压缩单元解开；NTFS 系统压缩（WOF）的文件从压缩流里按块解开（[`crate::ntfs::wof`]）。
 
 use std::io::{self, Read};
 
 use crate::FsError;
 use crate::clusters::{Clusters, Run};
 use crate::ntfs::lznt1;
+use crate::ntfs::wof::WofReader;
 use crate::region::Region;
+
+/// 一个文件的内容：按段读，或从 WOF 压缩流里按块解开。
+pub struct FileReader(Kind);
+
+enum Kind {
+    Pieces(Pieces),
+    Wof(Box<WofReader>),
+}
+
+impl FileReader {
+    pub(crate) fn new(clusters: &Clusters, runs: &[Run], size: u64, valid_size: u64) -> Self {
+        Self(Kind::Pieces(Pieces::new(clusters, runs, size, valid_size)))
+    }
+
+    /// 各段超出 `size` 的部分不会被读到。
+    pub(crate) fn from_pieces(
+        region: Region,
+        pieces: Vec<Piece>,
+        size: u64,
+        valid_size: u64,
+    ) -> Self {
+        Self(Kind::Pieces(Pieces::from_pieces(
+            region, pieces, size, valid_size,
+        )))
+    }
+
+    pub(crate) fn wof(reader: WofReader) -> Self {
+        Self(Kind::Wof(Box::new(reader)))
+    }
+
+    pub fn size(&self) -> u64 {
+        match &self.0 {
+            Kind::Pieces(pieces) => pieces.size(),
+            Kind::Wof(wof) => wof.size(),
+        }
+    }
+
+    /// 文件第一个字节（系统压缩的文件是压缩流的第一个字节）在分区里的偏移；没有数据，或内容不在簇里时为 `None`。
+    pub fn first_offset(&self) -> Option<u64> {
+        match &self.0 {
+            Kind::Pieces(pieces) => pieces.first_offset(),
+            Kind::Wof(wof) => wof.first_offset(),
+        }
+    }
+
+    /// 读得出的长度（不超过 [`size`](Self::size)）；小于它说明链断了，之后的部分读不出来。
+    pub fn readable_size(&self) -> u64 {
+        match &self.0 {
+            Kind::Pieces(pieces) => pieces.readable_size(),
+            Kind::Wof(wof) => wof.readable_size(),
+        }
+    }
+
+    /// 按段读的那一种（WOF 读取器要拿它读压缩流）。
+    pub(crate) fn into_pieces(self) -> Option<Pieces> {
+        match self.0 {
+            Kind::Pieces(pieces) => Some(pieces),
+            Kind::Wof(_) => None,
+        }
+    }
+}
+
+impl Read for FileReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match &mut self.0 {
+            Kind::Pieces(pieces) => pieces.read_some(buf),
+            Kind::Wof(wof) => wof.read(buf),
+        }
+        .map_err(io::Error::other)
+    }
+}
 
 /// 文件内容的一段。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,9 +105,9 @@ impl Piece {
     }
 }
 
-/// 一个文件的内容。长度之内、有效数据长度之后的部分读作 0（exFAT、NTFS 的规则）；
+/// 按段读的内容。长度之内、有效数据长度之后的部分读作 0（exFAT、NTFS 的规则）；
 /// 各段拼起来不够长度（簇链断了）时，读到断点处返回错误。
-pub struct FileReader {
+pub(crate) struct Pieces {
     region: Region,
     /// 依次拼起来就是文件内容（至多到 `size`）。
     pieces: Vec<Piece>,
@@ -49,8 +121,8 @@ pub struct FileReader {
     unpacked: Option<(usize, Vec<u8>)>,
 }
 
-impl FileReader {
-    pub(crate) fn new(clusters: &Clusters, runs: &[Run], size: u64, valid_size: u64) -> Self {
+impl Pieces {
+    fn new(clusters: &Clusters, runs: &[Run], size: u64, valid_size: u64) -> Self {
         let mut pieces = Vec::with_capacity(runs.len());
         let mut covered = 0u64;
         for run in runs {
@@ -67,13 +139,7 @@ impl FileReader {
         Self::from_pieces(clusters.region.clone(), pieces, size, valid_size)
     }
 
-    /// 各段超出 `size` 的部分不会被读到。
-    pub(crate) fn from_pieces(
-        region: Region,
-        pieces: Vec<Piece>,
-        size: u64,
-        valid_size: u64,
-    ) -> Self {
+    fn from_pieces(region: Region, pieces: Vec<Piece>, size: u64, valid_size: u64) -> Self {
         Self {
             region,
             pieces,
@@ -86,12 +152,11 @@ impl FileReader {
         }
     }
 
-    pub fn size(&self) -> u64 {
+    pub(crate) fn size(&self) -> u64 {
         self.size
     }
 
-    /// 文件第一个字节在分区里的偏移；没有数据，或内容不在簇里时为 `None`。
-    pub fn first_offset(&self) -> Option<u64> {
+    pub(crate) fn first_offset(&self) -> Option<u64> {
         match self.pieces.first() {
             Some(Piece::Disk { offset, .. }) => Some(*offset),
             Some(Piece::Lznt1 { sources, .. }) => sources.first().map(|&(offset, _)| offset),
@@ -99,13 +164,35 @@ impl FileReader {
         }
     }
 
-    /// 各段能覆盖的长度（不超过 [`size`](Self::size)）；小于它说明链断了，之后的部分读不出来。
-    pub fn readable_size(&self) -> u64 {
+    /// 各段能覆盖的长度（不超过 `size`）。
+    pub(crate) fn readable_size(&self) -> u64 {
         self.pieces
             .iter()
             .map(Piece::len)
             .fold(0u64, u64::saturating_add)
             .min(self.size)
+    }
+
+    /// 从 `offset` 起读满 `buf`（WOF 读取器按块的位置读压缩流）。
+    pub(crate) fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), FsError> {
+        self.position = offset;
+        self.cursor = 0;
+        self.cursor_start = 0;
+        let mut filled = 0;
+        while filled < buf.len() {
+            let Some(rest) = buf.get_mut(filled..) else {
+                break;
+            };
+            match self.read_some(rest)? {
+                0 => {
+                    return Err(FsError::ChainBroken {
+                        offset: self.position,
+                    });
+                }
+                read => filled += read,
+            }
+        }
+        Ok(())
     }
 
     fn read_some(&mut self, buf: &mut [u8]) -> Result<usize, FsError> {
@@ -171,7 +258,7 @@ impl FileReader {
     }
 }
 
-impl FileReader {
+impl Pieces {
     /// 当前这一段（压缩单元）解开后的内容；连着读同一个单元时只解一次。
     fn unpack(&mut self, sources: Vec<(u64, u64)>, length: u64) -> Result<&[u8], FsError> {
         if self.unpacked.as_ref().map(|(index, _)| *index) != Some(self.cursor) {
@@ -197,11 +284,5 @@ impl FileReader {
             .as_ref()
             .map(|(_, unit)| unit.as_slice())
             .unwrap_or_default())
-    }
-}
-
-impl Read for FileReader {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.read_some(buf).map_err(io::Error::other)
     }
 }

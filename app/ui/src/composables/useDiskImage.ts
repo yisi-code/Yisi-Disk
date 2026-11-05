@@ -61,8 +61,12 @@ export function useDiskImage() {
     failure: job.failure,
     isUnresponsive: job.isUnresponsive,
     isBusy: job.isBusy,
+    isPaused: job.isPaused,
+    isTogglingPause: job.isTogglingPause,
     start,
     continueLast,
     cancel: job.cancel,
+    pause: job.pause,
+    resume: job.resume,
   }
 }

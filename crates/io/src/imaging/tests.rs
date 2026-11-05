@@ -15,6 +15,11 @@ struct FakeDevice {
     reads: AtomicUsize,
     /// 每次读取的（起点，长度，是否成功）。
     log: Mutex<Vec<(u64, u64, bool)>>,
+    /// 时好时坏的区段：碰到它的读取前几次报错（还剩几次），之后读得出。
+    flaky: Mutex<Vec<(u64, u64, usize)>>,
+    /// 读得慢的区段：碰到它的读取先等 `slow_delay`。
+    slow: Vec<(u64, u64)>,
+    slow_delay: Duration,
 }
 
 impl FakeDevice {
@@ -28,6 +33,9 @@ impl FakeDevice {
             lost_after: None,
             reads: AtomicUsize::new(0),
             log: Mutex::new(Vec::new()),
+            flaky: Mutex::new(Vec::new()),
+            slow: Vec::new(),
+            slow_delay: Duration::ZERO,
         }
     }
 
@@ -72,7 +80,23 @@ impl BlockDevice for FakeDevice {
             return Ok(0);
         }
         let lost = self.lost_after.is_some_and(|limit| count >= limit);
-        let ok = !lost && !self.is_bad(offset, end);
+        let flaky = self
+            .flaky
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .filter(|(start, flaky_end, left)| offset < *flaky_end && *start < end && *left > 0)
+            .map(|(_, _, left)| *left -= 1)
+            .count()
+            > 0;
+        if self
+            .slow
+            .iter()
+            .any(|&(start, slow_end)| offset < slow_end && start < end)
+        {
+            std::thread::sleep(self.slow_delay);
+        }
+        let ok = !lost && !flaky && !self.is_bad(offset, end);
         self.log.lock().unwrap().push((offset, end - offset, ok));
         if !ok {
             return Err(IoError::Read {
@@ -658,4 +682,159 @@ fn scope_outside_the_device_is_rejected() {
     )
     .unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn retry_round_rereads_bad_sectors_until_they_read_or_the_passes_run_out() {
+    // 两个时好时坏的扇区：复制与修边各读错一次之后，一个再错 0 次就读得出，一个再错 3 次
+    let size = 4 * MIB;
+    let easy = (MIB + 3 * SECTOR, MIB + 4 * SECTOR);
+    let hard = (3 * MIB, 3 * MIB + SECTOR);
+    let run = |retries: u32| {
+        let device = FakeDevice::new(size, vec![]);
+        *device.flaky.lock().unwrap() = vec![(easy.0, easy.1, 2), (hard.0, hard.1, 5)];
+        let mut map = new_map(&device);
+        let mut store = MemoryStore::new(size);
+        let recorder = Recorder::default();
+        let options = ImagingOptions {
+            retries,
+            ..ImagingOptions::default()
+        };
+        let outcome = run_imaging(&device, &mut map, &mut store, &recorder, &options).unwrap();
+        assert!(matches!(outcome, ImagingOutcome::Finished), "{outcome:?}");
+        let rounds = recorder.rounds.borrow().clone();
+        (bad_ranges(&map), store.image == device.data, rounds)
+    };
+    let (bad, _, rounds) = run(0);
+    assert_eq!(bad, [easy, hard]);
+    assert!(!rounds.contains(&Round::Retry));
+    let (bad, _, rounds) = run(2);
+    assert_eq!(bad, [hard], "第 1 遍读出了 easy");
+    assert_eq!(rounds.last(), Some(&Round::Retry));
+    let (bad, complete, _) = run(5);
+    assert!(
+        bad.is_empty() && complete,
+        "重读够了遍数，两个都读出、镜像完整"
+    );
+}
+
+#[test]
+fn slow_reads_are_kept_but_skipped_past_in_the_copy_round() {
+    let size = 8 * MIB;
+    let mut device = FakeDevice::new(size, vec![]);
+    device.slow = vec![(2 * MIB, 3 * MIB)];
+    device.slow_delay = Duration::from_millis(30);
+    let mut map = new_map(&device);
+    let mut store = MemoryStore::new(size);
+    let options = ImagingOptions {
+        slow_read: Some(Duration::from_millis(10)),
+        ..ImagingOptions::default()
+    };
+    let outcome = run_imaging(
+        &device,
+        &mut map,
+        &mut store,
+        &Recorder::default(),
+        &options,
+    )
+    .unwrap();
+    assert!(matches!(outcome, ImagingOutcome::Finished), "{outcome:?}");
+    assert!(store.image == device.data, "读得慢的数据照样收下");
+    let log = device.log.lock().unwrap().clone();
+    let slow = log
+        .iter()
+        .position(|&(start, _, _)| start == 2 * MIB)
+        .unwrap();
+    // 慢的那一块之后跳过一段（起步 64 KiB），被跳过的部分后面再读
+    assert_eq!(log[slow + 1].0, 3 * MIB + (64 << 10));
+    assert!(
+        log[slow + 2..]
+            .iter()
+            .any(|&(start, _, _)| start == 3 * MIB)
+    );
+}
+
+#[test]
+fn a_long_stretch_without_successful_reads_stops_and_can_be_resumed() {
+    let device = damaged_device();
+    let (expected_map, expected_image) = image_in_one_go(&damaged_device());
+    let mut map = new_map(&device);
+    let mut store = MemoryStore::new(device.size());
+    let stalling = ImagingOptions {
+        stall_limit: Some(Duration::ZERO),
+        ..ImagingOptions::default()
+    };
+    let outcome = run_imaging(
+        &device,
+        &mut map,
+        &mut store,
+        &Recorder::default(),
+        &stalling,
+    )
+    .unwrap();
+    // 第一块（含开头的坏扇区）就读错：一次都还没读成功，立即停下
+    assert!(
+        matches!(outcome, ImagingOutcome::Stalled { offset: 0 }),
+        "{outcome:?}"
+    );
+    assert_eq!(store.commits.last(), Some(&map), "停下前保存了坏区图");
+    let outcome = run_imaging(
+        &device,
+        &mut map,
+        &mut store,
+        &Recorder::default(),
+        &ImagingOptions::default(),
+    )
+    .unwrap();
+    assert!(matches!(outcome, ImagingOutcome::Finished), "{outcome:?}");
+    assert_eq!(map, expected_map);
+    assert!(store.image == expected_image);
+}
+
+/// 第 `pause_at` 次查询时要求暂停一次。
+struct PauseOnce {
+    pause_at: usize,
+    checks: Cell<usize>,
+}
+
+impl ImagingControl for PauseOnce {
+    fn is_cancelled(&self) -> bool {
+        self.checks.set(self.checks.get() + 1);
+        false
+    }
+
+    fn pause_requested(&self) -> bool {
+        self.checks.get() + 1 == self.pause_at
+    }
+
+    fn progress(&self, _round: Round, _map: &BadMap) {}
+}
+
+#[test]
+fn the_map_is_saved_before_pausing() {
+    let options = ImagingOptions {
+        commit_interval: Duration::from_secs(3600),
+        ..ImagingOptions::default()
+    };
+    let commits = |pause_at: usize| {
+        let device = FakeDevice::new(6 * MIB, vec![]);
+        let mut map = new_map(&device);
+        let mut store = MemoryStore::new(device.size());
+        let control = PauseOnce {
+            pause_at,
+            checks: Cell::new(0),
+        };
+        run_imaging(&device, &mut map, &mut store, &control, &options).unwrap();
+        store.commits
+    };
+    let without = commits(usize::MAX);
+    let with = commits(4);
+    assert_eq!(with.len(), without.len() + 1);
+    // 暂停时保存的那一份：前 3 块已经读完
+    assert_eq!(
+        with[1]
+            .next_in(SegmentState::Untried, 0)
+            .map(|(start, _)| start),
+        Some(3 * MIB)
+    );
 }

@@ -732,6 +732,66 @@ fn ntfs_compressed_files_are_decompressed() {
 }
 
 #[test]
+fn ntfs_system_compressed_files_are_decompressed() {
+    use crate::samples::{LZNT1_PLAIN, WOF_PACKED, WOF_PLAIN_LEN};
+    let expected = &LZNT1_PLAIN[..WOF_PLAIN_LEN];
+    let mut sample = NtfsImage::new();
+    for (algorithm, packed) in WOF_PACKED {
+        sample.add_wof(
+            NTFS_ROOT,
+            &format!("wof{algorithm}.bin"),
+            WOF_PLAIN_LEN,
+            algorithm,
+            packed,
+        );
+    }
+    let gone = sample.add_wof(NTFS_ROOT, "wof gone.bin", WOF_PLAIN_LEN, 1, WOF_PACKED[1].1);
+    sample.delete(gone);
+    // 重分析点认不出算法（这里只剩标记；WIMBoot 等内容不在本文件里的也一样）：读不出
+    let wim = sample.add_wof(NTFS_ROOT, "wimboot.bin", WOF_PLAIN_LEN, 0, WOF_PACKED[0].1);
+    sample.mark_reparse(wim, TAG_WOF);
+    let volume = open(sample.finish());
+
+    let entries = volume.list(&volume.root()).unwrap().entries;
+    for (algorithm, _) in WOF_PACKED {
+        let entry = find(&entries, &format!("wof{algorithm}.bin"));
+        assert_eq!(
+            (entry.unsupported, entry.size),
+            (None, WOF_PLAIN_LEN as u64)
+        );
+        assert!(read_all(&volume, &entry.file) == expected, "{algorithm}");
+        // 每次读 7777 字节，跨过块的边界
+        let mut reader = volume.open_file(&entry.file).unwrap();
+        let mut pieces = Vec::new();
+        let mut buffer = vec![0u8; 7777];
+        loop {
+            let read = reader.read(&mut buffer).unwrap();
+            if read == 0 {
+                break;
+            }
+            pieces.extend_from_slice(&buffer[..read]);
+        }
+        assert!(pieces == expected, "{algorithm}");
+    }
+    assert!(matches!(
+        volume.open_file(&find(&entries, "wimboot.bin").file),
+        Err(FsError::Unreadable(Unsupported::SystemCompressed))
+    ));
+
+    // 扫描之后：标记以记录为准，已删除的也能找回
+    volume.scan(&mut |_, _| true).unwrap();
+    let entries = volume.list(&volume.root()).unwrap().entries;
+    assert_eq!(find(&entries, "wof1.bin").unsupported, None);
+    assert_eq!(
+        find(&entries, "wimboot.bin").unsupported,
+        Some(Unsupported::SystemCompressed)
+    );
+    let deleted = find(&entries, "wof gone.bin");
+    assert_eq!((deleted.unsupported, deleted.state), (None, State::Intact));
+    assert!(read_all(&volume, &deleted.file) == expected);
+}
+
+#[test]
 fn ntfs_alternate_data_streams_are_listed_and_read() {
     let mut sample = NtfsImage::new();
     let zone = b"[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=https://example.com/a.zip\r\n".to_vec();

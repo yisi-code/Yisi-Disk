@@ -158,6 +158,7 @@ fn extract_one(
     let options = CarveOptions {
         block_size: device.sector_size(),
         enabled,
+        start: 0,
     };
     let window = Window::new(device, item.offset, item.length);
     let mut sink = DirectorySink::with_origin(output_dir, item.offset)

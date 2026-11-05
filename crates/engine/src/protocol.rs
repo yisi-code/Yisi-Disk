@@ -129,6 +129,8 @@ pub const HEARTBEAT: &str = "engine.heartbeat";
 pub const PROGRESS: &str = "job.progress";
 /// 参数 [`JobFound`]：一批新找到的文件，攒满 100 个或距上一批 250 毫秒时发出。
 pub const FOUND: &str = "job.found";
+/// 参数 [`JobCheckpoint`]：深度恢复每秒最多一次；被取消时在最后一批 [`FOUND`] 之后再发一次。宿主据此续扫。
+pub const CHECKPOINT: &str = "job.checkpoint";
 /// 参数 [`JobCopied`]：一批复制好（或复制失败）的文件，攒满 100 个或距上一批 250 毫秒时发出。
 pub const COPIED: &str = "job.copied";
 /// 参数 [`JobImaging`]：制作镜像的进展，每秒最多 5 次，结束前总会发出最后一次。
@@ -344,6 +346,9 @@ pub struct FileTypeList {
 pub struct FileType {
     /// 扩展名，同时作为格式的标识。
     pub extension: String,
+    /// 按内容可能改用的扩展名（例如 ZIP 里装的是 Word 文档时存成 docx）；找到的文件
+    /// （[`FoundFile::extension`]）可能是其中之一，另存时照样按它找回格式。
+    pub variants: Vec<String>,
     /// 英文简述；界面按扩展名取本地化文案，取不到时显示它。
     pub description: String,
     pub max_size: u64,
@@ -361,6 +366,21 @@ pub struct CarveParams {
     /// 要恢复的格式（扩展名）；不给时用各格式的默认设置。
     #[serde(default)]
     pub extensions: Option<Vec<String>>,
+    /// 续扫：从这里接着扫（上次最后一个 [`CHECKPOINT`]），不给时从头扫。
+    #[serde(default)]
+    pub start_at: u64,
+    /// 续扫边扫边保存的：直接存进这个目录（上次的 `recovered-…`），不另建子目录；给出时不看 `output_dir`。
+    /// 上次已经存好的文件（续扫又找到时）保留原来那份。
+    #[serde(default)]
+    pub continue_dir: Option<String>,
+}
+
+/// 深度恢复的检查点（[`CHECKPOINT`]）：到此为止找到的文件都已经通知过，从 `resume_at` 接着扫不漏不重。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobCheckpoint {
+    pub job_id: String,
+    pub resume_at: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -827,7 +847,46 @@ pub struct ImageParams {
     /// 开始前把这些范围的进度清掉、重新读（重做做完的分区，或者源上变过的部分）。
     #[serde(default)]
     pub reset: Vec<ByteRange>,
+    /// 读取参数；不给时都用默认值。
+    #[serde(default)]
+    pub tuning: ImagingTuning,
 }
+
+/// 制作镜像的读取参数（界面的「高级选项」），每一项不给时用默认值。不合规定时答复 [`error_code::INVALID_PARAMS`]。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ImagingTuning {
+    /// 第 1 轮每次读多少字节：64 KiB 到 8 MiB，扇区大小的整数倍。默认 1 MiB。
+    pub block_bytes: u64,
+    /// 第 1 轮读错后起步跳过多少字节（连续出错时加倍）：一个扇区到 64 MiB，扇区大小的整数倍。默认 64 KiB。
+    pub skip_bytes: u64,
+    /// 第 4 轮把坏扇区再读几遍：0 到 [`MAX_IMAGING_RETRIES`]。默认 0（坏盘越读越坏）。
+    pub retries: u32,
+    /// 第 1 轮一次读超过这么多毫秒，当作走到了坏区边上：数据照收，跳过一段先读别处。0 不看。默认 2000。
+    pub slow_read_ms: u64,
+    /// 连续这么多毫秒没有一次读成功就停下（坏区图照常保存，可以续做）；0 不停。默认 0。
+    pub stall_limit_ms: u64,
+}
+
+impl Default for ImagingTuning {
+    fn default() -> Self {
+        Self {
+            block_bytes: 1 << 20,
+            skip_bytes: 64 << 10,
+            retries: 0,
+            slow_read_ms: 2000,
+            stall_limit_ms: 0,
+        }
+    }
+}
+
+/// [`ImagingTuning::block_bytes`] 的范围。
+pub const MIN_IMAGING_BLOCK: u64 = 64 << 10;
+pub const MAX_IMAGING_BLOCK: u64 = 8 << 20;
+/// [`ImagingTuning::skip_bytes`] 的上限。
+pub const MAX_IMAGING_SKIP: u64 = 64 << 20;
+/// [`ImagingTuning::retries`] 的上限。
+pub const MAX_IMAGING_RETRIES: u32 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -844,7 +903,7 @@ pub struct ImageStarted {
 #[serde(rename_all = "camelCase")]
 pub struct JobImaging {
     pub job_id: String,
-    /// 当前轮次：copy（复制）、trim（修边）、scrape（细读）。
+    /// 当前轮次：copy（复制）、trim（修边）、scrape（细读）、retry（重试）。
     pub round: String,
     /// 本次范围的字节数；不限范围时是源的容量。
     pub size: u64,
@@ -896,6 +955,9 @@ pub struct ImageSummary {
     pub device_unfinished_bytes: u64,
     /// 读错之后连以前读出的位置也读不出了（多半是设备断开），在这个偏移处停下；检查连接后可以续做。
     pub source_lost_at: Option<u64>,
+    /// 连续 [`ImagingTuning::stall_limit_ms`] 没有一次读成功，在这个偏移处停下；可以续做。
+    #[serde(default)]
+    pub stalled_at: Option<u64>,
     /// 本次运行的用时。
     pub elapsed_ms: u64,
 }

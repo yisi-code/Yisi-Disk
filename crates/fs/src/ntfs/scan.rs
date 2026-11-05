@@ -6,11 +6,13 @@ use std::collections::HashMap;
 use yisi_part::bytes::{le32, le64};
 
 use super::record::{
-    ATTRIBUTE_LIST, Body, DATA, NAMESPACE_DOS, REPARSE_POINT, Record, STANDARD_INFORMATION,
-    decode_runs, split_ref,
+    ATTRIBUTE_LIST, Body, DATA, NAMESPACE_DOS, Record, STANDARD_INFORMATION, decode_runs, split_ref,
 };
 use super::stream::Stream;
-use super::{BITMAP_RECORD, Ntfs, Value, file_names, truncated_on_delete, unsupported};
+use super::wof::wof_algorithm;
+use super::{
+    BITMAP_RECORD, Ntfs, Value, file_names, reparse_point, truncated_on_delete, unsupported,
+};
 use crate::entry::{Entry, FileRef, Location, Stamp, State, Unsupported};
 use crate::{FsError, ScanSummary};
 
@@ -607,10 +609,12 @@ fn apply_extension(summary: &mut Summary, data: &ExtensionData, record: &Record)
     summary.size = data.size;
     summary.position = data.position;
     let attributes = standard_attributes(record);
+    let reparse = reparse_point(record);
     summary.set_unsupported(unsupported(
         data.undecodable_compression,
         data.encrypted || attributes & super::FILE_ENCRYPTED != 0,
-        reparse_tag(record),
+        reparse.and_then(|value| le32(value, 0)),
+        reparse.and_then(wof_algorithm).is_some(),
         data.size,
         record.is_dir(),
     ));
@@ -658,11 +662,4 @@ fn standard_attributes(record: &Record) -> u32 {
         .and_then(|attribute| attribute.resident_value())
         .and_then(|value| le32(value, 0x20))
         .unwrap_or(0)
-}
-
-fn reparse_tag(record: &Record) -> Option<u32> {
-    record
-        .find(REPARSE_POINT, &[])
-        .and_then(|attribute| attribute.resident_value())
-        .and_then(|value| le32(value, 0))
 }

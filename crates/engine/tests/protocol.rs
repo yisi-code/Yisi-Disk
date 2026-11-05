@@ -356,13 +356,24 @@ fn carve_recovers_all_five_formats_from_an_image() {
 
     let mut engine = Engine::start();
     let types = engine.call(LIST_FILE_TYPES, Value::Null).unwrap();
-    let extensions: Vec<_> = types["types"]
-        .as_array()
-        .unwrap()
+    let listed = types["types"].as_array().unwrap();
+    let extensions: Vec<_> = listed
         .iter()
         .map(|item| item["extension"].as_str().unwrap().to_owned())
         .collect();
-    assert_eq!(extensions, ["jpg", "png", "pdf", "zip", "mp4"]);
+    assert_eq!(extensions[..5], ["jpg", "png", "pdf", "zip", "mp4"]);
+    // 一个格式按内容可能存成别的扩展名，列在 variants 里
+    let zip = listed
+        .iter()
+        .find(|item| item["extension"] == "zip")
+        .unwrap();
+    assert!(
+        zip["variants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|variant| variant == "docx")
+    );
 
     let unknown = engine
         .call(

@@ -1,5 +1,10 @@
 //! ZIP：依次是各文件的本地文件头与数据、中央目录，最后是中央目录结束记录（带注释）。
 //! 本地文件头里没有写大小（用数据描述符）时，往后找下一条记录的签名。
+//!
+//! 很多格式就是一个 ZIP，按里面装的东西改用它们的扩展名：Office Open XML（ECMA-376 第 2 部分：
+//! 有 `[Content_Types].xml`，正文在 `word/`、`xl/`、`ppt/` 下）看中央目录里的文件名；
+//! OpenDocument 与 EPUB 的第一个文件是不压缩的 `mimetype`，看它的内容；
+//! Android 应用有 `AndroidManifest.xml` 与 `classes.dex`，Java 包有 `META-INF/MANIFEST.MF`。
 
 use crate::plugin::{FileFormat, FormatInfo, Recovering, Signature};
 use crate::walker::{Event, Scanner, Step, Structure, Walker};
@@ -14,6 +19,15 @@ const DATA_DESCRIPTOR: u32 = 0x0807_4B50;
 
 /// 本地文件头标志位 3：大小写在数据后面的数据描述符里。
 const FLAG_DATA_DESCRIPTOR: u16 = 1 << 3;
+/// `mimetype` 的内容最多读这么长（OpenDocument 里最长的也不到 60 字节）。
+const MAX_MIMETYPE: u32 = 128;
+/// `mimetype` 的内容 → 扩展名。
+const MIMETYPES: [(&[u8], &str); 4] = [
+    (b"application/vnd.oasis.opendocument.text", "odt"),
+    (b"application/vnd.oasis.opendocument.spreadsheet", "ods"),
+    (b"application/vnd.oasis.opendocument.presentation", "odp"),
+    (b"application/epub+zip", "epub"),
+];
 /// ZIP64 扩展字段的标识。
 const ZIP64_EXTRA: u16 = 0x0001;
 
@@ -34,9 +48,13 @@ pub struct Zip;
 
 static INFO: FormatInfo = FormatInfo {
     extension: "zip",
+    variants: &[
+        "docx", "xlsx", "pptx", "odt", "ods", "odp", "epub", "apk", "jar",
+    ],
     description: "ZIP archive",
     max_size: 16 << 30,
     enabled_by_default: true,
+    nests_files: true,
 };
 
 static SIGNATURES: [Signature; 1] = [Signature {
@@ -59,11 +77,27 @@ impl FileFormat for Zip {
         let plausible =
             le32(block, 0) == Some(LOCAL_FILE) && version_needed <= 63 && name_length > 0;
         plausible.then(|| {
-            Box::new(Walker::new(ZipStructure {
-                phase: Phase::Record,
-            })) as Box<dyn Recovering>
+            Box::new(Walker::new(
+                INFO.max_size,
+                ZipStructure {
+                    phase: Phase::Record,
+                    mimetype: None,
+                    names: Names::default(),
+                },
+            )) as Box<dyn Recovering>
         })
     }
+}
+
+/// 本地文件头里读名字之后还要用的几项。
+#[derive(Clone, Copy)]
+struct Local {
+    flags: u16,
+    /// 存储方式（不压缩）。
+    stored: bool,
+    compressed: u32,
+    extra: u16,
+    extra_start: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -71,21 +105,106 @@ enum Phase {
     /// 等 4 字节记录签名。
     Record,
     LocalFile,
+    /// 等本地文件头后面的文件名。
+    LocalName(Local),
     /// 等本地文件头的扩展字段，从中读 ZIP64 大小。
     Zip64Extra {
         data_start: u64,
         flags: u16,
     },
+    /// 等 `mimetype` 的内容。
+    Mimetype,
     CentralDirectory,
+    /// 等中央目录记录里的文件名；`next` 是下一条记录的位置。
+    CentralName {
+        next: u64,
+    },
     EndOfCentralDirectory,
     Zip64End,
 }
 
+/// 中央目录里见到过的、能说明这是什么文件的名字。
+#[derive(Default)]
+struct Names {
+    content_types: bool,
+    word: bool,
+    excel: bool,
+    powerpoint: bool,
+    android_manifest: bool,
+    dex: bool,
+    java_manifest: bool,
+}
+
+impl Names {
+    fn note(&mut self, name: &[u8]) {
+        match name {
+            b"[Content_Types].xml" => self.content_types = true,
+            b"AndroidManifest.xml" => self.android_manifest = true,
+            b"classes.dex" => self.dex = true,
+            b"META-INF/MANIFEST.MF" => self.java_manifest = true,
+            _ if name.starts_with(b"word/") => self.word = true,
+            _ if name.starts_with(b"xl/") => self.excel = true,
+            _ if name.starts_with(b"ppt/") => self.powerpoint = true,
+            _ => {}
+        }
+    }
+
+    fn extension(&self) -> Option<&'static str> {
+        if self.content_types {
+            if self.word {
+                return Some("docx");
+            }
+            if self.excel {
+                return Some("xlsx");
+            }
+            if self.powerpoint {
+                return Some("pptx");
+            }
+        }
+        if self.android_manifest && self.dex {
+            return Some("apk");
+        }
+        self.java_manifest.then_some("jar")
+    }
+}
+
 struct ZipStructure {
     phase: Phase,
+    /// 按 `mimetype` 的内容定的扩展名。
+    mimetype: Option<&'static str>,
+    names: Names,
 }
 
 impl ZipStructure {
+    /// 读完本地文件头的名字：`mimetype` 是第一个文件、不压缩、内容不长时读它的内容，其余照常往后走。
+    fn after_name(&mut self, local: Local, is_mimetype: bool) -> Step {
+        let data_start = local.extra_start + u64::from(local.extra);
+        if local.compressed == u32::MAX && local.extra > 0 {
+            self.phase = Phase::Zip64Extra {
+                data_start,
+                flags: local.flags,
+            };
+            return Step::Need {
+                at: local.extra_start,
+                len: usize::from(local.extra),
+            };
+        }
+        if local.flags & FLAG_DATA_DESCRIPTOR != 0 && local.compressed == 0 {
+            return Step::Scan {
+                from: data_start,
+                scanner: NEXT_RECORD,
+            };
+        }
+        if is_mimetype && local.stored && (1..=MAX_MIMETYPE).contains(&local.compressed) {
+            self.phase = Phase::Mimetype;
+            return Step::Need {
+                at: data_start,
+                len: local.compressed as usize,
+            };
+        }
+        self.after_data(data_start + u64::from(local.compressed))
+    }
+
     fn record_at(&mut self, at: u64) -> Step {
         self.phase = Phase::Record;
         Step::Need { at, len: 4 }
@@ -100,6 +219,10 @@ impl ZipStructure {
 impl Structure for ZipStructure {
     fn first(&self) -> Step {
         Step::Need { at: 0, len: 4 }
+    }
+
+    fn extension(&self) -> Option<&'static str> {
+        self.mimetype.or_else(|| self.names.extension())
     }
 
     fn step(&mut self, event: Event<'_>) -> Step {
@@ -127,30 +250,39 @@ impl Structure for ZipStructure {
                 Step::Need { at, len }
             }
             Phase::LocalFile => {
-                let (Some(flags), Some(compressed), Some(name), Some(extra)) = (
+                let (Some(flags), Some(method), Some(compressed), Some(name), Some(extra)) = (
                     le16(bytes, 6),
+                    le16(bytes, 8),
                     le32(bytes, 18),
                     le16(bytes, 26),
                     le16(bytes, 28),
                 ) else {
                     return Step::Invalid;
                 };
-                let extra_start = at + 30 + u64::from(name);
-                let data_start = extra_start + u64::from(extra);
-                if compressed == u32::MAX && extra > 0 {
-                    self.phase = Phase::Zip64Extra { data_start, flags };
-                    return Step::Need {
-                        at: extra_start,
-                        len: usize::from(extra),
-                    };
+                let local = Local {
+                    flags,
+                    stored: method == 0,
+                    compressed,
+                    extra,
+                    extra_start: at + 30 + u64::from(name),
+                };
+                if name == 0 {
+                    return self.after_name(local, false);
                 }
-                if flags & FLAG_DATA_DESCRIPTOR != 0 && compressed == 0 {
-                    return Step::Scan {
-                        from: data_start,
-                        scanner: NEXT_RECORD,
-                    };
+                self.phase = Phase::LocalName(local);
+                Step::Need {
+                    at: at + 30,
+                    len: usize::from(name),
                 }
-                self.after_data(data_start + u64::from(compressed))
+            }
+            // 第一个文件的本地文件头在 0，名字从 30 开始
+            Phase::LocalName(local) => self.after_name(local, at == 30 && bytes == b"mimetype"),
+            Phase::Mimetype => {
+                self.mimetype = MIMETYPES
+                    .iter()
+                    .find(|(content, _)| bytes.trim_ascii() == *content)
+                    .map(|&(_, extension)| extension);
+                self.after_data(at + bytes.len() as u64)
             }
             Phase::Zip64Extra { data_start, flags } => {
                 let Some(compressed) = zip64_compressed_size(bytes) else {
@@ -173,7 +305,19 @@ impl Structure for ZipStructure {
                 else {
                     return Step::Invalid;
                 };
-                self.record_at(at + 46 + u64::from(name) + u64::from(extra) + u64::from(comment))
+                let next = at + 46 + u64::from(name) + u64::from(extra) + u64::from(comment);
+                if name == 0 {
+                    return self.record_at(next);
+                }
+                self.phase = Phase::CentralName { next };
+                Step::Need {
+                    at: at + 46,
+                    len: usize::from(name),
+                }
+            }
+            Phase::CentralName { next } => {
+                self.names.note(bytes);
+                self.record_at(next)
             }
             Phase::EndOfCentralDirectory => match le16(bytes, 20) {
                 Some(comment) => Step::Done(at + 22 + u64::from(comment)),
@@ -224,6 +368,90 @@ mod tests {
     fn data_descriptors_are_found_by_scanning() {
         let sample = samples::zip(&[("stream.dat", 2000, true), ("x", 10, false)], b"");
         check_all_splits(|| recover(&sample), &sample, Some(sample.len() as u64));
+    }
+
+    /// 完整读完后按内容给出的扩展名。
+    fn extension_of(data: &[u8]) -> Option<&'static str> {
+        let mut recovering = recover(data);
+        let length = crate::walker::tests::run_keeping(&mut recovering, data, 97);
+        assert_eq!(length, Some(data.len() as u64));
+        recovering.extension()
+    }
+
+    #[test]
+    fn office_documents_are_named_by_their_parts() {
+        let docx = samples::zip(
+            &[
+                ("[Content_Types].xml", 30, false),
+                ("_rels/.rels", 20, false),
+                ("word/document.xml", 90, true),
+            ],
+            b"",
+        );
+        assert_eq!(extension_of(&docx), Some("docx"));
+        let xlsx = samples::zip(
+            &[
+                ("[Content_Types].xml", 30, false),
+                ("xl/workbook.xml", 40, false),
+            ],
+            b"",
+        );
+        assert_eq!(extension_of(&xlsx), Some("xlsx"));
+        let pptx = samples::zip(
+            &[
+                ("[Content_Types].xml", 30, false),
+                ("ppt/slides/slide1.xml", 40, false),
+            ],
+            b"",
+        );
+        assert_eq!(extension_of(&pptx), Some("pptx"));
+        // 只有 word/ 而没有 [Content_Types].xml：普通压缩包
+        let plain = samples::zip(&[("word/notes.txt", 30, false)], b"");
+        assert_eq!(extension_of(&plain), None);
+        let apk = samples::zip(
+            &[
+                ("AndroidManifest.xml", 30, false),
+                ("classes.dex", 30, false),
+            ],
+            b"",
+        );
+        assert_eq!(extension_of(&apk), Some("apk"));
+        let jar = samples::zip(
+            &[
+                ("META-INF/MANIFEST.MF", 30, false),
+                ("a/B.class", 30, false),
+            ],
+            b"",
+        );
+        assert_eq!(extension_of(&jar), Some("jar"));
+    }
+
+    #[test]
+    fn open_document_and_epub_are_named_by_their_mimetype() {
+        let make = |mimetype: &[u8]| {
+            samples::zip_with(
+                &[
+                    ("mimetype", mimetype.to_vec(), false),
+                    ("content.xml", b"<office/>".to_vec(), false),
+                ],
+                b"",
+            )
+        };
+        for (mimetype, expected) in MIMETYPES {
+            let data = make(mimetype);
+            assert_eq!(extension_of(&data), Some(expected));
+            check_all_splits(|| recover(&data), &data, Some(data.len() as u64));
+        }
+        assert_eq!(extension_of(&make(b"application/x-other")), None);
+        // mimetype 不是第一个文件时不算
+        let later = samples::zip_with(
+            &[
+                ("content.xml", b"<office/>".to_vec(), false),
+                ("mimetype", b"application/epub+zip".to_vec(), false),
+            ],
+            b"",
+        );
+        assert_eq!(extension_of(&later), None);
     }
 
     #[test]

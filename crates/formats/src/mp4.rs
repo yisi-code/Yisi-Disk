@@ -1,4 +1,9 @@
-//! MP4 / MOV（ISO 基础媒体文件格式）：一串顶层 box（4 字节大端长度 + 4 字节类型），以 ftyp 开头。
+//! ISO 基础媒体文件格式（ISO/IEC 14496-12）：一串顶层 box（4 字节大端长度 + 4 字节类型），以 ftyp 开头。
+//! 三种格式共用这里的遍历，按 ftyp 里的主品牌分开：
+//! - 视频与音频（MP4，主品牌是 `qt  ` 的存成 MOV、`M4A ` 存成 M4A、`3gp*` 存成 3GP 等）：要有 moov 与 mdat；
+//! - HEIF 图片（HEIC、AVIF，ISO/IEC 23008-12）：没有 moov，图片的索引在 meta 里，要有 meta 与 mdat；
+//! - 佳能 CR3：结构与 MOV 相同（主品牌 `crx `），要有 moov 与 mdat。
+//!
 //! 文件没有结束标志：遇到不认识的顶层 box、或数据结束时，在最后一个完整 box 之后结束。
 //!
 //! 结束处还要能证明文件没被截短，否则判为不完整：
@@ -18,23 +23,60 @@ const TOP_LEVEL_BOXES: [&[u8; 4]; 17] = [
 /// sidx 每条引用的长度：reference_type 与 referenced_size、subsegment_duration、SAP 信息各 4 字节。
 const SIDX_REFERENCE_LEN: usize = 12;
 
-pub struct Mp4;
-
-static INFO: FormatInfo = FormatInfo {
-    extension: "mp4",
-    description: "MPEG-4 / QuickTime video",
-    max_size: 64 << 30,
-    enabled_by_default: true,
-};
+/// HEIF 图片的主品牌（ISO/IEC 23008-12 的 HEVC 图片与图片序列、通用的 mif1 / msf1，以及 AV1 图片格式）。
+const IMAGE_BRANDS: [&[u8; 4]; 10] = [
+    b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"mif1", b"msf1", b"avif", b"avis",
+];
+/// 佳能 CR3 的主品牌。
+const CR3_BRAND: &[u8; 4] = b"crx ";
 
 static SIGNATURES: [Signature; 1] = [Signature {
     offset: 4,
     bytes: b"ftyp",
 }];
 
+/// 文件头是一个合理的 ftyp：给出主品牌。
+fn major_brand(block: &[u8]) -> Option<[u8; 4]> {
+    let size = be32(block, 0)?;
+    let brand: [u8; 4] = block.get(8..12)?.try_into().ok()?;
+    let plausible = (16..=4096).contains(&size)
+        && block.get(4..8) == Some(b"ftyp".as_slice())
+        && brand
+            .iter()
+            .all(|byte| byte.is_ascii_graphic() || *byte == b' ');
+    plausible.then_some(brand)
+}
+
+fn walker(max_size: u64, profile: Profile, extension: Option<&'static str>) -> Box<dyn Recovering> {
+    Box::new(Walker::new(
+        max_size,
+        Mp4Structure {
+            phase: Phase::Header,
+            profile,
+            extension,
+            seen_moov: false,
+            seen_meta: false,
+            seen_mdat: false,
+            last_is_moof: false,
+            indexed_end: 0,
+        },
+    ))
+}
+
+pub struct Mp4;
+
+static MP4_INFO: FormatInfo = FormatInfo {
+    extension: "mp4",
+    variants: &["mov", "m4a", "m4v", "3gp"],
+    description: "MPEG-4 / QuickTime video",
+    max_size: 64 << 30,
+    enabled_by_default: true,
+    nests_files: true,
+};
+
 impl FileFormat for Mp4 {
     fn info(&self) -> &FormatInfo {
-        &INFO
+        &MP4_INFO
     }
 
     fn signatures(&self) -> &[Signature] {
@@ -42,23 +84,83 @@ impl FileFormat for Mp4 {
     }
 
     fn header_check(&self, block: &[u8]) -> Option<Box<dyn Recovering>> {
-        let size = be32(block, 0)?;
-        let brand = block.get(8..12)?;
-        let plausible = (16..=4096).contains(&size)
-            && block.get(4..8) == Some(b"ftyp".as_slice())
-            && brand
-                .iter()
-                .all(|byte| byte.is_ascii_graphic() || *byte == b' ');
-        plausible.then(|| {
-            Box::new(Walker::new(Mp4Structure {
-                phase: Phase::Header,
-                seen_moov: false,
-                seen_mdat: false,
-                last_is_moof: false,
-                indexed_end: 0,
-            })) as Box<dyn Recovering>
-        })
+        let brand = major_brand(block)?;
+        if IMAGE_BRANDS.contains(&&brand) || &brand == CR3_BRAND {
+            return None;
+        }
+        let extension = match &brand {
+            b"qt  " => Some("mov"),
+            b"M4A " | b"M4B " | b"M4P " => Some("m4a"),
+            b"M4V " | b"M4VH" | b"M4VP" => Some("m4v"),
+            _ if brand.starts_with(b"3g") => Some("3gp"),
+            _ => None,
+        };
+        Some(walker(MP4_INFO.max_size, Profile::Movie, extension))
     }
+}
+
+pub struct Heic;
+
+static HEIC_INFO: FormatInfo = FormatInfo {
+    extension: "heic",
+    variants: &["avif"],
+    description: "HEIF / AVIF image",
+    max_size: 256 << 20,
+    enabled_by_default: true,
+    nests_files: true,
+};
+
+impl FileFormat for Heic {
+    fn info(&self) -> &FormatInfo {
+        &HEIC_INFO
+    }
+
+    fn signatures(&self) -> &[Signature] {
+        &SIGNATURES
+    }
+
+    fn header_check(&self, block: &[u8]) -> Option<Box<dyn Recovering>> {
+        let brand = major_brand(block)?;
+        if !IMAGE_BRANDS.contains(&&brand) {
+            return None;
+        }
+        let extension = matches!(&brand, b"avif" | b"avis").then_some("avif");
+        Some(walker(HEIC_INFO.max_size, Profile::Image, extension))
+    }
+}
+
+pub struct Cr3;
+
+static CR3_INFO: FormatInfo = FormatInfo {
+    extension: "cr3",
+    variants: &[],
+    description: "Canon CR3 raw image",
+    max_size: 512 << 20,
+    enabled_by_default: true,
+    nests_files: true,
+};
+
+impl FileFormat for Cr3 {
+    fn info(&self) -> &FormatInfo {
+        &CR3_INFO
+    }
+
+    fn signatures(&self) -> &[Signature] {
+        &SIGNATURES
+    }
+
+    fn header_check(&self, block: &[u8]) -> Option<Box<dyn Recovering>> {
+        (&major_brand(block)? == CR3_BRAND).then(|| walker(CR3_INFO.max_size, Profile::Movie, None))
+    }
+}
+
+/// 文件的索引在哪个 box 里。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Profile {
+    /// 视频、音频与 CR3：moov。
+    Movie,
+    /// HEIF 图片：meta。
+    Image,
 }
 
 enum Phase {
@@ -72,7 +174,11 @@ enum Phase {
 
 struct Mp4Structure {
     phase: Phase,
+    profile: Profile,
+    /// 按主品牌定的扩展名。
+    extension: Option<&'static str>,
     seen_moov: bool,
+    seen_meta: bool,
     seen_mdat: bool,
     /// 最近读到的 box（结束时就是最后一个完整的 box）是 moof。
     last_is_moof: bool,
@@ -82,7 +188,11 @@ struct Mp4Structure {
 
 impl Mp4Structure {
     fn complete(&self, at: u64) -> bool {
-        self.seen_moov && self.seen_mdat && !self.last_is_moof && at >= self.indexed_end
+        let indexed = match self.profile {
+            Profile::Movie => self.seen_moov,
+            Profile::Image => self.seen_meta,
+        };
+        indexed && self.seen_mdat && !self.last_is_moof && at >= self.indexed_end
     }
 
     fn end_at(&self, at: u64) -> Step {
@@ -146,6 +256,10 @@ impl Structure for Mp4Structure {
         Step::Need { at: 0, len: 8 }
     }
 
+    fn extension(&self) -> Option<&'static str> {
+        self.extension
+    }
+
     fn step(&mut self, event: Event<'_>) -> Step {
         let Event::Bytes { at, bytes } = event else {
             return Step::Invalid;
@@ -164,6 +278,7 @@ impl Structure for Mp4Structure {
                 };
                 match known {
                     b"moov" => self.seen_moov = true,
+                    b"meta" => self.seen_meta = true,
                     b"mdat" => self.seen_mdat = true,
                     _ => {}
                 }
@@ -260,6 +375,52 @@ mod tests {
         let mut followed = sample.clone();
         followed.extend_from_slice(&[0u8; 32]);
         check_all_splits(|| recover(&followed), &followed, Some(sample.len() as u64));
+    }
+
+    /// 用某个格式完整读完后，给出的长度与扩展名。
+    fn read_with(format: &dyn FileFormat, data: &[u8]) -> Option<(u64, Option<&'static str>)> {
+        let mut recovering = format.header_check(data)?;
+        let length = crate::walker::tests::run_keeping(&mut recovering, data, 333)?;
+        Some((length, recovering.extension()))
+    }
+
+    #[test]
+    fn major_brands_pick_the_format_and_the_extension() {
+        let movie = |brand: &[u8; 4]| samples::iso_media(brand, &[(b"moov", 60), (b"mdat", 500)]);
+        for (brand, extension) in [
+            (b"isom", None),
+            (b"mp42", None),
+            (b"qt  ", Some("mov")),
+            (b"M4A ", Some("m4a")),
+            (b"M4V ", Some("m4v")),
+            (b"3gp5", Some("3gp")),
+        ] {
+            let data = movie(brand);
+            assert_eq!(read_with(&Mp4, &data), Some((data.len() as u64, extension)));
+            assert!(Heic.header_check(&data).is_none() && Cr3.header_check(&data).is_none());
+        }
+
+        let photo = |brand: &[u8; 4]| samples::iso_media(brand, &[(b"meta", 200), (b"mdat", 800)]);
+        for (brand, extension) in [(b"heic", None), (b"mif1", None), (b"avif", Some("avif"))] {
+            let data = photo(brand);
+            assert_eq!(
+                read_with(&Heic, &data),
+                Some((data.len() as u64, extension))
+            );
+            assert!(Mp4.header_check(&data).is_none() && Cr3.header_check(&data).is_none());
+            check_all_splits(
+                || Heic.header_check(&data).unwrap(),
+                &data,
+                Some(data.len() as u64),
+            );
+        }
+        // HEIF 没有 meta（只有 mdat）不完整；有 moov 没有 meta 也不行
+        let no_meta = samples::iso_media(b"heic", &[(b"moov", 60), (b"mdat", 300)]);
+        check_all_splits(|| Heic.header_check(&no_meta).unwrap(), &no_meta, None);
+
+        let cr3 = samples::iso_media(b"crx ", &[(b"moov", 300), (b"uuid", 100), (b"mdat", 900)]);
+        assert_eq!(read_with(&Cr3, &cr3), Some((cr3.len() as u64, None)));
+        assert!(Mp4.header_check(&cr3).is_none() && Heic.header_check(&cr3).is_none());
     }
 
     #[test]

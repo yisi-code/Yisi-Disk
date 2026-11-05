@@ -8,6 +8,16 @@
 //! - 第 2 轮「修边」：对每个待修边的区段，从两端按扇区向内读，碰到读错误就停；读不出的那个扇区记为坏，
 //!   中间剩下的记为待细读。
 //! - 第 3 轮「细读」：对待细读的区段逐扇区读一遍，读不出的记为坏。
+//! - 第 4 轮「重试」（[`ImagingOptions::retries`] 大于 0 时）：把记为坏的扇区再读几遍，正向、反向交替；
+//!   读出的改记为已读。坏盘越读越坏，默认不做。
+//!
+//! 第 1 轮里一次读得比 [`ImagingOptions::slow_read`] 还慢时，数据照收，但当作走到了坏区边上，同样跳过一段，
+//! 先把读得顺的地方读完（磁盘在坏区附近常常反复重试，一次读要几十秒）。连续 [`ImagingOptions::stall_limit`]
+//! 没有一次读成功时停下（[`ImagingOutcome::Stalled`]），坏区图照常保存，可以续做。
+//! 一次读本身打断不了（卡在驱动里重试的读请求要等它自己超时），所以「慢」只在读完之后才知道。
+//!
+//! 暂停（[`ImagingControl::pause_requested`]）：先保存坏区图，再在 [`ImagingControl::is_cancelled`] 里等；
+//! 暂停的时长不算进「多久没读成功」。
 //!
 //! 可以只读设备的一部分（[`ImagingOptions::scope`]，例如选中的几个分区），也可以只做第 1 轮的正向、反向读
 //! （[`ImagingOptions::copy_only`]，先把完好区域读出来，坏区留到以后）。坏区图始终覆盖整个设备，
@@ -42,7 +52,13 @@ pub trait ImageStore {
 
 /// 运行中查询取消、报告进度。
 pub trait ImagingControl {
+    /// 每读一次之前查询。暂停时可以在这里阻塞，阻塞前会先保存坏区图（见 [`pause_requested`](Self::pause_requested)）。
     fn is_cancelled(&self) -> bool;
+
+    /// 要暂停了：返回 `true` 时先保存坏区图，再调用会阻塞的 [`is_cancelled`](Self::is_cancelled)。
+    fn pause_requested(&self) -> bool {
+        false
+    }
 
     /// 每读一次报告一次，由实现方节流。
     fn progress(&self, round: Round, map: &BadMap);
@@ -65,6 +81,7 @@ pub enum Round {
     Copy,
     Trim,
     Scrape,
+    Retry,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +96,12 @@ pub struct ImagingOptions {
     pub scope: Option<Scope>,
     /// 只做第 1 轮的正向、反向读：先把完好的区域读出来，读错与被跳过的区段留到以后。
     pub copy_only: bool,
+    /// 第 4 轮把坏扇区再读几遍；0 不做。
+    pub retries: u32,
+    /// 第 1 轮里一次读得比这还慢时，当作走到了坏区边上，跳过一段；`None` 不看读得快慢。
+    pub slow_read: Option<Duration>,
+    /// 连续这么久没有一次读成功就停下（暂停的时间不算）；`None` 不停。
+    pub stall_limit: Option<Duration>,
 }
 
 impl Default for ImagingOptions {
@@ -89,6 +112,9 @@ impl Default for ImagingOptions {
             commit_interval: Duration::from_secs(5),
             scope: None,
             copy_only: false,
+            retries: 0,
+            slow_read: None,
+            stall_limit: None,
         }
     }
 }
@@ -106,6 +132,10 @@ pub enum ImagingOutcome {
     SourceLost {
         offset: u64,
         error: IoError,
+    },
+    /// 连续 [`ImagingOptions::stall_limit`] 没有一次读成功，停下了。`offset` 是最后读错的位置。
+    Stalled {
+        offset: u64,
     },
 }
 
@@ -169,6 +199,11 @@ pub fn run_imaging(
         control,
         scope,
         copy_only: options.copy_only,
+        retries: options.retries,
+        slow_read: options.slow_read,
+        stall_limit: options.stall_limit,
+        last_success: Instant::now(),
+        last_read_slow: false,
         sector,
         block: options.block_size,
         skip_min: options.skip_min,
@@ -189,6 +224,9 @@ pub fn run_imaging(
         Err(Interrupt::SourceLost { offset, error }) => {
             committed.map(|()| ImagingOutcome::SourceLost { offset, error })
         }
+        Err(Interrupt::Stalled { offset }) => {
+            committed.map(|()| ImagingOutcome::Stalled { offset })
+        }
         // 写镜像的错误更要紧；坏区图里没有记这次写失败的块，保存失败也不影响续做
         Err(Interrupt::Store(error)) => Err(error),
     }
@@ -198,6 +236,7 @@ pub fn run_imaging(
 enum Interrupt {
     Cancelled,
     SourceLost { offset: u64, error: IoError },
+    Stalled { offset: u64 },
     Store(io::Error),
 }
 
@@ -214,6 +253,13 @@ struct Imager<'a> {
     control: &'a dyn ImagingControl,
     scope: &'a Scope,
     copy_only: bool,
+    retries: u32,
+    slow_read: Option<Duration>,
+    stall_limit: Option<Duration>,
+    /// 最近一次读成功的时刻（暂停之后从继续时算起）。
+    last_success: Instant,
+    /// 最近一次读成功、但读得比 `slow_read` 还慢。
+    last_read_slow: bool,
     sector: u64,
     block: u64,
     skip_min: u64,
@@ -248,6 +294,13 @@ impl Imager<'_> {
             self.begin(Round::Scrape)?;
             self.scrape()?;
         }
+        for pass in 0..self.retries {
+            if self.scope.bytes(self.map, SegmentState::Bad) == 0 {
+                break;
+            }
+            self.begin(Round::Retry)?;
+            self.retry(pass % 2 == 1)?;
+        }
         Ok(())
     }
 
@@ -267,7 +320,13 @@ impl Imager<'_> {
             let length = (end - start).min(self.block);
             cursor = start + length;
             if self.read(start, length)? {
-                skip = 0;
+                // 读得太慢：多半到了坏区边上，数据照收，跳过一段先读别处
+                if skipping && self.last_read_slow {
+                    skip = self.next_skip(skip);
+                    cursor = cursor.saturating_add(skip).min(self.device.size());
+                } else {
+                    skip = 0;
+                }
                 continue;
             }
             self.map.set(start, length, SegmentState::Trim);
@@ -289,7 +348,12 @@ impl Imager<'_> {
             let length = end - offset;
             cursor = offset;
             if self.read(offset, length)? {
-                skip = 0;
+                if self.last_read_slow {
+                    skip = self.next_skip(skip);
+                    cursor = cursor.saturating_sub(skip);
+                } else {
+                    skip = 0;
+                }
                 continue;
             }
             self.map.set(offset, length, SegmentState::Trim);
@@ -358,12 +422,59 @@ impl Imager<'_> {
         Ok(())
     }
 
+    /// 重试：把坏扇区逐个再读一遍，`backward` 时从后往前。读出的记为已读，读不出的仍是坏。
+    fn retry(&mut self, backward: bool) -> Result<(), Interrupt> {
+        let bad: Vec<(u64, u64)> = self
+            .scope
+            .ranges()
+            .iter()
+            .flat_map(|&(from, to)| {
+                self.map
+                    .ranges(SegmentState::Bad)
+                    .filter_map(move |(offset, length)| {
+                        let start = offset.max(from);
+                        let end = (offset + length).min(to);
+                        (start < end).then_some((start, end))
+                    })
+            })
+            .collect();
+        if backward {
+            for &(start, end) in bad.iter().rev() {
+                let mut at = end;
+                while at > start {
+                    let offset = align_down(at - 1, self.sector).max(start);
+                    self.read(offset, at - offset)?;
+                    at = offset;
+                }
+            }
+        } else {
+            for &(start, end) in &bad {
+                let mut at = start;
+                while at < end {
+                    let length = self.sector.min(end - at);
+                    self.read(at, length)?;
+                    at += length;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// 读一段：读出时写进镜像、记为已读，返回 `true`；读错时返回 `false`，由调用方决定记成什么。
-    /// 读错且最近读成功的扇区也读不出时，按设备已断开结束本次运行。
+    /// 读错且最近读成功的扇区也读不出时，按设备已断开结束本次运行；连续很久没读成功时停下。
     fn read(&mut self, offset: u64, length: u64) -> Result<bool, Interrupt> {
-        if self.control.is_cancelled() {
+        if self.control.pause_requested() {
+            // 暂停前把读到的落盘；暂停多久都不算「没读成功」
+            self.commit()?;
+            let cancelled = self.control.is_cancelled();
+            self.last_success = Instant::now();
+            if cancelled {
+                return Err(Interrupt::Cancelled);
+            }
+        } else if self.control.is_cancelled() {
             return Err(Interrupt::Cancelled);
         }
+        let reading = Instant::now();
         let Some(buffer) = usize::try_from(length)
             .ok()
             .and_then(|length| self.buffer.get_mut(..length))
@@ -377,12 +488,22 @@ impl Imager<'_> {
                 // 记下这一段的最后一个扇区，下次出错时重读它，离磁头当前位置最近
                 self.last_good = Some(align_down(offset + length - 1, self.sector));
                 self.errors_in_a_row = 0;
+                self.last_success = Instant::now();
+                self.last_read_slow = self
+                    .slow_read
+                    .is_some_and(|limit| reading.elapsed() >= limit);
                 true
             }
             Err(error) => {
                 self.control.read_failed(offset, length, &error);
                 self.ensure_source_alive(offset, error)?;
                 self.errors_in_a_row = self.errors_in_a_row.saturating_add(1);
+                if self
+                    .stall_limit
+                    .is_some_and(|limit| self.last_success.elapsed() >= limit)
+                {
+                    return Err(Interrupt::Stalled { offset });
+                }
                 false
             }
         };

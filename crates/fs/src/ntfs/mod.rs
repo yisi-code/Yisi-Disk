@@ -2,11 +2,15 @@
 //! 扫一遍 MFT 找出「未使用」的记录，按父目录引用挂回目录树，用 `$Bitmap` 判断它们的簇是否已被占用。
 //! 依据公开的 NTFS 结构资料实现，只读。
 
+mod huffman;
 mod index;
 pub(crate) mod lznt1;
+mod lzx;
 mod record;
 mod scan;
 mod stream;
+pub(crate) mod wof;
+mod xpress;
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -19,6 +23,7 @@ use self::record::{
 };
 use self::scan::Scan;
 use self::stream::Stream;
+use self::wof::{WOF_STREAM, WofAlgorithm, WofReader, wof_algorithm};
 use crate::bpb::NtfsBpb;
 use crate::entry::{Entry, FileRef, Listing, Location, Stamp, State, Unsupported};
 use crate::reader::{FileReader, Piece};
@@ -116,6 +121,8 @@ pub(crate) struct Described {
     /// 无名 `$DATA`；目录或没有数据时为 `None`。
     pub data: Option<Value>,
     pub unsupported: Option<Unsupported>,
+    /// 系统压缩（WOF）且算法认识时的算法：内容要从 `WofCompressedData` 流里解开。
+    pub wof: Option<WofAlgorithm>,
 }
 
 pub(crate) struct Ntfs {
@@ -361,19 +368,22 @@ impl Ntfs {
             .and_then(|attribute| attribute.resident_value())
             .and_then(|value| le32(value, 0x20))
             .unwrap_or(0);
-        let reparse_tag = record
-            .find(REPARSE_POINT, &[])
-            .and_then(|attribute| attribute.resident_value())
-            .and_then(|value| le32(value, 0));
+        let reparse = reparse_point(record);
+        let wof = reparse.and_then(wof_algorithm).filter(|_| !record.is_dir());
         let unsupported = unsupported(
             data.as_ref()
                 .is_some_and(|value| value.undecodable_compression(self.cluster_size)),
             data.as_ref().is_some_and(Value::encrypted) || attributes & FILE_ENCRYPTED != 0,
-            reparse_tag,
+            reparse.and_then(|value| le32(value, 0)),
+            wof.is_some(),
             data.as_ref().map_or(0, Value::size),
             record.is_dir(),
         );
-        Ok(Described { data, unsupported })
+        Ok(Described {
+            data,
+            unsupported,
+            wof,
+        })
     }
 
     pub fn list(&self, dir: &FileRef) -> Result<Listing, FsError> {
@@ -474,7 +484,24 @@ impl Ntfs {
                 "删除时新技术文件系统（NTFS）先把这个文件截成了 0 字节，它的数据位置已不在主文件表（MFT）里",
             ));
         }
-        Ok(self.reader(described.data))
+        let Some(algorithm) = described.wof else {
+            return Ok(self.reader(described.data));
+        };
+        // 系统压缩：无名数据流只是占着原大小的稀疏流，内容在压缩流里
+        let size = described.data.as_ref().map_or(0, Value::size);
+        let compressed =
+            self.value(record, &base, DATA, &utf16(WOF_STREAM))?
+                .ok_or(FsError::Invalid(
+                    "系统压缩（WOF）的文件没有压缩流（WofCompressedData）",
+                ))?;
+        if compressed.encrypted() || compressed.undecodable_compression(self.cluster_size) {
+            return Err(FsError::Unreadable(Unsupported::SystemCompressed));
+        }
+        let pieces = self
+            .reader(Some(compressed))
+            .into_pieces()
+            .ok_or(FsError::Invalid("系统压缩（WOF）的压缩流读不出"))?;
+        Ok(FileReader::wof(WofReader::new(pieces, algorithm, size)?))
     }
 
     /// 文件的备用数据流：名字与长度，按在记录（或属性列表）里的顺序，最多 [`MAX_STREAMS`] 个。
@@ -572,18 +599,30 @@ pub(crate) fn truncated_on_delete(record: &Record, data: Option<&Value>) -> bool
         && data.is_none_or(|value| value.size() == 0)
 }
 
+/// 记录里的重分析点内容（常驻；开头 4 字节是标记）。
+pub(crate) fn reparse_point(record: &Record) -> Option<&[u8]> {
+    record
+        .find(REPARSE_POINT, &[])
+        .and_then(|attribute| attribute.resident_value())
+}
+
 /// 存放方式是否暂不支持读出。目录只看链接类的重分析点（目录本身带压缩、加密属性只表示新文件的默认方式）。
-/// `undecodable_compression`：压缩了、又解不开（LZNT1 压缩能读出）。
+/// `undecodable_compression`：压缩了、又解不开（LZNT1 压缩能读出）；`wof_readable`：系统压缩的算法认识
+/// （「单个文件」提供者，XPRESS 或 LZX），能从压缩流里解开。
 fn unsupported(
     undecodable_compression: bool,
     encrypted: bool,
     reparse_tag: Option<u32>,
+    wof_readable: bool,
     size: u64,
     is_dir: bool,
 ) -> Option<Unsupported> {
     match reparse_tag {
         Some(TAG_MOUNT_POINT | TAG_SYMLINK) => return Some(Unsupported::Reparse),
-        Some(TAG_WOF) if !is_dir => return Some(Unsupported::SystemCompressed),
+        Some(TAG_WOF) if !is_dir && !wof_readable => {
+            return Some(Unsupported::SystemCompressed);
+        }
+        Some(TAG_WOF) => {}
         // 其他重分析点（云端文件等）：已下载到本地的，数据流里就是内容
         Some(_) if !is_dir && size == 0 => return Some(Unsupported::Reparse),
         _ => {}
@@ -619,11 +658,12 @@ fn live_entries(keys: &[index::Key], dir: u64, scan: Option<&Scan>) -> Vec<Entry
         let is_dir = name.flags & FILE_NAME_DIRECTORY != 0;
         let mut size = if is_dir { 0 } else { name.size };
         let reparse = (name.flags & FILE_REPARSE_POINT != 0).then_some(name.reparse_tag);
-        // 目录索引里只有「压缩」这个属性，看不出解不解得开：按解得开列出，读的时候以记录为准
+        // 目录索引里只有「压缩」这个属性与重分析标记，看不出解不解得开：按解得开列出，读的时候以记录为准
         let mut unsupported = unsupported(
             false,
             name.flags & FILE_ENCRYPTED != 0,
             reparse,
+            true,
             size,
             is_dir,
         );
