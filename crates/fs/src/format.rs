@@ -453,11 +453,16 @@ pub fn exfat_label(raw: &[u8]) -> Option<String> {
     (!label.is_empty()).then_some(label)
 }
 
-/// exFAT 大写表的校验和：逐字节循环右移一位再加（大写表目录项里记的 `TableChecksum`）。
+/// exFAT 32 位校验和的一步：先循环右移一位，再加上这个字节（引导区与大写表都这样算）。
+pub(crate) fn exfat_checksum_step(sum: u32, byte: u8) -> u32 {
+    sum.rotate_right(1).wrapping_add(u32::from(byte))
+}
+
+/// exFAT 大写表的校验和：逐字节 [`exfat_checksum_step`]（大写表目录项里记的 `TableChecksum`）。
 pub fn exfat_table_checksum(bytes: &[u8]) -> u32 {
-    bytes.iter().fold(0u32, |sum, &byte| {
-        sum.rotate_right(1).wrapping_add(u32::from(byte))
-    })
+    bytes
+        .iter()
+        .fold(0u32, |sum, &byte| exfat_checksum_step(sum, byte))
 }
 
 /// exFAT 规范推荐的压缩大写表，Windows 格式化 exFAT 时写的就是它：5836 字节，校验和 [`EXFAT_UPCASE_CHECKSUM`]。

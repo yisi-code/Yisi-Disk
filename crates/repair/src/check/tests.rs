@@ -8,7 +8,8 @@ use yisi_io::{BlockDevice, IoError};
 
 use super::*;
 use crate::samples::{
-    end_marker, exfat_heap, fat_geometry, reseal_exfat_boot as reseal_boot, set_bitmap, set_fat,
+    end_marker, exfat_heap, fat_geometry, reseal_exfat_boot as reseal_boot,
+    reseal_exfat_set as reseal_set, set_bitmap, set_fat,
 };
 
 /// 不暂停、不取消，记下最后一次进度。
@@ -426,15 +427,7 @@ fn exfat_entry_count_and_name_length_are_verified() {
     let mut image = exfat_sample().image;
     let stream = primary + 32;
     image[stream + 3] = 3;
-    let mut checksum = 0u16;
-    let entries = usize::from(image[primary + 1]) + 1;
-    for (index, &byte) in image[primary..primary + entries * 32].iter().enumerate() {
-        if index == 2 || index == 3 {
-            continue;
-        }
-        checksum = checksum.rotate_right(1).wrapping_add(u16::from(byte));
-    }
-    image[primary + 2..primary + 4].copy_from_slice(&checksum.to_le_bytes());
+    reseal_set(&mut image, primary);
     let report = run(&image);
     let length = find(&report, IssueKind::EntryNameLength);
     assert_eq!((length.expected, length.actual), (Some(1), Some(4)));
@@ -484,15 +477,7 @@ fn exfat_fat_chain_loop_and_cross_link() {
         .unwrap();
     image[at + 20..at + 24].copy_from_slice(&sample.fragmented.clusters[1].to_le_bytes());
     let primary = at - 32;
-    let entries = usize::from(image[primary + 1]) + 1;
-    let mut checksum = 0u16;
-    for (index, &byte) in image[primary..primary + entries * 32].iter().enumerate() {
-        if index == 2 || index == 3 {
-            continue;
-        }
-        checksum = checksum.rotate_right(1).wrapping_add(u16::from(byte));
-    }
-    image[primary + 2..primary + 4].copy_from_slice(&checksum.to_le_bytes());
+    reseal_set(&mut image, primary);
     let report = run(&image);
     let cross = find(&report, IssueKind::CrossLink);
     let mut paths = [cross.path.as_deref(), cross.other_path.as_deref()];
