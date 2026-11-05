@@ -10,7 +10,7 @@ use yisi_io::{BlockDevice, IoError};
 use yisi_part::bytes::{le16, le32, le64};
 
 use crate::boot_write::EXFAT_BOOT_REGION_SECTORS;
-use crate::format::FatWidth;
+use crate::format::{FatWidth, exfat_checksum_step};
 use crate::{FsKind, bpb, exfat, fat, ntfs};
 
 /// 打开卷时用哪一份引导扇区。
@@ -235,15 +235,13 @@ fn primary_sector_size(primary: &[u8], family: BackupFamily) -> Option<u64> {
     SECTOR_SIZES.contains(&size).then_some(size)
 }
 
-/// exFAT 引导区的校验和：前 11 个扇区逐字节累加（每次先循环右移一位），跳过卷标志（106、107）与使用百分比（112）。
+/// exFAT 引导区的校验和：前 11 个扇区逐字节 [`exfat_checksum_step`]，跳过卷标志（106、107）与使用百分比（112）。
 pub fn exfat_boot_checksum(region: &[u8]) -> u32 {
     region
         .iter()
         .enumerate()
         .filter(|(index, _)| !matches!(index, 106 | 107 | 112))
-        .fold(0u32, |sum, (_, &byte)| {
-            sum.rotate_right(1).wrapping_add(u32::from(byte))
-        })
+        .fold(0u32, |sum, (_, &byte)| exfat_checksum_step(sum, byte))
 }
 
 /// exFAT 校验和扇区里记的值（整个扇区重复同一个 32 位数）；各处不一致时为 `None`。

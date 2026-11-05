@@ -9,7 +9,7 @@ pub use yisi_part::samples::{MemoryDisk, Noise};
 use crate::FsKind;
 use crate::boot_write::{ExfatBoot, FatBoot, exfat_boot_region, fat_boot, fat32_fs_info};
 use crate::fat::short_checksum;
-use crate::format::{FatWidth, fat_entry_span, put_fat_entry};
+use crate::format::{FatWidth, exfat_set_checksum, fat_entry_span, put_fat_entry};
 
 mod ntfs;
 pub use ntfs::{COMPRESSION_UNIT_CLUSTERS, CompressedUnit, NtfsImage, ROOT as NTFS_ROOT, TAG_WOF};
@@ -706,15 +706,7 @@ impl ExfatImage {
             let at = 2 + (index % 15) * 2;
             entry[at..at + 2].copy_from_slice(&unit.to_le_bytes());
         }
-        let mut checksum = 0u16;
-        for (entry_index, entry) in set.iter().enumerate() {
-            for (position, &byte) in entry.iter().enumerate() {
-                if entry_index == 0 && (position == 2 || position == 3) {
-                    continue;
-                }
-                checksum = checksum.rotate_right(1).wrapping_add(u16::from(byte));
-            }
-        }
+        let checksum = exfat_set_checksum(&set);
         set[0][2..4].copy_from_slice(&checksum.to_le_bytes());
         let first_entry = self.push_entries(parent.0, &set);
         Placed {

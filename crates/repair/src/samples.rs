@@ -2,7 +2,7 @@
 #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::expect_used)]
 
 use yisi_fs::boot::exfat_boot_checksum;
-use yisi_fs::format::{FatWidth, fat_entry_span, put_fat_entry};
+use yisi_fs::format::{FatWidth, exfat_set_checksum, fat_entry_span, put_fat_entry};
 use yisi_fs::samples::{ExfatImage, FatImage, FatType, Layout, NTFS_ROOT, NtfsImage, pattern};
 use yisi_part::samples::{MbrEntry, mbr_disk};
 
@@ -176,4 +176,15 @@ pub fn reseal_exfat_boot(image: &mut [u8]) {
     for word in image[11 * SECTOR..12 * SECTOR].as_chunks_mut::<4>().0 {
         word.copy_from_slice(&checksum.to_le_bytes());
     }
+}
+
+/// 改完样本里从 `primary`（文件项）起的一组 exFAT 目录项后，按规范重算它的校验和。
+pub fn reseal_exfat_set(image: &mut [u8], primary: usize) {
+    let entries = usize::from(image[primary + 1]) + 1;
+    let raws = image[primary..primary + entries * 32]
+        .as_chunks::<32>()
+        .0
+        .to_vec();
+    let checksum = exfat_set_checksum(&raws);
+    image[primary + 2..primary + 4].copy_from_slice(&checksum.to_le_bytes());
 }

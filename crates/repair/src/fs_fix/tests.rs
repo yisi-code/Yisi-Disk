@@ -8,7 +8,9 @@ use yisi_fs::{BootCopy, Volume};
 
 use super::*;
 use crate::check::check;
-use crate::samples::{end_marker, fat_entry, reseal_exfat_boot, set_bitmap, set_fat};
+use crate::samples::{
+    end_marker, fat_entry, reseal_exfat_boot, reseal_exfat_set as reseal_set, set_bitmap, set_fat,
+};
 
 fn device(image: &[u8]) -> Arc<dyn BlockDevice> {
     Arc::new(MemoryDisk::new(image.to_vec(), 512))
@@ -407,17 +409,6 @@ fn exfat_primary(image: &[u8], name: &str) -> usize {
     let primary = at - 2 - 64;
     assert_eq!(image[primary] | 0x80, 0x85);
     primary
-}
-
-/// 按规范重算样本里一组 exFAT 目录项的校验和。
-fn reseal_set(image: &mut [u8], primary: usize) {
-    let entries = usize::from(image[primary + 1]) + 1;
-    let raws: Vec<[u8; 32]> = image[primary..primary + entries * 32]
-        .as_chunks::<32>()
-        .0
-        .to_vec();
-    let checksum = exfat_set_checksum(&raws);
-    image[primary + 2..primary + 4].copy_from_slice(&checksum.to_le_bytes());
 }
 
 fn exfat_named() -> Vec<u8> {
