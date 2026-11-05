@@ -841,7 +841,7 @@ const enUS: typeof zhCN = {
     mode: {
       legend: 'How to search',
       quick: 'Quick search (recommended)',
-      quickHint: 'Looks only where partitions usually start (every 1 MiB, cylinder boundaries on old disks, starts recorded in the partition table) and skips to the end of each partition it finds. With one partition on a disk it takes seconds.',
+      quickHint: 'Looks only where partitions usually start (every 1 MiB, cylinder boundaries on old disks, starts recorded in the partition table, just after the end of each partition) and skips to the end of each partition it finds. With one partition on a disk it takes seconds.',
       deep: 'Deep search',
       deepHint: 'Reads the whole disk from start to end and looks at every sector. It also finds partitions that start elsewhere and disk images stored inside partitions; it takes hours on a large disk.',
     },
