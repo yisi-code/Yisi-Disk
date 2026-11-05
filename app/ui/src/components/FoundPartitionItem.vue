@@ -13,7 +13,7 @@ const props = defineProps<{ candidate: FoundPartition }>()
 const { t } = useI18n()
 const { filesystemName } = usePartitionText()
 
-/** 说明标签：与分区表的关系，以及靠备份找到、与别的候选重叠、超出末尾 */
+/** 说明标签：与分区表的关系，以及靠备份或按结构找到、与别的候选重叠、超出末尾 */
 function tags(): { kind: string; text: string }[] {
   const candidate = props.candidate
   const result: { kind: string; text: string }[] = [
@@ -24,8 +24,8 @@ function tags(): { kind: string; text: string }[] {
       }),
     },
   ]
-  if (candidate.foundBy === 'backup') {
-    result.push({ kind: 'backup', text: t('findPartitions.list.backup') })
+  if (candidate.foundBy === 'backup' || candidate.foundBy === 'structure') {
+    result.push({ kind: candidate.foundBy, text: t(`findPartitions.list.${candidate.foundBy}`) })
   }
   if (candidate.overlapsCandidate) {
     result.push({ kind: 'overlapsCandidate', text: t('findPartitions.list.overlapsCandidate') })

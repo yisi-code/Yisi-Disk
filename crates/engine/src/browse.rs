@@ -50,6 +50,8 @@ struct Range {
     offset: u64,
     length: u64,
     boot: BootCopy,
+    /// 按推算的引导扇区打开（丢失分区搜索按结构找到的）。
+    rebuilt: bool,
 }
 
 struct SortedDir {
@@ -221,10 +223,14 @@ impl Session {
     pub fn open_range(&self, params: &OpenRangeParams) -> Result<PartitionInfo, ErrorObject> {
         check_range(self.device.as_ref(), params.offset, params.length)?;
         let boot = boot_check::fs_copy(params.boot);
+        let rebuilt = params.boot == protocol::BootCopy::Rebuilt;
         let number = {
             let mut ranges = lock(&self.ranges);
             let existing = ranges.iter().position(|range| {
-                range.offset == params.offset && range.length == params.length && range.boot == boot
+                range.offset == params.offset
+                    && range.length == params.length
+                    && range.boot == boot
+                    && range.rebuilt == rebuilt
             });
             let index = match existing {
                 Some(index) => index,
@@ -239,6 +245,7 @@ impl Session {
                         offset: params.offset,
                         length: params.length,
                         boot,
+                        rebuilt,
                     });
                     ranges.len() - 1
                 }
@@ -248,28 +255,45 @@ impl Session {
                 .and_then(|index| RANGE_PARTITION_BASE.checked_add(index))
                 .ok_or_else(|| fs_error("分区编号溢出".to_owned()))?
         };
-        Ok(self.describe_volume(
-            number,
-            self.device.as_ref(),
-            params.offset,
-            params.length,
-            boot,
-        ))
+        let view = self.view(number, params.offset, params.length, rebuilt)?;
+        Ok(self.describe_volume(number, view.as_ref(), params.offset, params.length, boot))
     }
 
-    /// 分区 `number` 的偏移、长度，以及按哪一份引导扇区打开：表里的分区按会话指定的那一份，
-    /// 按位置打开的分区按打开时给的那一份。
-    fn locate(&self, number: u32) -> Option<(u64, u64, BootCopy)> {
+    /// 打开卷用的设备：按推算的引导扇区打开的分区换成叠加视图（[`boot_check::boot_view`]），其余就是源设备。
+    fn view(
+        &self,
+        number: u32,
+        offset: u64,
+        length: u64,
+        rebuilt: bool,
+    ) -> Result<Arc<dyn BlockDevice>, ErrorObject> {
+        if !rebuilt {
+            return Ok(Arc::clone(&self.device));
+        }
+        boot_check::boot_view(
+            Arc::clone(&self.device),
+            protocol::BootCopy::Rebuilt,
+            Some(PartitionRef {
+                number,
+                offset,
+                length,
+            }),
+        )
+    }
+
+    /// 分区 `number` 的偏移、长度，按哪一份引导扇区打开，以及是否按推算的引导扇区打开：表里的分区按会话指定的
+    /// 那一份（推算的已在会话的设备上换好），按位置打开的分区按打开时给的。
+    fn locate(&self, number: u32) -> Option<(u64, u64, BootCopy, bool)> {
         if let Some(index) = number.checked_sub(RANGE_PARTITION_BASE) {
             let ranges = lock(&self.ranges);
             let range = ranges.get(usize::try_from(index).ok()?)?;
-            return Some((range.offset, range.length, range.boot));
+            return Some((range.offset, range.length, range.boot, range.rebuilt));
         }
         self.table
             .partitions
             .iter()
             .find(|partition| partition.number == number)
-            .map(|partition| (partition.offset, partition.length, self.boot))
+            .map(|partition| (partition.offset, partition.length, self.boot, false))
     }
 
     /// 打开（或取出已打开的）分区 `number` 上的卷。
@@ -277,10 +301,11 @@ impl Session {
         if let Some(volume) = lock(&self.volumes).get(&number) {
             return Ok(Arc::clone(volume));
         }
-        let (offset, length, boot) = self
+        let (offset, length, boot, rebuilt) = self
             .locate(number)
             .ok_or_else(|| fs_error(format!("没有分区 {number}")))?;
-        let volume = Volume::open_with(Arc::clone(&self.device), offset, length, boot)
+        let view = self.view(number, offset, length, rebuilt)?;
+        let volume = Volume::open_with(view, offset, length, boot)
             .map_err(|error| fs_error(error_chain(&error)))?;
         let volume = Arc::new(volume);
         lock(&self.volumes).insert(number, Arc::clone(&volume));
@@ -288,7 +313,7 @@ impl Session {
     }
 
     fn partition_offset(&self, number: u32) -> u64 {
-        self.locate(number).map_or(0, |(offset, _, _)| offset)
+        self.locate(number).map_or(0, |(offset, ..)| offset)
     }
 
     pub fn list(&self, params: &ListFilesParams) -> Result<FileListPage, ErrorObject> {

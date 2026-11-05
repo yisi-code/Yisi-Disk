@@ -56,7 +56,10 @@ impl FileFormat for Sqlite {
 
     fn header_check(&self, block: &[u8]) -> Option<Box<dyn Recovering>> {
         let length = database_length(block)?;
-        Some(Box::new(Walker::new(INFO.max_size, KnownLength(length))))
+        Some(Box::new(Walker::new(
+            INFO.max_size,
+            KnownLength::new(length),
+        )))
     }
 }
 

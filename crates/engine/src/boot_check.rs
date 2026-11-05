@@ -10,6 +10,7 @@ use yisi_engine::protocol::{
     BootSectorPlan, DeviceIdentity, PartitionBoot, PartitionRef, RebuiltBoot, WritePlan,
 };
 use yisi_io::BlockDevice;
+use yisi_part::{Partition, PartitionKind};
 use yisi_repair::boot::{self, CopyReport, Issue, PartitionReport, TableIssue, Verdict};
 use yisi_repair::boot_fix::{self, BootFixError};
 use yisi_repair::boot_rebuild::{self, RebuildError};
@@ -113,8 +114,8 @@ pub fn fs_copy(copy: BootCopy) -> yisi_fs::BootCopy {
     }
 }
 
-/// 打开卷要用的设备：按重建的引导扇区（`Rebuilt`）时，把分区表里主备都坏了的分区（`only` 给了时只换这一个）
-/// 换成推算出的引导扇区的叠加视图，不写盘；其余情况原样返回。
+/// 打开卷要用的设备：按重建的引导扇区（`Rebuilt`）时，把分区表里主备都坏了的分区（`only` 给了时只换这一个；
+/// 它是按位置打开、不在表里的分区时就按它的位置）换成推算出的引导扇区的叠加视图，不写盘；其余情况原样返回。
 pub fn boot_view(
     device: Arc<dyn BlockDevice>,
     copy: BootCopy,
@@ -122,6 +123,19 @@ pub fn boot_view(
 ) -> Result<Arc<dyn BlockDevice>, ErrorObject> {
     if copy != BootCopy::Rebuilt {
         return Ok(device);
+    }
+    if let Some(wanted) = only.filter(PartitionRef::is_outside_table) {
+        let partition = Partition {
+            number: wanted.number,
+            offset: wanted.offset,
+            length: wanted.length,
+            kind: PartitionKind::Whole,
+        };
+        return Ok(boot_rebuild::overlay_rebuilt(
+            &device,
+            &[partition],
+            new_serial(),
+        ));
     }
     let table = yisi_part::read_table(device.as_ref()).map_err(|error| {
         ErrorObject::new(

@@ -1,5 +1,6 @@
 //! 文件系统一致性检查（任务，只读）：核对分区还在原处，逐阶段检查、报进度，可以暂停、取消，结果是问题清单。
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use yisi_engine::protocol::{FsCheckReport, FsIssue, FsIssueTotals, PartitionRef};
@@ -29,7 +30,7 @@ impl Control for JobControl<'_> {
 }
 
 pub fn run(
-    device: &dyn BlockDevice,
+    device: &Arc<dyn BlockDevice>,
     partition: PartitionRef,
     context: &JobContext,
 ) -> Result<JobOutcome, String> {

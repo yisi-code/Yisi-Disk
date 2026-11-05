@@ -139,6 +139,32 @@ pub enum IssueKind {
     MftInvalid,
     /// NTFS：`$MFTMirr` 与 `$MFT` 的前几条记录不一致（`count` 条）。
     MftMirrorMismatch,
+    /// NTFS：`count` 条 MFT 记录读不出。
+    MftRecordsUnreadable,
+    /// NTFS：记录位图记为在用的第 `actual` 条记录坏了（签名、更新序列或记录头不对）。
+    MftRecordDamaged,
+    /// NTFS：`path` 的记录在用，记录位图里却是空闲的，这条记录可能被分给新文件。
+    RecordNotInMftBitmap,
+    /// NTFS：记录位图记为在用、记录却没在用的有 `count` 条。
+    RecordsMarkedFree,
+    /// NTFS：`path` 的上级目录已不存在（不在用、不是目录或换了别的文件）。
+    NtfsOrphan,
+    /// NTFS：目录索引里的 `path` 指向已删除或已换了别的文件的记录。
+    IndexEntryStale,
+    /// NTFS：`path` 不在上级目录的索引里，浏览时看不到。
+    MissingFromIndex,
+    /// NTFS：目录 `path` 的索引读不出或坏了。
+    IndexUnreadable,
+    /// NTFS：`path` 的运行表解不开或指到卷外。
+    RunsInvalid,
+    /// NTFS：`path` 与 `other_path` 共用从 `cluster` 起的 `count` 个簇。
+    NtfsCrossLink,
+    /// NTFS：`path` 用到的 `count` 个簇（从 `cluster` 起）在 `$Bitmap` 里是空闲的。
+    NtfsNotInBitmap,
+    /// NTFS：`$Bitmap` 里有 `count` 个簇已占用、没有文件用到，分散在 `actual` 处，第一处从 `cluster` 起。
+    NtfsLostClusters,
+    /// NTFS：`$Bitmap` 有读不出的部分，那些簇没有核对。
+    NtfsBitmapUnreadable,
 }
 
 impl IssueKind {
@@ -185,6 +211,19 @@ impl IssueKind {
             Self::MftOutOfRange => "mftOutOfRange",
             Self::MftInvalid => "mftInvalid",
             Self::MftMirrorMismatch => "mftMirrorMismatch",
+            Self::MftRecordsUnreadable => "mftRecordsUnreadable",
+            Self::MftRecordDamaged => "mftRecordDamaged",
+            Self::RecordNotInMftBitmap => "recordNotInMftBitmap",
+            Self::RecordsMarkedFree => "recordsMarkedFree",
+            Self::NtfsOrphan => "ntfsOrphan",
+            Self::IndexEntryStale => "indexEntryStale",
+            Self::MissingFromIndex => "missingFromIndex",
+            Self::IndexUnreadable => "indexUnreadable",
+            Self::RunsInvalid => "runsInvalid",
+            Self::NtfsCrossLink => "ntfsCrossLink",
+            Self::NtfsNotInBitmap => "ntfsNotInBitmap",
+            Self::NtfsLostClusters => "ntfsLostClusters",
+            Self::NtfsBitmapUnreadable => "ntfsBitmapUnreadable",
         }
     }
 
@@ -203,7 +242,13 @@ impl IssueKind {
             | Self::NotInBitmap
             | Self::Unreadable
             | Self::MftOutOfRange
-            | Self::MftInvalid => Severity::DataLoss,
+            | Self::MftInvalid
+            | Self::MftRecordsUnreadable
+            | Self::MftRecordDamaged
+            | Self::RecordNotInMftBitmap
+            | Self::RunsInvalid
+            | Self::NtfsCrossLink
+            | Self::NtfsNotInBitmap => Severity::DataLoss,
             Self::BootInvalid
             | Self::BootChecksum
             | Self::BackupBootInvalid
@@ -223,14 +268,21 @@ impl IssueKind {
             | Self::LfnChecksum
             | Self::LfnOrder
             | Self::DotEntries
-            | Self::MftMirrorMismatch => Severity::Structure,
+            | Self::MftMirrorMismatch
+            | Self::NtfsOrphan
+            | Self::IndexEntryStale
+            | Self::MissingFromIndex
+            | Self::IndexUnreadable
+            | Self::NtfsBitmapUnreadable => Severity::Structure,
             Self::BackupBootMismatch
             | Self::BootNote
             | Self::VolumeDirty
             | Self::FsInfoInvalid
             | Self::FatMediaMismatch
             | Self::BadClustersMarked
-            | Self::TooDeep => Severity::Minor,
+            | Self::TooDeep
+            | Self::RecordsMarkedFree
+            | Self::NtfsLostClusters => Severity::Minor,
         }
     }
 }
@@ -347,6 +399,17 @@ impl Issues {
         } else {
             self.omitted = self.omitted.saturating_add(1);
         }
+    }
+
+    /// 另有 `count` 个 `kind` 的问题，没有逐个交出（核对时只列了前面一部分）：只计数。
+    pub fn count_unlisted(&mut self, kind: IssueKind, count: u64) {
+        let total = match kind.severity() {
+            Severity::DataLoss => &mut self.totals.data_loss,
+            Severity::Structure => &mut self.totals.structure,
+            Severity::Minor => &mut self.totals.minor,
+        };
+        *total = total.saturating_add(count);
+        self.omitted = self.omitted.saturating_add(count);
     }
 
     pub fn finish(self) -> (Vec<Issue>, u64, Totals) {

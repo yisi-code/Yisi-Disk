@@ -331,7 +331,8 @@ export interface FoundPartition {
   filesystem: string
   label: string | null
   /** 靠哪个引导扇区找到：primary（分区开头的）、backup（主引导扇区已坏，靠备份）、both */
-  foundBy: 'primary' | 'backup' | 'both'
+  /** structure：主备引导扇区都没了，按主文件表的结构找到（只有 NTFS），只能浏览、复制 */
+  foundBy: 'primary' | 'backup' | 'both' | 'structure'
   /** 浏览、复制时按哪一份引导扇区打开（只靠备份找到的为 backup）；原样传给 openBrowseRange 与 startCopy */
   boot: BootCopy
   /** 卷超出了源的末尾，长度已截短 */
@@ -424,8 +425,11 @@ export interface ReadScanReport {
   fineReadTruncated: boolean
 }
 
-/** 扇区图一格：都读出了、读出了但有一次超过 2 秒、有读不出的扇区、整格读不出 */
-export type ReadMapCell = 'good' | 'slow' | 'partly' | 'unreadable'
+/**
+ * 扇区图一格：都读出了、读出了但有一次超过 2 秒、有读不出的扇区、整格读不出；
+ * 制作镜像另有整格没读、读了一部分（其余没读或待修边、细读）
+ */
+export type ReadMapCell = 'good' | 'slow' | 'partly' | 'unreadable' | 'untried' | 'pending'
 
 /** 制作镜像的读取轮次：复制、修边、细读 */
 export type ImagingRound = 'copy' | 'trim' | 'scrape'
@@ -448,6 +452,9 @@ export interface ImagingStatus {
   errorsInARow: number
   /** 连续读错到了要提示检查连接的次数（引擎判断） */
   checkConnection: boolean
+  /** 整个源的扇区图（按坏区图，含本次范围以外的），分格同坏道检测 */
+  map: ReadMapCell[]
+  mapCellBytes: number
 }
 
 /** 制作镜像的结果；字节数只算本次的范围，device* 是整个源的 */
@@ -473,6 +480,9 @@ export interface ImageSummary {
   /** 很久没有读成功，在这个偏移处停下；可以续做 */
   stalledAt: number | null
   elapsedMs: number
+  /** 整个源的扇区图，同 ImagingStatus.map */
+  map: ReadMapCell[]
+  mapCellBytes: number
 }
 
 /** 检查出的问题有多严重：会丢数据、结构错误、可以忽略 */

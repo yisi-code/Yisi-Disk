@@ -31,7 +31,9 @@ pub use entry::{ClusterRef, Entry, FileRef, Listing, Location, Moment, Stamp, St
 /// FAT 短文件名的长文件名校验和与显示形式。文件系统检查（`yisi-repair`）用的也是这一份。
 pub use fat::{short_checksum as fat_short_checksum, short_display as fat_short_display};
 pub use ntfs::{
-    NamedStream, mft_record_layout, mft_record_ok, mft_self_record_ok, root_index_block_size,
+    AuditStage as NtfsAuditStage, Listed, NamedStream, NtfsAudit, SharedClusters, UnmarkedClusters,
+    audit_ntfs, mft_bad_clusters_length, mft_record_layout, mft_record_ok, mft_self_record_ok,
+    root_index_block_size,
 };
 pub use reader::FileReader;
 pub use region::Region;

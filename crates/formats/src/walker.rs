@@ -287,15 +287,63 @@ impl<T> ReadQueue<T> {
 }
 
 /// 文件头里就写明了总长度的格式（BMP、SQLite 等）：不用再看后面的内容，按这个长度取数据。
-pub(crate) struct KnownLength(pub u64);
+/// 文件头同时说明了该存成哪个扩展名的（PST 与 OST、WOFF 与 WOFF2），一并带上。
+pub(crate) struct KnownLength {
+    length: u64,
+    extension: Option<&'static str>,
+}
+
+impl KnownLength {
+    pub(crate) fn new(length: u64) -> Self {
+        Self {
+            length,
+            extension: None,
+        }
+    }
+
+    /// 见 [`Recovering::extension`]。
+    pub(crate) fn with_extension(self, extension: Option<&'static str>) -> Self {
+        Self { extension, ..self }
+    }
+}
 
 impl Structure for KnownLength {
     fn first(&self) -> Step {
-        Step::Done(self.0)
+        Step::Done(self.length)
     }
 
     fn step(&mut self, _event: Event<'_>) -> Step {
         Step::Invalid
+    }
+
+    fn extension(&self) -> Option<&'static str> {
+        self.extension
+    }
+}
+
+/// 总长度在文件头里就能算出来、另有一处可以核对的格式（CAB 的第一个文件项、RAF 的 JPEG 预览、
+/// EVTX 的最后一块、注册表的第一个 hive bin、图元文件的结束记录）：先读 `at` 起的 `len` 字节交给 `check`，
+/// 通过了文件就到 `length`，否则不认。
+pub(crate) struct CheckedLength<F> {
+    pub at: u64,
+    pub len: usize,
+    pub check: F,
+    pub length: u64,
+}
+
+impl<F: Fn(&[u8]) -> bool + Send> Structure for CheckedLength<F> {
+    fn first(&self) -> Step {
+        Step::Need {
+            at: self.at,
+            len: self.len,
+        }
+    }
+
+    fn step(&mut self, event: Event<'_>) -> Step {
+        match event {
+            Event::Bytes { bytes, .. } if (self.check)(bytes) => Step::Done(self.length),
+            _ => Step::Invalid,
+        }
     }
 }
 
@@ -339,6 +387,7 @@ pub(crate) mod tests {
     }
 
     /// 同 [`run`]，读完后 `recovering` 留给调用方（再问它按内容定的扩展名）。
+    /// 给出的长度超过数据末尾时同深度恢复在设备末尾的处理：不完整。
     pub(crate) fn run_keeping(
         recovering: &mut Box<dyn Recovering>,
         data: &[u8],
@@ -348,7 +397,9 @@ pub(crate) mod tests {
         for block in data.chunks(block_size) {
             match recovering.data_check(offset, block) {
                 DataCheck::Continue => {}
-                DataCheck::Complete(length) => return Some(length),
+                DataCheck::Complete(length) => {
+                    return (length <= data.len() as u64).then_some(length);
+                }
                 DataCheck::Invalid => return None,
             }
             offset += block.len() as u64;
@@ -484,9 +535,9 @@ pub(crate) mod tests {
 
     #[test]
     fn lengths_and_positions_beyond_the_format_maximum_are_invalid() {
-        let mut fits = Walker::new(100, KnownLength(100));
+        let mut fits = Walker::new(100, KnownLength::new(100));
         assert_eq!(fits.data_check(0, &[0; 8]), DataCheck::Complete(100));
-        let mut too_long = Walker::new(100, KnownLength(101));
+        let mut too_long = Walker::new(100, KnownLength::new(101));
         assert_eq!(too_long.data_check(0, &[0; 8]), DataCheck::Invalid);
         // 第一步就要读上限之外的位置
         let far = Walker::new(3, LengthThenMarker { phase: 0 });

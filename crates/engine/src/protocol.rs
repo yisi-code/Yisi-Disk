@@ -321,7 +321,7 @@ pub const MAX_UNREADABLE_RANGES: usize = 1000;
 /// 扇区图最多这么多格；设备小于这么多 MiB 时一格 1 MiB。
 pub const READ_MAP_CELLS: usize = 1024;
 
-/// 扇区图一格的状态。
+/// 扇区图一格的状态。坏道检测只用前四种；制作镜像不记读得慢，另有没读与没读完。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ReadMapCell {
@@ -333,6 +333,10 @@ pub enum ReadMapCell {
     Partly,
     /// 整格都读不出。
     Unreadable,
+    /// 整格还没读过。
+    Untried,
+    /// 读了一部分，其余还没读、待修边或待细读；没有读不出的。
+    Pending,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -802,9 +806,10 @@ pub struct FoundPartition {
     /// fat12、fat16、fat32、exfat、ntfs 之一。
     pub filesystem: String,
     pub label: Option<String>,
-    /// 靠哪个引导扇区找到：primary（分区开头的主引导扇区）、backup（主引导扇区已坏，靠备份）、both。
+    /// 靠什么找到：primary（分区开头的主引导扇区）、backup（主引导扇区已坏，靠备份）、both、
+    /// structure（主备引导扇区都没了，按 `$MFT` 与 `$MFTMirr` 的结构找到，只有 NTFS；长度按卷的簇数算，只能浏览、复制）。
     pub found_by: String,
-    /// 浏览、复制时按哪一份引导扇区打开（只靠备份找到的为 backup）；原样传给 [`OPEN_RANGE`] 与 [`COPY_FILES`]。
+    /// 浏览、复制时按哪一份引导扇区打开（只靠备份找到的为 backup，按结构找到的为 rebuilt）；原样传给 [`OPEN_RANGE`] 与 [`COPY_FILES`]。
     pub boot: BootCopy,
     /// 卷超出了设备末尾，长度已截短。
     pub truncated: bool,
@@ -925,6 +930,11 @@ pub struct JobImaging {
     /// 连续读错到了要提示检查连接的次数（[`ERRORS_IN_A_ROW_NOTICE`]）。
     #[serde(default)]
     pub check_connection: bool,
+    /// 整个源的扇区图（按坏区图，含本次范围以外的），格子的分法与读取扫描相同。
+    #[serde(default)]
+    pub map: Vec<ReadMapCell>,
+    #[serde(default)]
+    pub map_cell_bytes: u64,
 }
 
 /// 制作镜像时连续读错这么多次，提示检查数据线与供电。
@@ -960,6 +970,11 @@ pub struct ImageSummary {
     pub stalled_at: Option<u64>,
     /// 本次运行的用时。
     pub elapsed_ms: u64,
+    /// 整个源的扇区图，同 [`JobImaging::map`]。
+    #[serde(default)]
+    pub map: Vec<ReadMapCell>,
+    #[serde(default)]
+    pub map_cell_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

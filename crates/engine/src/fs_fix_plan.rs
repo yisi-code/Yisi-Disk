@@ -80,7 +80,7 @@ pub fn rate(
 
 /// 分区里的丢失簇；一个也没有时拒绝（没有可以另存的）。
 pub fn lost(
-    device: &dyn BlockDevice,
+    device: &Arc<dyn BlockDevice>,
     partition: PartitionRef,
 ) -> Result<LostClusters, ErrorObject> {
     let lost = fs_fix::lost_clusters(device, partition.offset, partition.length).map_err(error)?;
@@ -95,7 +95,7 @@ pub fn lost(
 
 /// 分区里的空闲簇（读一遍找坏簇）。
 pub fn free(
-    device: &dyn BlockDevice,
+    device: &Arc<dyn BlockDevice>,
     partition: PartitionRef,
 ) -> Result<LostClusters, ErrorObject> {
     fs_fix::free_clusters(device, partition.offset, partition.length).map_err(error)

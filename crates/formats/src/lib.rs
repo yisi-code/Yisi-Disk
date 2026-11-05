@@ -2,23 +2,41 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
+mod asf;
 mod bmp;
+mod cab;
+mod chm;
+mod evtx;
+mod flv;
+mod font;
 mod gif;
+mod ico;
+mod iff;
 mod jpg;
+mod metafile;
+mod midi;
 mod mkv;
 mod mp3;
 mod mp4;
+mod ogg;
 mod ole;
 mod pdf;
+mod pe;
 mod plugin;
 mod png;
+mod psd;
+mod pst;
+mod raf;
 mod rar;
+mod regf;
 mod registry;
 mod riff;
 #[cfg(any(test, feature = "test-samples"))]
 pub mod samples;
 mod sevenzip;
 mod sqlite;
+mod swf;
+mod tar;
 mod tiff;
 mod walker;
 mod zip;
@@ -85,6 +103,34 @@ mod robustness {
             samples::rar5(&[100, 30]),
             samples::rar4(&[60, 10], false),
             samples::sqlite(1024, 2),
+            samples::ogg(&[b"\x80theora", b"\x01vorbis"], 3, 2),
+            samples::iff(b"", b"AIFF", &[(b"COMM", 18), (b"SSND", 200)]),
+            samples::iff(b"AT&T", b"DJVM", &[(b"DIRM", 30), (b"FORM", 90)]),
+            samples::midi(&[40, 7], true),
+            samples::flv(5),
+            samples::asf(true, 300),
+            samples::cab(3, 200),
+            samples::tar(&[("a.txt", 10), ("b.bin", 700)], false, false),
+            samples::pe(&samples::PeLayout {
+                certificate: 64,
+                symbols: Some((4, 30)),
+                ..samples::PeLayout::default()
+            }),
+            samples::sfnt(b"OTTO", &[(b"CFF ", 300), (b"head", 54)]),
+            samples::ttc(2, true),
+            samples::woff(false, 300),
+            samples::woff(true, 300),
+            samples::ico(&[(true, 100), (false, 60)], false),
+            samples::psd(&samples::PsdLayout {
+                rle: true,
+                ..samples::PsdLayout::default()
+            }),
+            samples::pst(true, false, 1000),
+            samples::swf(&[5, 70, 0]),
+            samples::raf(200, 300),
+            samples::chm(3, 100),
+            samples::emf(2, 4),
+            samples::wmf(true, 3),
             samples::zip_with(
                 &[(
                     "mimetype",
@@ -112,6 +158,27 @@ mod robustness {
             let extra = 1 + noise.next_u64() as usize % 2000;
             random.extend(noise.bytes(extra));
             exercise(&registry, &random, &mut noise);
+        }
+    }
+
+    /// 每个格式的每个签名放在随机数据里：结构核对要把它排除掉，不能当成一个完整的文件。
+    #[test]
+    fn signatures_inside_random_bytes_are_not_reported_as_files() {
+        let registry = Registry::builtin();
+        let all = vec![true; registry.formats().len()];
+        let mut noise = Noise::new(7);
+        for format in registry.formats() {
+            for signature in format.signatures() {
+                for _ in 0..200 {
+                    let mut data = noise.bytes(16 * 1024);
+                    let at = usize::from(signature.offset);
+                    data[at..at + signature.bytes.len()].copy_from_slice(signature.bytes);
+                    if let Some(found) = registry.match_header(&data, &all) {
+                        let extension = registry.formats()[found.format].info().extension;
+                        assert_eq!(run(found.recovering, &data, 512), None, "{extension}");
+                    }
+                }
+            }
         }
     }
 

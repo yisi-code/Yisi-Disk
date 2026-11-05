@@ -1,8 +1,9 @@
-//! NTFS 只做有把握的几项：引导扇区的参数、备份引导扇区（分区最后一个扇区）、`$MFT` 与 `$MFTMirr` 的位置、
-//! `$MFT` 第一条记录、`$MFTMirr` 与 `$MFT` 前几条记录是否一致。
+//! NTFS：引导扇区的参数、备份引导扇区（分区最后一个扇区）、`$MFT` 与 `$MFTMirr` 的位置、
+//! `$MFT` 第一条记录、`$MFTMirr` 与 `$MFT` 前几条记录是否一致；之后按 [`audit_ntfs`] 读一遍卷，
+//! 核对每条记录、记录位图、上级目录、目录索引与簇的分配（规则在 `yisi_fs`，这里只换成问题）。
 
 use yisi_fs::bpb::{self, NtfsBpb as Geometry, Problem};
-use yisi_fs::{FsKind, mft_self_record_ok};
+use yisi_fs::{FsKind, Listed, NtfsAudit, NtfsAuditStage, audit_ntfs, mft_self_record_ok};
 
 use crate::check::issue::{Area, Issue, IssueKind};
 use crate::check::{CheckItem, Ctx, Stage, Summary, check_backup};
@@ -43,7 +44,7 @@ pub(crate) fn check(ctx: &mut Ctx, sector: &[u8], from_backup: bool) -> Option<S
         check_backup(ctx, FsKind::Ntfs, sector);
     }
     let clusters = volume_bytes / geometry.cluster_size;
-    let summary = summary(FsKind::Ntfs, geometry.cluster_size, clusters);
+    let mut summary = summary(FsKind::Ntfs, geometry.cluster_size, clusters);
     if !ctx.control.checkpoint() {
         return None;
     }
@@ -52,6 +53,7 @@ pub(crate) fn check(ctx: &mut Ctx, sector: &[u8], from_backup: bool) -> Option<S
     ctx.control.progress(Stage::Mft, 0, 2);
     let Some(mft) = read_records(ctx, &geometry, geometry.mft_lcn, records, Area::Mft) else {
         ctx.skipped(CheckItem::MftMirror);
+        skip_audit(ctx);
         return Some(summary);
     };
     ctx.checked(CheckItem::Mft);
@@ -90,7 +92,145 @@ pub(crate) fn check(ctx: &mut Ctx, sector: &[u8], from_backup: bool) -> Option<S
         ctx.skipped(CheckItem::MftMirror);
     }
     ctx.control.progress(Stage::Mft, 2, 2);
+
+    let control = ctx.control;
+    let audited = audit_ntfs(ctx.region.clone(), sector, &mut |stage, done, total| {
+        let stage = match stage {
+            NtfsAuditStage::Records => Stage::Mft,
+            NtfsAuditStage::Indexes => Stage::Directories,
+            NtfsAuditStage::Clusters => Stage::Clusters,
+        };
+        control.progress(stage, done, total);
+        control.checkpoint()
+    });
+    match audited {
+        Ok(Some(audit)) => {
+            report_audit(ctx, &audit);
+            summary.files = audit.files;
+            summary.directories = audit.directories;
+            summary.used_clusters = audit.used_clusters;
+        }
+        Ok(None) => return None,
+        // 卷打不开（`$MFT` 自己的记录、根目录读不出）或记录太多：前面已报的问题之外不再往下核对
+        Err(_) => skip_audit(ctx),
+    }
     Some(summary)
+}
+
+/// 按结构核对的几项都没做。
+fn skip_audit(ctx: &mut Ctx) {
+    for item in [
+        CheckItem::MftRecords,
+        CheckItem::Indexes,
+        CheckItem::CrossLinks,
+        CheckItem::LostClusters,
+        CheckItem::Bitmap,
+    ] {
+        ctx.skipped(item);
+    }
+}
+
+/// 核对得出的事实换成问题。
+fn report_audit(ctx: &mut Ctx, audit: &NtfsAudit) {
+    ctx.checked(CheckItem::MftRecords);
+    ctx.checked(CheckItem::Indexes);
+    if audit.unreadable_records > 0 {
+        ctx.issues.push(
+            Issue::new(IssueKind::MftRecordsUnreadable)
+                .area(Area::Mft)
+                .count(audit.unreadable_records),
+        );
+    }
+    list(
+        ctx,
+        IssueKind::MftRecordDamaged,
+        &audit.damaged_records,
+        |issue, &record| issue.area(Area::Mft).actual(record),
+    );
+    list_paths(
+        ctx,
+        IssueKind::RecordNotInMftBitmap,
+        &audit.not_in_record_bitmap,
+    );
+    if audit.marked_free_records > 0 {
+        ctx.issues.push(
+            Issue::new(IssueKind::RecordsMarkedFree)
+                .area(Area::Mft)
+                .count(audit.marked_free_records),
+        );
+    }
+    list_paths(ctx, IssueKind::NtfsOrphan, &audit.orphans);
+    list_paths(ctx, IssueKind::IndexEntryStale, &audit.stale_index_entries);
+    list_paths(ctx, IssueKind::MissingFromIndex, &audit.missing_from_index);
+    list_paths(ctx, IssueKind::IndexUnreadable, &audit.unreadable_indexes);
+    list_paths(ctx, IssueKind::RunsInvalid, &audit.bad_runs);
+    if !audit.clusters_checked {
+        for item in [
+            CheckItem::CrossLinks,
+            CheckItem::LostClusters,
+            CheckItem::Bitmap,
+        ] {
+            ctx.skipped(item);
+        }
+        return;
+    }
+    for item in [
+        CheckItem::CrossLinks,
+        CheckItem::LostClusters,
+        CheckItem::Bitmap,
+    ] {
+        ctx.checked(item);
+    }
+    list(
+        ctx,
+        IssueKind::NtfsCrossLink,
+        &audit.shared,
+        |issue, shared| {
+            issue
+                .path(shared.path.clone())
+                .other_path(shared.other_path.clone())
+                .cluster(shared.first)
+                .count(shared.count)
+        },
+    );
+    list(
+        ctx,
+        IssueKind::NtfsNotInBitmap,
+        &audit.not_in_bitmap,
+        |issue, unmarked| {
+            issue
+                .area(Area::Bitmap)
+                .path(unmarked.path.clone())
+                .cluster(unmarked.first)
+                .count(unmarked.count)
+        },
+    );
+    if let Some(first) = audit.first_lost {
+        ctx.issues.push(
+            Issue::new(IssueKind::NtfsLostClusters)
+                .area(Area::Bitmap)
+                .cluster(first)
+                .count(audit.lost_clusters)
+                .actual(audit.lost_ranges),
+        );
+    }
+    if audit.bitmap_unreadable {
+        ctx.issues
+            .push(Issue::new(IssueKind::NtfsBitmapUnreadable).area(Area::Bitmap));
+    }
+}
+
+/// 列出的每项一个问题，没列出的只计数。
+fn list<T>(ctx: &mut Ctx, kind: IssueKind, listed: &Listed<T>, make: impl Fn(Issue, &T) -> Issue) {
+    for item in &listed.items {
+        ctx.issues.push(make(Issue::new(kind), item));
+    }
+    ctx.issues
+        .count_unlisted(kind, listed.total.saturating_sub(listed.items.len() as u64));
+}
+
+fn list_paths(ctx: &mut Ctx, kind: IssueKind, listed: &Listed<String>) {
+    list(ctx, kind, listed, |issue, path| issue.path(path.clone()));
 }
 
 fn summary(fs: FsKind, cluster_size: u64, cluster_count: u64) -> Summary {

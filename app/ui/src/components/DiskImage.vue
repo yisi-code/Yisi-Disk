@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import ImageHistoryList from './ImageHistoryList.vue'
 import ImageRegionPicker from './ImageRegionPicker.vue'
 import JobControls from './JobControls.vue'
+import ReadMap from './ReadMap.vue'
 import SourcePicker from './SourcePicker.vue'
 import UnreadableRanges from './UnreadableRanges.vue'
 import { useDiskImage } from '../composables/useDiskImage'
@@ -27,12 +28,15 @@ import {
   type ImageRegion,
   type ImagingTuning,
   type JobTarget,
+  type ReadMapCell,
 } from '../services/host'
 import { formatBytes, formatSeconds } from '../utils/format'
 import { joinPath } from '../utils/path'
 
 /** 报告里最多列出的读不出区段数；其余只计入总数 */
 const MAX_LISTED_RANGES = 20
+/** 镜像扇区图的图例：做镜像不记读得慢 */
+const IMAGE_MAP_STATES: ReadMapCell[] = ['good', 'pending', 'untried', 'partly', 'unreadable']
 /** 读取参数的可选值；不选（「默认」）时不传，用引擎的默认值 */
 const BLOCK_CHOICES = [64 << 10, 256 << 10, 1 << 20, 4 << 20, 8 << 20]
 const SKIP_CHOICES = [64 << 10, 1 << 20, 16 << 20]
@@ -896,6 +900,13 @@ function changeText(change: { kind: string; number: number; before: ByteRange | 
             </template>
           </template>
         </dl>
+        <ReadMap
+          v-if="imaging && !finishedSummary && imaging.map.length > 0 && current"
+          :cells="imaging.map"
+          :cell-bytes="imaging.mapCellBytes"
+          :size="current.size"
+          :states="IMAGE_MAP_STATES"
+        />
 
         <p
           v-if="isBusy && imaging?.checkConnection"
@@ -987,6 +998,14 @@ function changeText(change: { kind: string; number: number; before: ByteRange | 
           <dt>{{ t('diskImage.result.mapPath') }}</dt>
           <dd class="wizard__path-text">{{ finishedSummary.mapPath }}</dd>
         </dl>
+
+        <ReadMap
+          v-if="finishedSummary.map.length > 0"
+          :cells="finishedSummary.map"
+          :cell-bytes="finishedSummary.mapCellBytes"
+          :size="finishedSummary.deviceSize"
+          :states="IMAGE_MAP_STATES"
+        />
 
         <p v-if="finishedSummary.copyOnly && finishedSummary.unfinishedBytes > 0" class="wizard__hint wizard__hint--warning">
           {{ t('diskImage.result.copyOnlyLeft', { left: formatBytes(finishedSummary.unfinishedBytes) }) }}

@@ -109,8 +109,8 @@ pub fn scan(device: &dyn BlockDevice, control: &dyn ScanControl) -> Option<ReadS
     Some(report)
 }
 
-/// 扇区图一格多大：整 MiB，格数不超过 [`READ_MAP_CELLS`]。
-fn map_cell_bytes(size: u64) -> u64 {
+/// 扇区图一格多大：整 MiB，格数不超过 [`READ_MAP_CELLS`]。制作镜像的扇区图也按它分格。
+pub(crate) fn map_cell_bytes(size: u64) -> u64 {
     let block = SCAN_BLOCK as u64;
     size.div_ceil(READ_MAP_CELLS as u64).div_ceil(block).max(1) * block
 }

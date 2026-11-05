@@ -1,4 +1,5 @@
-//! 文件系统一致性检查（只读）：exFAT、FAT12/16/32 做完整检查，NTFS 只查引导扇区与 `$MFT` 的位置。
+//! 文件系统一致性检查（只读）：exFAT、FAT12/16/32 做完整检查；NTFS 查引导扇区、`$MFT` 与 `$MFTMirr`，
+//! 再按 [`yisi_fs::audit_ntfs`] 核对记录、目录索引与簇的分配。
 //!
 //! 只读源盘，输出问题清单：每项有类型、严重程度、涉及的路径或簇，界面据此给出说明与以后的修法。
 //! 读不出的扇区记成问题、补 0 继续，不中断检查。依据微软公开的 exFAT 与 FAT 文件系统规范。
@@ -13,11 +14,13 @@ mod table;
 #[cfg(test)]
 mod tests;
 
-use yisi_fs::FsKind;
+use std::sync::Arc;
+
 use yisi_fs::boot::{BackupFamily, backup_candidates, backup_kind, remnant_kind, usable_kind};
 use yisi_fs::boot_write::EXFAT_BOOT_REGION_SECTORS;
 use yisi_fs::bpb::{self, Problem, Rule};
 use yisi_fs::format::{FatWidth, Run};
+use yisi_fs::{FsKind, Region};
 use yisi_io::BlockDevice;
 
 pub use issue::{Area, Issue, IssueKind, Severity, Totals};
@@ -39,7 +42,7 @@ pub enum Stage {
     Directories,
     /// 逐簇汇总：丢失簇、分配位图与占用是否一致；单位是簇。
     Clusters,
-    /// NTFS 的 `$MFT` 与 `$MFTMirr`；单位是记录。
+    /// NTFS 的 `$MFT` 与 `$MFTMirr`，以及逐条读 MFT 记录；单位是记录。
     Mft,
 }
 
@@ -90,6 +93,10 @@ pub enum CheckItem {
     Mft,
     /// NTFS `$MFTMirr` 与 `$MFT` 前几条记录是否一致。
     MftMirror,
+    /// NTFS 每条 MFT 记录、记录位图、文件的上级目录。
+    MftRecords,
+    /// NTFS 目录索引：项指向的记录、文件在不在上级目录的索引里。
+    Indexes,
 }
 
 impl CheckItem {
@@ -107,6 +114,8 @@ impl CheckItem {
             Self::Upcase => "upcase",
             Self::Mft => "mft",
             Self::MftMirror => "mftMirror",
+            Self::MftRecords => "mftRecords",
+            Self::Indexes => "indexes",
         }
     }
 }
@@ -302,7 +311,7 @@ pub struct LongChain {
 
 /// 检查设备上 `offset` 起 `length` 字节的分区。被取消时返回 `None`。
 pub fn check(
-    device: &dyn BlockDevice,
+    device: &Arc<dyn BlockDevice>,
     offset: u64,
     length: u64,
     control: &dyn Control,
@@ -312,13 +321,14 @@ pub fn check(
 
 /// 同 [`check`]，另外交出修复要用的结论。
 pub fn check_for_repair(
-    device: &dyn BlockDevice,
+    device: &Arc<dyn BlockDevice>,
     offset: u64,
     length: u64,
     control: &dyn Control,
 ) -> Option<(Report, Findings)> {
     let mut ctx = Ctx {
-        disk: Disk::new(device, offset, length),
+        disk: Disk::new(device.as_ref(), offset, length),
+        region: Region::new(Arc::clone(device), offset, length),
         issues: Issues::default(),
         control,
         checked: Vec::new(),
@@ -404,6 +414,8 @@ impl Summary {
 /// 检查时共用的状态：只读视图、问题清单、暂停与取消。
 pub(crate) struct Ctx<'a> {
     pub disk: Disk<'a>,
+    /// 同一个分区，给 [`yisi_fs`] 里按结构读卷的核对用（读不出时它自己处理，不记进 `disk`）。
+    pub region: Region,
     pub issues: Issues,
     pub control: &'a dyn Control,
     pub checked: Vec<CheckItem>,

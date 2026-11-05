@@ -90,7 +90,7 @@ fn agree(name: &str, image: Vec<u8>, usable: fn(&[u8]) -> bool, rounds: u32) {
         );
 
         // 主引导扇区不能用时，检查要么认不出，要么改按备份（并记下认不出主引导扇区）
-        let report = check::check(device.as_ref(), 0, length, &Quiet).unwrap();
+        let report = check::check(&device, 0, length, &Quiet).unwrap();
         let primary_used = report.fs != FsKind::Unknown
             && !report
                 .issues
@@ -142,7 +142,7 @@ fn agree_on_backup(name: &str, image: Vec<u8>, at: usize, rounds: u32) {
             .backup
             .as_ref()
             .is_some_and(|backup| backup.is_valid());
-        let report = check::check(device.as_ref(), 0, length, &Quiet).unwrap();
+        let report = check::check(&device, 0, length, &Quiet).unwrap();
         let backup_invalid = report
             .issues
             .iter()
