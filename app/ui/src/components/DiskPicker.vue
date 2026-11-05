@@ -92,14 +92,14 @@ function tags(disk: DiskSummary): string[] {
   <fieldset class="wizard__choices" :disabled="disabled">
     <legend class="disk-picker__legend">{{ t('disk.legend') }}</legend>
 
-    <p v-if="loadError" class="disk-picker__error" role="alert">
+    <p v-if="loadError" class="disk-picker__error wizard__error" role="alert">
       {{ formatHostError(loadError) }}
     </p>
-    <p v-else-if="isLoading && disks.length === 0" class="disk-picker__note">
+    <p v-else-if="isLoading && disks.length === 0" class="disk-picker__note wizard__note">
       {{ t('disk.loading') }}
     </p>
-    <p v-else-if="disks.length === 0" class="disk-picker__note">{{ t('disk.empty') }}</p>
-    <p v-else class="disk-picker__note">{{ t('disk.chooseHint') }}</p>
+    <p v-else-if="disks.length === 0" class="disk-picker__note wizard__note">{{ t('disk.empty') }}</p>
+    <p v-else class="disk-picker__note wizard__note">{{ t('disk.chooseHint') }}</p>
 
     <section v-for="group in groups" :key="group.key" class="disk-picker__group">
       <h4 class="disk-picker__group-title">
@@ -205,15 +205,13 @@ function tags(disk: DiskSummary): string[] {
   color: var(--color-text-muted);
 }
 
+/* 与 wizard__note / wizard__error 只差上下留白；其余来自 wizard.css */
 .disk-picker__note {
   margin: var(--space-xs) 0;
-  color: var(--color-text-muted);
-  font-size: var(--font-size-small);
 }
 
 .disk-picker__error {
   margin: var(--space-xs) 0;
-  color: var(--color-danger);
 }
 
 .disk-picker__group + .disk-picker__group {

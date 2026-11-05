@@ -27,13 +27,14 @@ use std::sync::Arc;
 use yisi_io::{BlockDevice, IoError};
 
 pub use boot::{BootCopy, BootLayout, BootSector, inspect_boot};
-pub use entry::{ClusterRef, Entry, FileRef, Listing, Location, State, Unsupported};
+pub use entry::{ClusterRef, Entry, FileRef, Listing, Location, Moment, Stamp, State, Unsupported};
 /// FAT 短文件名的长文件名校验和与显示形式。文件系统检查（`yisi-repair`）用的也是这一份。
 pub use fat::{short_checksum as fat_short_checksum, short_display as fat_short_display};
-pub use ntfs::{mft_record_layout, mft_record_ok, mft_self_record_ok, root_index_block_size};
+pub use ntfs::{
+    NamedStream, mft_record_layout, mft_record_ok, mft_self_record_ok, root_index_block_size,
+};
 pub use reader::FileReader;
-
-use crate::region::Region;
+pub use region::Region;
 
 /// 一个目录最多读这么多字节（FAT 规范的上限是 2 MiB，exFAT 是 256 MiB），挡住构造出来的超长目录。
 pub(crate) const MAX_DIR_BYTES: u64 = 64 << 20;
@@ -262,6 +263,22 @@ impl Volume {
             Inner::Fat(fat) => fat.open_file(file),
             Inner::Exfat(exfat) => exfat.open_file(file),
             Inner::Ntfs(ntfs) => ntfs.open_file(file),
+        }
+    }
+
+    /// 文件的备用数据流（只有 NTFS 有，其他文件系统为空）。
+    pub fn streams(&self, file: &FileRef) -> Result<Vec<NamedStream>, FsError> {
+        match &self.inner {
+            Inner::Ntfs(ntfs) => ntfs.streams(file),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// 读文件的一个备用数据流。
+    pub fn open_stream(&self, file: &FileRef, name: &str) -> Result<FileReader, FsError> {
+        match &self.inner {
+            Inner::Ntfs(ntfs) => ntfs.open_stream(file, name),
+            _ => Err(FsError::BadRef),
         }
     }
 }

@@ -15,7 +15,41 @@ pub enum FatWidth {
     Exfat,
 }
 
+/// 目录项的大小（FAT 与 exFAT 都是 32 字节）。
+pub const DIR_ENTRY_SIZE: usize = 32;
+/// FAT 目录项：已删除项的首字节；属性里的卷标位、目录位；长文件名项的属性（只读、隐藏、系统、卷标四位全为 1）。
+/// exFAT 文件项的属性同样第 4 位表示目录。
+pub const FAT_DELETED: u8 = 0xE5;
+pub const ATTR_VOLUME_ID: u8 = 0x08;
+pub const ATTR_DIRECTORY: u8 = 0x10;
+pub const ATTR_LONG_NAME: u8 = 0x0F;
+/// exFAT 引导扇区里卷标志的位置（16 位）；第 1 位「未正常卸下」，第 2 位「出过介质故障」。
+pub const EXFAT_VOLUME_FLAGS_AT: usize = 106;
+pub const EXFAT_FLAG_DIRTY: u16 = 0x02;
+pub const EXFAT_FLAG_MEDIA_FAILURE: u16 = 0x04;
+
+/// 介质描述符的规则在最底层（认分区表也要用）。
+pub use yisi_part::boot_sector::fat_media_byte_ok;
+
 impl FatWidth {
+    /// 第 1 项里「正常卸下」的位（FAT16 第 15 位、FAT32 第 27 位，为 1 表示正常卸下）与「没出过读写错误」的位
+    /// （FAT16 第 14 位、FAT32 第 26 位）；FAT12 与 exFAT 没有，为 0。检查读它，修复写它。
+    pub fn clean_shutdown_bit(self) -> u32 {
+        match self {
+            Self::Fat16 => 0x8000,
+            Self::Fat32 => 0x0800_0000,
+            Self::Fat12 | Self::Exfat => 0,
+        }
+    }
+
+    pub fn no_error_bit(self) -> u32 {
+        match self {
+            Self::Fat16 => 0x4000,
+            Self::Fat32 => 0x0400_0000,
+            Self::Fat12 | Self::Exfat => 0,
+        }
+    }
+
     /// 每个表项的位数。
     pub fn bits(self) -> u64 {
         match self {
@@ -152,12 +186,7 @@ pub fn is_cluster(cluster: u32, count: u32) -> bool {
 
 /// FAT 第 0 项：低 8 位是介质描述符，其余位全为 1（FAT32 只看低 28 位）。
 pub fn fat_media_ok(width: FatWidth, media: u8, entry0: u32) -> bool {
-    let full = match width {
-        FatWidth::Fat12 => 0x0FFF,
-        FatWidth::Fat16 => 0xFFFF,
-        FatWidth::Fat32 => 0x0FFF_FFFF,
-        FatWidth::Exfat => 0xFFFF_FFFF,
-    };
+    let full = width.end_of_chain();
     entry0 & full == (full & !0xFF) | u32::from(media)
 }
 
@@ -315,6 +344,8 @@ pub struct ExfatSet {
     /// 创建与修改时间的原始值：日期在高 16 位、时间在低 16 位，各按 DOS 格式。
     pub created: u32,
     pub modified: u32,
+    /// 修改时间与 UTC 之差的原始字节（第 7 位为 1 时有效，见 [`crate::Stamp::Dos`]）。
+    pub modified_utc_offset: u8,
 }
 
 /// 从 `entries[index]`（一个文件项）起解析一组目录项。次项要与文件项的使用中标记一致；校验和按「使用中」的
@@ -336,6 +367,7 @@ pub fn exfat_entry_set(entries: &[[u8; 32]], index: usize) -> ExfatSet {
         no_fat_chain: false,
         created: le32(&primary, 8).unwrap_or(0),
         modified: le32(&primary, 12).unwrap_or(0),
+        modified_utc_offset: primary[23],
     };
     if !(2..=18).contains(&recorded) {
         set.problems.push(SetProblem::SecondaryCount { recorded });

@@ -38,6 +38,19 @@ enum Data {
     },
 }
 
+/// [`NtfsImage::add_compressed`] 的一个压缩单元（16 个簇，64 KiB）。
+pub enum CompressedUnit<'a> {
+    /// 原样存放：16 个簇全分配，内容必须正好 64 KiB。
+    Stored(&'a [u8]),
+    /// LZNT1 压缩的内容，分配够放下它的簇、其余稀疏；`length` 是解开后的长度（只有最后一个单元可以不足 64 KiB）。
+    Packed { packed: &'a [u8], length: usize },
+    /// 整个单元稀疏，读作 0。
+    Hole,
+}
+
+/// 压缩单元：2^4 = 16 个簇。
+pub const COMPRESSION_UNIT_CLUSTERS: usize = 16;
+
 #[derive(Debug, Clone)]
 struct Name {
     parent: u64,
@@ -55,8 +68,12 @@ struct Node {
     names: Vec<Name>,
     data: Data,
     compressed: bool,
+    /// 压缩的数据流记的压缩单元（[`NtfsImage::add_compressed`] 为 4；只 `mark_compressed` 时为 0，读不出）。
+    compression_unit: u8,
     encrypted: bool,
     reparse_tag: Option<u32>,
+    /// 备用数据流（有名字的 `$DATA`），放在基本记录里、无名数据流之后。
+    streams: Vec<(String, Data)>,
     /// 数据流的第二段放进这条扩展记录，基本记录里加属性列表。
     extension: Option<u64>,
     /// 这是哪条记录的扩展记录。
@@ -179,6 +196,46 @@ impl NtfsImage {
         record
     }
 
+    /// 真正压缩存放的文件：按压缩单元给出各段，压缩单元记为 4（16 个簇）。
+    pub fn add_compressed(&mut self, parent: u64, name: &str, units: &[CompressedUnit<'_>]) -> u64 {
+        let record = self.new_node(parent, name, false);
+        let mut runs: Vec<(Option<usize>, usize)> = Vec::new();
+        let mut size = 0;
+        for unit in units {
+            let (allocated, length) = match unit {
+                CompressedUnit::Stored(data) => {
+                    assert_eq!(data.len(), COMPRESSION_UNIT_CLUSTERS * CLUSTER);
+                    let placed = self.allocate(COMPRESSION_UNIT_CLUSTERS, false);
+                    self.write_runs(&placed, data);
+                    (placed, data.len())
+                }
+                CompressedUnit::Packed { packed, length } => {
+                    let count = packed.len().div_ceil(CLUSTER);
+                    assert!(count < COMPRESSION_UNIT_CLUSTERS);
+                    let placed = self.allocate(count, false);
+                    self.write_runs(&placed, packed);
+                    (placed, *length)
+                }
+                CompressedUnit::Hole => (Vec::new(), COMPRESSION_UNIT_CLUSTERS * CLUSTER),
+            };
+            let used: usize = allocated.iter().map(|run| run.1).sum();
+            runs.extend(allocated);
+            let hole = COMPRESSION_UNIT_CLUSTERS - used;
+            if hole > 0 {
+                match runs.last_mut() {
+                    Some((None, count)) => *count += hole,
+                    _ => runs.push((None, hole)),
+                }
+            }
+            size += length;
+        }
+        let node = self.nodes.get_mut(&record).unwrap();
+        node.data = Data::NonResident { runs, size };
+        node.compressed = true;
+        node.compression_unit = 4;
+        record
+    }
+
     /// 稀疏文件：`before`、`hole` 个簇的空洞、`after`；`before` 必须按簇对齐。
     pub fn add_sparse(
         &mut self,
@@ -243,6 +300,23 @@ impl NtfsImage {
             name: name.to_owned(),
             namespace: 1,
         });
+    }
+
+    /// 给文件加一个备用数据流：不超过 600 字节时常驻，否则连续存放。
+    pub fn add_stream(&mut self, record: u64, name: &str, data: &[u8]) {
+        let value = if data.len() <= 600 {
+            Data::Resident(data.to_vec())
+        } else {
+            let runs = self.allocate(data.len().div_ceil(CLUSTER), false);
+            self.write_runs(&runs, data);
+            Data::NonResident {
+                runs,
+                size: data.len(),
+            }
+        };
+        let node = self.nodes.get_mut(&record).unwrap();
+        assert!(node.extension.is_none(), "带扩展记录的文件不加备用数据流");
+        node.streams.push((name.to_owned(), value));
     }
 
     pub fn mark_compressed(&mut self, record: u64) {
@@ -528,9 +602,10 @@ impl NtfsImage {
             }
             (Data::NonResident { runs, size }, None) => {
                 let clusters: usize = runs.iter().map(|run| run.1).sum();
-                attributes.push(non_resident(
-                    0x80, "", 10, data_flags, 0, runs, clusters, *size,
-                ));
+                let mut attribute =
+                    non_resident(0x80, "", 10, data_flags, 0, runs, clusters, *size);
+                attribute[0x22] = node.compression_unit;
+                attributes.push(attribute);
             }
             (Data::NonResident { runs, .. }, Some(number)) if runs.is_empty() => {
                 // 删除时被截成 0 字节：扩展记录里只剩一个空的数据流，属性列表只指向它
@@ -597,6 +672,17 @@ impl NtfsImage {
                 attributes.insert(1, resident(0x20, "", 20, &list));
                 extension = Some((number, ext_bytes));
             }
+        }
+        for (index, (name, data)) in node.streams.iter().enumerate() {
+            let id = 30 + index as u16;
+            attributes.push(match data {
+                Data::Resident(bytes) => resident(0x80, name, id, bytes),
+                Data::NonResident { runs, size } => {
+                    let clusters: usize = runs.iter().map(|run| run.1).sum();
+                    non_resident(0x80, name, id, 0, 0, runs, clusters, *size)
+                }
+                Data::None => continue,
+            });
         }
         if let Some(tag) = node.reparse_tag {
             let mut value = vec![0u8; 8];

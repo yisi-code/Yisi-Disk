@@ -541,6 +541,16 @@ fn image_history_remove(
     history.remove(&image_path)
 }
 
+/// 在文件夹中显示一个做过的镜像：只认做过的镜像列表里记着的路径，不接受别的。
+#[tauri::command(async)]
+fn image_reveal(history: State<'_, ImageHistory>, image_path: String) -> Result<(), HostError> {
+    let record = history
+        .find(&image_path)
+        .ok_or_else(|| HostError::new("imageRecordNotFound", image_path.clone()))?;
+    tauri_plugin_opener::reveal_item_in_dir(std::path::Path::new(&record.image_path))
+        .map_err(|error| HostError::new("openFailed", error.to_string()))
+}
+
 /// 镜像被移走了：用户重新指定的位置上要有同名的坏区图，而且记的来源与容量与原来一致，才改记录。
 #[tauri::command(async)]
 fn image_history_relocate(
@@ -673,6 +683,7 @@ fn main() -> anyhow::Result<()> {
             image_history_list,
             image_history_remove,
             image_history_relocate,
+            image_reveal,
             boot_diagnose,
             write_plan_boot_sector,
             write_plan_partition_table,

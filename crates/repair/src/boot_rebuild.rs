@@ -1,4 +1,5 @@
-//! 主、备引导扇区都坏了时，按文件系统自己留在分区里的结构推算出引导扇区的参数，重新写出来（FAT32、exFAT、NTFS）。
+//! 主、备引导扇区都坏了时，按文件系统自己留在分区里的结构推算出引导扇区的参数，重新写出来（FAT12/16/32、exFAT、
+//! NTFS；FAT12/16 没有备份，主引导扇区坏了就是这种情况）。
 //!
 //! 只推算、不写盘：给出要写的各段（主引导扇区与备份，FAT32 的 FSInfo 坏了时一起写），写入走修复引导扇区的
 //! 写入计划（`boot_fix` 的 `Rebuild`），按推算的参数浏览走叠加视图（[`overlay_rebuilt`]）。
@@ -6,6 +7,11 @@
 //! - FAT32：在分区开头附近找 FAT 表头（第 0 项是介质描述符、其余位全为 1，第 1、2 项不为空），它的位置就是
 //!   保留扇区数；在按各种簇大小算出的 FAT 大小附近找内容相同的第二份 FAT，得出 FAT 大小；每簇扇区数取让
 //!   FAT 装得下全部簇的最小值，再用根目录里每个子目录首簇处的 `.` 目录项核对。根目录在 2 号簇。
+//! - FAT12/16：同样在分区开头附近找 FAT 表头（`介质 FF FF`）、在它之后找内容相同的第二份 FAT；根目录是第二份 FAT
+//!   之后的固定区域，项数推不出来，按常见的几种（硬盘上一律 512，软盘 224、112 等）各试一遍：每种算出簇区起点，
+//!   每簇扇区数取让 FAT 装得下全部簇的最小值，簇数定是 FAT12 还是 FAT16，再用根目录里每个子目录首簇处的 `.`
+//!   目录项（FAT 里这个簇也要在用）核对；格式化时根目录区整个清零，所以结束标记之后还得全是 0（区域划大了会
+//!   划进簇区的内容）；只有一种对得上才算。根目录里没有子目录时无从核对，只认 512 项，而且簇区开头（2 号簇）要有内容。
 //! - exFAT：在第 24 扇区之后找 FAT 表头（`F8 FF FF FF FF FF FF FF`），在它之后找根目录（含分配位图与大写表
 //!   目录项）；对每种簇大小与根目录簇号解出簇区起点，大写表的校验和、分配位图里这几个簇的占用位、FAT 里根目录
 //!   那一项都对得上的才算；簇数由卷长度与分配位图的长度核对，FAT 长度按 Windows 格式化时的写法（[`exfat_fat_length`]）。
@@ -20,13 +26,14 @@ use std::sync::Arc;
 
 use yisi_fs::boot_write::{
     EXFAT_BOOT_REGION_SECTORS, ExfatBoot, FatBoot, NtfsBoot, exfat_boot_region, fat_boot,
-    fat32_fs_info, ntfs_boot,
+    fat32_fs_info, fat32_fs_info_ok, ntfs_boot,
 };
 use yisi_fs::format::{
-    EXFAT_TYPE_BITMAP, EXFAT_TYPE_LABEL, EXFAT_TYPE_UPCASE, FatWidth, exfat_label,
-    exfat_table_checksum, fat_first_cluster, fat_media_ok,
+    ATTR_DIRECTORY, ATTR_LONG_NAME, ATTR_VOLUME_ID, DIR_ENTRY_SIZE, EXFAT_TYPE_BITMAP,
+    EXFAT_TYPE_LABEL, EXFAT_TYPE_UPCASE, FAT_DELETED, FatWidth, exfat_label, exfat_table_checksum,
+    fat_entry_raw, fat_entry_span, fat_first_cluster, fat_media_byte_ok, fat_media_ok,
 };
-use yisi_fs::{FsKind, bpb, mft_record_layout, mft_self_record_ok, root_index_block_size};
+use yisi_fs::{FsKind, Region, bpb, mft_record_layout, mft_self_record_ok, root_index_block_size};
 use yisi_io::{BlockDevice, Overlay, SectorWrite};
 use yisi_part::Partition;
 use yisi_part::bytes::{le32, le64};
@@ -35,9 +42,12 @@ use crate::boot::{Verdict, diagnose_partition};
 
 /// FAT32 的保留扇区数是 16 位：FAT 表头最远在第 65535 扇区。
 const MAX_RESERVED: u64 = 0xFFFF;
-/// FAT32 的最少簇数（少于它就是 FAT16）与表项上限。
-const FAT32_MIN_CLUSTERS: u64 = 65_525;
-const FAT32_MAX_CLUSTERS: u64 = 0x0FFF_FFF5;
+/// FAT12/16 的保留扇区一般只有 1 个（Windows 格式化 FAT16 时也不多），FAT 表头在这么多扇区之内找。
+const MAX_FAT16_RESERVED: u64 = 256;
+/// FAT12/16 根目录的项数按这个顺序试：硬盘上一律 512，其余是软盘与少见的格式化写法。
+const ROOT_ENTRY_CANDIDATES: [u64; 7] = [512, 224, 112, 1024, 256, 2048, 64];
+/// FAT32 的最少簇数（比 FAT16 多一个）与表项上限。
+const FAT32_MIN_CLUSTERS: u64 = bpb::FAT16_MAX_CLUSTERS + 1;
 /// FSInfo 在第 1 扇区，备份引导扇区在第 6 扇区、它的 FSInfo 在第 7 扇区（Windows 的写法）。
 const FS_INFO_SECTOR: u64 = 1;
 const FAT32_BACKUP_SECTOR: u64 = 6;
@@ -94,11 +104,14 @@ pub fn rebuild(
 ) -> Result<Rebuilt, RebuildError> {
     let source = Source::new(device, partition)?;
     match kind {
+        // 坏了的引导扇区记的是 FAT12 还是 FAT16 不一定对，按结构推算出哪种算哪种
+        FsKind::Fat12 | FsKind::Fat16 => source.fat12_16(serial),
         FsKind::Fat32 => source.fat32(serial),
         FsKind::Exfat => source.exfat(serial),
         FsKind::Ntfs => source.ntfs(serial),
         FsKind::Unknown => {
             let found: Vec<Rebuilt> = [
+                source.fat12_16(serial),
                 source.fat32(serial),
                 source.exfat(serial),
                 source.ntfs(serial),
@@ -109,9 +122,11 @@ pub fn rebuild(
             let mut found = found.into_iter();
             match (found.next(), found.next()) {
                 (Some(rebuilt), None) => Ok(rebuilt),
-                (None, _) => Err(RebuildError::NotFound("认不出是 32 位文件分配表（FAT32）、扩展文件分配表（exFAT）还是新技术文件系统（NTFS）")),
+                (None, _) => Err(RebuildError::NotFound(
+                    "认不出是文件分配表（FAT）、扩展文件分配表（exFAT）还是新技术文件系统（NTFS）",
+                )),
                 (Some(_), Some(_)) => Err(RebuildError::Ambiguous(
-                    "32 位文件分配表（FAT32）、扩展文件分配表（exFAT）、新技术文件系统（NTFS）中不止一种推得出",
+                    "文件分配表（FAT）、扩展文件分配表（exFAT）、新技术文件系统（NTFS）中不止一种推得出",
                 )),
             }
         }
@@ -171,16 +186,14 @@ impl<'a> Source<'a> {
 
     fn read(&self, at: u64, len: u64) -> Result<Vec<u8>, RebuildError> {
         let unreadable = || RebuildError::Unreadable(self.partition.offset.saturating_add(at));
-        if at
-            .checked_add(len)
-            .is_none_or(|end| end > self.partition.length)
-        {
-            return Err(unreadable());
-        }
         let mut buf = vec![0u8; usize::try_from(len).map_err(|_| unreadable())?];
-        self.device
-            .read_exact_at(self.partition.offset + at, &mut buf)
-            .map_err(|_| unreadable())?;
+        Region::new(
+            Arc::clone(self.device),
+            self.partition.offset,
+            self.partition.length,
+        )
+        .read_exact(at, &mut buf)
+        .map_err(|_| unreadable())?;
         Ok(buf)
     }
 
@@ -242,7 +255,7 @@ impl<'a> Source<'a> {
             let entry2 = le32(bytes, 8)? & 0x0FFF_FFFF;
             let media = (entry0 & 0xFF) as u8;
             (fat_media_ok(FatWidth::Fat32, media, entry0)
-                && (media == 0xF0 || media >= 0xF8)
+                && fat_media_byte_ok(media)
                 && entry1 & 0x03FF_FFFF == 0x03FF_FFFF
                 && entry2 != 0)
                 .then_some(media)
@@ -282,9 +295,17 @@ impl<'a> Source<'a> {
             }
         }
         let fat_sectors = match sizes.as_slice() {
-            [] => return Err(RebuildError::NotFound("找不到与第一份内容相同的第二份文件分配表（FAT）")),
+            [] => {
+                return Err(RebuildError::NotFound(
+                    "找不到与第一份内容相同的第二份文件分配表（FAT）",
+                ));
+            }
             [size] => *size,
-            _ => return Err(RebuildError::Ambiguous("第二份文件分配表（FAT）可能在不止一处")),
+            _ => {
+                return Err(RebuildError::Ambiguous(
+                    "第二份文件分配表（FAT）可能在不止一处",
+                ));
+            }
         };
         let data_start = reserved + 2 * fat_sectors;
         let capacity = fat_sectors * entries_per_sector;
@@ -292,44 +313,20 @@ impl<'a> Source<'a> {
         let spc = (0..=7u32)
             .map(|shift| 1u64 << shift)
             .find(|&spc| (total - data_start) / spc + 2 <= capacity)
-            .ok_or(RebuildError::Ambiguous("文件分配表（FAT）大小与分区大小对不上"))?;
+            .ok_or(RebuildError::Ambiguous(
+                "文件分配表（FAT）大小与分区大小对不上",
+            ))?;
         let clusters = (total - data_start) / spc;
-        if !(FAT32_MIN_CLUSTERS..=FAT32_MAX_CLUSTERS).contains(&clusters) {
-            return Err(RebuildError::NotFound("簇数不在 32 位文件分配表（FAT32）的范围里"));
+        if !(FAT32_MIN_CLUSTERS..=bpb::FAT32_MAX_CLUSTERS).contains(&clusters) {
+            return Err(RebuildError::NotFound(
+                "簇数不在 32 位文件分配表（FAT32）的范围里",
+            ));
         }
 
         // 根目录在 2 号簇：核对每个子目录的首簇处是 `.` 目录项，顺便取卷标
         let cluster_bytes = spc * sector;
         let root = self.read(data_start * sector, cluster_bytes)?;
-        let mut label = None;
-        for entry in root.as_chunks::<32>().0 {
-            let attributes = entry.get(11).copied().unwrap_or(0);
-            match entry.first().copied().unwrap_or(0) {
-                0 => break,
-                0xE5 => continue,
-                _ if attributes & 0x0F == 0x0F => continue,
-                _ if attributes & 0x08 != 0 => {
-                    label = entry
-                        .get(..11)
-                        .and_then(|name| <[u8; 11]>::try_from(name).ok());
-                }
-                _ if attributes & 0x10 != 0 => {
-                    let cluster = u64::from(fat_first_cluster(entry, true));
-                    if !(2..clusters + 2).contains(&cluster) {
-                        return Err(RebuildError::Ambiguous("根目录里的子目录首簇不在卷内"));
-                    }
-                    let dir = self.read((data_start + (cluster - 2) * spc) * sector, 32)?;
-                    if dir.get(..11) != Some(b".          ".as_slice())
-                        || dir.get(11).is_none_or(|attributes| attributes & 0x10 == 0)
-                    {
-                        return Err(RebuildError::Ambiguous(
-                            "子目录的首簇处不是目录（每簇扇区数对不上）",
-                        ));
-                    }
-                }
-                _ => {}
-            }
-        }
+        let (label, _) = self.check_root(&root, true, data_start, spc, clusters, None)?;
 
         let label_bytes: [u8; 11] = label.unwrap_or(*b"NO NAME    ");
         let boot = fat_boot(&FatBoot {
@@ -362,7 +359,7 @@ impl<'a> Source<'a> {
         // 引导扇区连同 FSInfo（坏了的换成新的）一起写；保留区放得下时备份也写
         let fs_info = |at: u64| -> Result<Vec<u8>, RebuildError> {
             let current = self.read_sector(at)?;
-            Ok(if fs_info_ok(&current) {
+            Ok(if fat32_fs_info_ok(&current) {
                 current
             } else {
                 fat32_fs_info(bps)
@@ -387,6 +384,198 @@ impl<'a> Source<'a> {
         })
     }
 
+    /// 根目录的项：每个子目录首簇处要是 `.` 目录项（给了 `fat` 时 FAT 里这个簇还要在用），给出卷标与子目录个数。
+    /// `data_start` 是簇区起点（扇区），2 号簇从这里开始。
+    fn check_root(
+        &self,
+        root: &[u8],
+        is_fat32: bool,
+        data_start: u64,
+        spc: u64,
+        clusters: u64,
+        fat: Option<(FatWidth, &[u8])>,
+    ) -> Result<(Option<[u8; 11]>, usize), RebuildError> {
+        let mut label = None;
+        let mut dirs = 0;
+        for entry in root.as_chunks::<DIR_ENTRY_SIZE>().0 {
+            let attributes = entry.get(11).copied().unwrap_or(0);
+            match entry.first().copied().unwrap_or(0) {
+                0 => break,
+                FAT_DELETED => continue,
+                _ if attributes & ATTR_LONG_NAME == ATTR_LONG_NAME => continue,
+                _ if attributes & ATTR_VOLUME_ID != 0 => {
+                    label = entry
+                        .get(..11)
+                        .and_then(|name| <[u8; 11]>::try_from(name).ok());
+                }
+                _ if attributes & ATTR_DIRECTORY != 0 => {
+                    let cluster = u64::from(fat_first_cluster(entry, is_fat32));
+                    if !(2..clusters + 2).contains(&cluster) {
+                        return Err(RebuildError::Ambiguous("根目录里的子目录首簇不在卷内"));
+                    }
+                    if let Some((width, bytes)) = fat {
+                        let (at, len) = fat_entry_span(width, cluster as u32);
+                        let free = bytes
+                            .get(at as usize..at as usize + len)
+                            .and_then(|span| fat_entry_raw(width, cluster as u32, span))
+                            .is_none_or(|raw| raw == 0);
+                        if free {
+                            return Err(RebuildError::Ambiguous(
+                                "根目录里的子目录首簇在文件分配表（FAT）里是空闲的",
+                            ));
+                        }
+                    }
+                    let dir = self.read((data_start + (cluster - 2) * spc) * self.sector, 32)?;
+                    if dir.get(..11) != Some(b".          ".as_slice())
+                        || dir
+                            .get(11)
+                            .is_none_or(|attributes| attributes & ATTR_DIRECTORY == 0)
+                    {
+                        return Err(RebuildError::Ambiguous(
+                            "子目录的首簇处不是目录（每簇扇区数对不上）",
+                        ));
+                    }
+                    dirs += 1;
+                }
+                _ => {}
+            }
+        }
+        Ok((label, dirs))
+    }
+
+    fn fat12_16(&self, serial: u64) -> Result<Rebuilt, RebuildError> {
+        let sector = self.sector;
+        let bps = u16::try_from(sector).map_err(|_| RebuildError::Unsupported(FsKind::Fat16))?;
+        // FAT 表头：`介质 FF FF`；FAT16 第 1 项最高两位是脏标记，FAT12 的第 1 项正好占到第 3 个字节
+        let media_of = |bytes: &[u8]| -> Option<u8> {
+            let media = *bytes.first()?;
+            (bytes.get(1..3) == Some([0xFF, 0xFF].as_slice()) && fat_media_byte_ok(media))
+                .then_some(media)
+        };
+        let reserved_at = self
+            .scan(
+                sector,
+                MAX_FAT16_RESERVED * sector,
+                sector,
+                4,
+                |_, bytes| media_of(bytes).is_some(),
+            )?
+            .ok_or(RebuildError::NotFound("找不到文件分配表（FAT）表头"))?;
+        let reserved = reserved_at / sector;
+        let first = self.read_sector(reserved)?;
+        let media =
+            media_of(&first).ok_or(RebuildError::NotFound("找不到文件分配表（FAT）表头"))?;
+        let total = self.sectors;
+
+        // 第二份 FAT：FAT16 的 FAT 最多 (65524 + 2) × 2 字节，在这个范围里找与第一份第一个扇区相同的扇区
+        let max_fat = ((bpb::FAT16_MAX_CLUSTERS + 2) * 2).div_ceil(sector);
+        let window_sectors = max_fat.min(total.saturating_sub(reserved + 1));
+        let window = self.read((reserved + 1) * sector, window_sectors * sector)?;
+        let sizes: Vec<u64> = window
+            .chunks_exact(sector as usize)
+            .enumerate()
+            .filter(|(_, candidate)| *candidate == first.as_slice())
+            .map(|(index, _)| index as u64 + 1)
+            .collect();
+        let fat_sectors = match sizes.as_slice() {
+            [] => {
+                return Err(RebuildError::NotFound(
+                    "找不到与第一份内容相同的第二份文件分配表（FAT）",
+                ));
+            }
+            [size] => *size,
+            _ => {
+                return Err(RebuildError::Ambiguous(
+                    "第二份文件分配表（FAT）可能在不止一处",
+                ));
+            }
+        };
+        let fat = self.read(reserved * sector, fat_sectors * sector)?;
+        let root_start = reserved + 2 * fat_sectors;
+
+        // 根目录项数的各种可能：簇大小按「FAT 装得下全部簇的最小值」、类型按簇数，再用子目录核对
+        let mut found = Vec::new();
+        for root_entries in ROOT_ENTRY_CANDIDATES {
+            let root_sectors = (root_entries * 32).div_ceil(sector);
+            let data_start = root_start + root_sectors;
+            if data_start >= total {
+                continue;
+            }
+            let fits = |spc: u64, kind: FsKind| {
+                let clusters = (total - data_start) / spc;
+                let bits = if kind == FsKind::Fat12 { 12 } else { 16 };
+                (clusters + 2) * bits <= fat_sectors * sector * 8
+            };
+            let Some((spc, kind)) = (0..=7u32).map(|shift| 1u64 << shift).find_map(|spc| {
+                let kind = bpb::fat_kind_by_clusters((total - data_start) / spc)?;
+                fits(spc, kind).then_some((spc, kind))
+            }) else {
+                continue;
+            };
+            let clusters = (total - data_start) / spc;
+            let width = if kind == FsKind::Fat12 {
+                FatWidth::Fat12
+            } else {
+                FatWidth::Fat16
+            };
+            let entry0 = fat_entry_raw(width, 0, &first).unwrap_or(0);
+            if !fat_media_ok(width, media, entry0) {
+                continue;
+            }
+            let root = self.read(root_start * sector, root_sectors * sector)?;
+            if !blank_after_end(&root) {
+                continue;
+            }
+            let Ok((label, dirs)) =
+                self.check_root(&root, false, data_start, spc, clusters, Some((width, &fat)))
+            else {
+                continue;
+            };
+            // 没有子目录时核对不了项数：只认硬盘上的标准写法，簇区开头还要有内容（数据确实从这里开始）
+            if dirs == 0
+                && (root_entries != 512
+                    || self.read_sector(data_start)?.iter().all(|&byte| byte == 0))
+            {
+                continue;
+            }
+            found.push((root_entries, spc, kind, label));
+        }
+        let (root_entries, spc, kind, label) = match found.as_slice() {
+            [] => {
+                return Err(RebuildError::NotFound(
+                    "根目录与簇大小推算不出（子目录的位置都对不上）",
+                ));
+            }
+            [one] => *one,
+            _ => return Err(RebuildError::Ambiguous("根目录的项数有不止一种可能")),
+        };
+        let boot = fat_boot(&FatBoot {
+            kind,
+            bytes_per_sector: bps,
+            sectors_per_cluster: spc as u8,
+            reserved: u16::try_from(reserved).unwrap_or(u16::MAX),
+            fats: 2,
+            root_entries: root_entries as u16,
+            total_sectors: u32::try_from(total).map_err(|_| RebuildError::Unsupported(kind))?,
+            media,
+            fat_sectors: u32::try_from(fat_sectors).unwrap_or(u32::MAX),
+            hidden_sectors: self.hidden_sectors(),
+            root_cluster: 0,
+            fs_info: 0,
+            backup_boot: 0,
+            serial: serial as u32,
+            label: label.unwrap_or(*b"NO NAME    "),
+        });
+        check_fatal(kind, &boot)?;
+        // 没有备份，只写主引导扇区
+        Ok(Rebuilt {
+            kind,
+            writes: vec![self.write(0, boot.clone())?],
+            boot,
+            label: label.map(|bytes| String::from_utf8_lossy(&bytes).trim_end().to_owned()),
+        })
+    }
+
     fn exfat(&self, serial: u64) -> Result<Rebuilt, RebuildError> {
         let sector = self.sector;
         let sector_shift = sector.trailing_zeros();
@@ -396,7 +585,9 @@ impl<'a> Source<'a> {
             .scan(region_bytes, EXFAT_FAT_SEARCH, sector, 8, |_, bytes| {
                 bytes.get(..8) == Some(FAT_HEAD.as_slice())
             })?
-            .ok_or(RebuildError::NotFound("找不到扩展文件分配表（exFAT）的文件分配表（FAT）表头"))?;
+            .ok_or(RebuildError::NotFound(
+                "找不到扩展文件分配表（exFAT）的文件分配表（FAT）表头",
+            ))?;
         let fat_offset = fat_at / sector;
 
         // 根目录：开头几项里有分配位图项与大写表项，之前只有卷标、卷 GUID 这类系统项
@@ -415,9 +606,13 @@ impl<'a> Source<'a> {
                     None => false,
                 },
             )?
-            .ok_or(RebuildError::NotFound("找不到扩展文件分配表（exFAT）的根目录"))?;
+            .ok_or(RebuildError::NotFound(
+                "找不到扩展文件分配表（exFAT）的根目录",
+            ))?;
         let (Some(bitmap), Some(upcase), label) = entries else {
-            return Err(RebuildError::NotFound("找不到扩展文件分配表（exFAT）的根目录"));
+            return Err(RebuildError::NotFound(
+                "找不到扩展文件分配表（exFAT）的根目录",
+            ));
         };
         let root_sector = root_at / sector;
         let bitmap_first = u64::from(le32(&bitmap, 20).unwrap_or(0));
@@ -537,7 +732,7 @@ impl<'a> Source<'a> {
             // 只把这两条记录交给解析（每个 `FILE` 都整段复制会很慢）；解析要求正好一条记录的长度，按记录头记的切
             let Some(size) = le32(bytes, 0x1C)
                 .map(|size| size as usize)
-                .filter(|size| size.is_power_of_two() && (1024..=4096).contains(size))
+                .filter(|&size| bpb::ntfs_size_ok(size as u64))
             else {
                 return false;
             };
@@ -559,10 +754,13 @@ impl<'a> Source<'a> {
         let Some(&(at, mft_lcn, mirror_hint, record_size)) = hits.first() else {
             return Err(RebuildError::NotFound("找不到主文件表（$MFT）的第一条记录"));
         };
-        if !record_size.is_power_of_two() || !(1024..=4096).contains(&record_size) {
-            return Err(RebuildError::NotFound("主文件表（$MFT）记录头里的记录大小不合法"));
+        if !bpb::ntfs_size_ok(record_size) {
+            return Err(RebuildError::NotFound(
+                "主文件表（$MFT）记录头里的记录大小不合法",
+            ));
         }
-        let plausible = |size: u64| size.is_power_of_two() && size >= sector && size <= 2 << 20;
+        let plausible =
+            |size: u64| size.is_power_of_two() && size >= sector && size <= bpb::MAX_NTFS_CLUSTER;
         let copy_ok = |cluster_size: u64, lcn: u64| -> bool {
             lcn.checked_mul(cluster_size)
                 .and_then(|offset| self.read(offset, record_size).ok())
@@ -612,7 +810,7 @@ impl<'a> Source<'a> {
             .read(mft_lcn * cluster_size + 5 * record_size, record_size)
             .ok()
             .and_then(|bytes| root_index_block_size(&bytes))
-            .filter(|size| size.is_power_of_two() && (512..=65536).contains(size))
+            .filter(|&size| bpb::ntfs_size_ok(size))
             .unwrap_or(DEFAULT_INDEX_BLOCK);
         let total_sectors = self.sectors - 1;
         let boot = ntfs_boot(&NtfsBoot {
@@ -687,11 +885,16 @@ fn exfat_fat_length(
         .find(|&length| length <= room)
 }
 
-/// FSInfo 扇区的三处签名都对。
-fn fs_info_ok(sector: &[u8]) -> bool {
-    le32(sector, 0) == Some(0x4161_5252)
-        && le32(sector, 484) == Some(0x6141_7272)
-        && le32(sector, 508) == Some(0xAA55_0000)
+/// FAT12/16 的根目录区：第一个结束标记（首字节为 0 的项）之后全是 0。
+fn blank_after_end(root: &[u8]) -> bool {
+    let entries = root.as_chunks::<32>().0;
+    let end = entries
+        .iter()
+        .position(|entry| entry.first() == Some(&0))
+        .unwrap_or(entries.len());
+    entries
+        .get(end..)
+        .is_none_or(|rest| rest.iter().flatten().all(|&byte| byte == 0))
 }
 
 /// 写出来的引导扇区按打开卷的规则核对，不能有致命问题。

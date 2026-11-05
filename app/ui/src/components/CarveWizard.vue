@@ -34,6 +34,7 @@ import {
   type HostError,
 } from '../services/host'
 import { formatBytes, formatSeconds } from '../utils/format'
+import { joinPath } from '../utils/path'
 
 const STEPS = ['source', 'formats', 'scan'] as const
 type WizardStep = (typeof STEPS)[number]
@@ -62,8 +63,7 @@ const {
   targetKind,
   done,
   total,
-  percent,
-  bytesPerSecond,
+  progressParams,
   foundCount,
   files,
   summary,
@@ -164,9 +164,7 @@ const saveStatusText = computed(() => {
     case 'running':
     case 'cancelling':
       return t('carve.save.status.running', {
-        done: formatBytes(save.done.value),
-        total: formatBytes(save.total.value),
-        percent: save.percent.value,
+        ...save.progressParams.value,
         count: save.succeeded.value.length,
       }, save.succeeded.value.length)
     case 'completed':
@@ -218,18 +216,9 @@ const statusText = computed(() => {
     case 'running':
     case 'cancelling':
       if (isPaused.value) {
-        return t('carve.run.status.paused', {
-          done: formatBytes(done.value),
-          total: formatBytes(total.value),
-          percent: percent.value,
-        })
+        return t('carve.run.status.paused', progressParams.value)
       }
-      return t('carve.run.status.running', {
-        done: formatBytes(done.value),
-        total: formatBytes(total.value),
-        percent: percent.value,
-        rate: bytesPerSecond.value === null ? '-' : formatBytes(bytesPerSecond.value),
-      })
+      return t('carve.run.status.running', progressParams.value)
     case 'completed':
       return t('carve.run.status.completed')
     case 'failed':
@@ -527,10 +516,6 @@ function typeNameOf(file: FoundFile): string {
   return fileTypeName(file.extension, description)
 }
 
-function joinPath(dir: string, name: string): string {
-  return /[\\/]$/.test(dir) ? `${dir}${name}` : `${dir}\\${name}`
-}
-
 /** 拆成目录与文件名；目录是盘符根目录时保留结尾的分隔符（`F:` 指的是 F 盘的当前目录，不是根目录） */
 function splitPath(path: string): { dir: string; name: string } {
   const index = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'))
@@ -764,7 +749,7 @@ function handleAdvancedToggle(event: Event) {
                 ref="browser"
                 v-model:selected="selectedFile"
                 v-model:checked="checkedNames"
-                class="carve-wizard__pane"
+                class="wizard__pane"
                 :files="files"
                 :file-types="fileTypes"
                 :device-size="total"
@@ -789,7 +774,7 @@ function handleAdvancedToggle(event: Event) {
                 </template>
               </RecoveredBrowser>
               <RecoveredPreview
-                class="carve-wizard__pane"
+                class="wizard__pane"
                 :job-id="jobId"
                 :file="selectedFile"
                 :type-name="selectedTypeName"
@@ -917,12 +902,6 @@ function handleAdvancedToggle(event: Event) {
   grid-template-columns: minmax(0, 9fr) minmax(0, 11fr);
   grid-template-rows: auto 1fr auto;
   gap: var(--space-sm) var(--space-lg);
-}
-
-.carve-wizard__files > .carve-wizard__pane {
-  display: grid;
-  grid-row: span 3;
-  grid-template-rows: subgrid;
 }
 
 .carve-wizard__save-as {

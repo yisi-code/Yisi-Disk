@@ -6,16 +6,15 @@ use yisi_part::bytes::{le32, le64};
 
 use crate::bpb::ExfatBpb;
 use crate::clusters::{Chain, Clusters, FatWidth, Run};
-use crate::entry::{ClusterRef, Entry, FileRef, Listing, Location, State, dos_time};
+use crate::entry::{ClusterRef, Entry, FileRef, Listing, Location, Stamp, State};
 use crate::format::{
-    EXFAT_TYPE_BITMAP, EXFAT_TYPE_FILE, EXFAT_TYPE_LABEL, ExfatSet, exfat_entry_set, exfat_label,
+    ATTR_DIRECTORY, DIR_ENTRY_SIZE as ENTRY, EXFAT_TYPE_BITMAP, EXFAT_TYPE_FILE, EXFAT_TYPE_LABEL,
+    ExfatSet, exfat_entry_set, exfat_label,
 };
 use crate::reader::FileReader;
 use crate::region::{ChunkCache, Region};
 use crate::{FsError, MAX_DIR_BYTES, MAX_ENTRIES, bpb};
 
-const ENTRY: usize = 32;
-const ATTR_DIRECTORY: u16 = 0x10;
 /// 分配位图一次读进内存的上限（对应 20 亿个簇），超过时按块缓存。
 const MAX_LOADED_BITMAP: u64 = 256 << 20;
 
@@ -43,7 +42,9 @@ pub(crate) struct Exfat {
 impl Exfat {
     /// 按引导扇区 `boot`（主的或备份的）打开。
     pub fn open(region: Region, boot: &[u8]) -> Result<Self, FsError> {
-        let geometry = parse_boot(boot).ok_or(FsError::Invalid("扩展文件分配表（exFAT）引导扇区的参数不自洽"))?;
+        let geometry = parse_boot(boot).ok_or(FsError::Invalid(
+            "扩展文件分配表（exFAT）引导扇区的参数不自洽",
+        ))?;
         let heap_offset = geometry.heap_offset_bytes();
         if heap_offset >= region.length() {
             return Err(FsError::Invalid("扩展文件分配表（exFAT）的簇区在分区之外"));
@@ -63,7 +64,9 @@ impl Exfat {
             width: FatWidth::Exfat,
         };
         if !clusters.is_valid(geometry.root_cluster) {
-            return Err(FsError::Invalid("扩展文件分配表（exFAT）根目录的簇号不合法"));
+            return Err(FsError::Invalid(
+                "扩展文件分配表（exFAT）根目录的簇号不合法",
+            ));
         }
         let mut volume = Self {
             clusters,
@@ -97,7 +100,9 @@ impl Exfat {
             }
         }
         if volume.bitmap_runs.is_empty() || volume.bitmap_length * 8 < u64::from(count) {
-            return Err(FsError::Invalid("扩展文件分配表（exFAT）根目录里没有可用的分配位图"));
+            return Err(FsError::Invalid(
+                "扩展文件分配表（exFAT）根目录里没有可用的分配位图",
+            ));
         }
         Ok(volume)
     }
@@ -120,6 +125,7 @@ impl Exfat {
                 valid_size: 0,
                 contiguous: false,
             }),
+            modified: None,
         }
     }
 
@@ -212,7 +218,7 @@ impl Exfat {
 
     fn entry(&self, set: ExfatSet, parent_deleted: bool) -> Result<Entry, FsError> {
         let deleted = set.deleted || parent_deleted;
-        let is_dir = set.attributes & ATTR_DIRECTORY != 0;
+        let is_dir = set.attributes & u16::from(ATTR_DIRECTORY) != 0;
         let mut at = ClusterRef {
             first_cluster: set.first_cluster,
             valid_size: set.valid_length.min(set.data_length),
@@ -225,19 +231,28 @@ impl Exfat {
         } else {
             State::Live
         };
+        let modified = Stamp::Dos {
+            stamp: set.modified,
+            utc_offset: set.modified_utc_offset,
+        };
         let file = FileRef {
             size: set.data_length,
             is_dir,
             deleted,
             location: Location::Clusters(at),
+            modified: Some(modified),
         };
         Ok(Entry {
             name: set.name,
             short_name: None,
             name_uncertain: false,
             size: if is_dir { 0 } else { file.size },
-            modified: timestamp(set.modified),
-            created: timestamp(set.created),
+            modified: modified.text(),
+            created: Stamp::Dos {
+                stamp: set.created,
+                utc_offset: 0,
+            }
+            .text(),
             state,
             position: (is_dir || file.size > 0)
                 .then(|| self.clusters.offset(at.first_cluster))
@@ -316,15 +331,14 @@ impl Exfat {
             runs if self.bitmap_length <= MAX_LOADED_BITMAP => {
                 Bitmap::Loaded(self.clusters.read_runs(runs, self.bitmap_length)?)
             }
-            _ => return Err(FsError::Invalid("扩展文件分配表（exFAT）分配位图过大且不连续")),
+            _ => {
+                return Err(FsError::Invalid(
+                    "扩展文件分配表（exFAT）分配位图过大且不连续",
+                ));
+            }
         };
         let bitmap = Arc::new(bitmap);
         *slot = Some(Arc::clone(&bitmap));
         Ok(bitmap)
     }
-}
-
-/// exFAT 时间戳：日期在高 16 位、时间在低 16 位，各按 DOS 格式。
-fn timestamp(value: u32) -> Option<String> {
-    dos_time((value >> 16) as u16, value as u16)
 }

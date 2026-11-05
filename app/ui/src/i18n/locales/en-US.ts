@@ -39,6 +39,7 @@ const enUS: typeof zhCN = {
     savedIn: 'Saved in',
     sizeValue: '{size} ({bytes} bytes)',
     positionValue: '{position} (offset {offset}, sector {sector})',
+    sectorPosition: 'sector {sector} (offset {offset} bytes)',
     filesValue: '{count} file, {bytes} in total | {count} files, {bytes} in total',
     preparing: 'Preparing the file…',
     ranges: {
@@ -83,7 +84,7 @@ const enUS: typeof zhCN = {
     },
     unopenable: {
       name: 'Partition will not open / asks to format',
-      summary: 'Opening the partition asks you to format it, it shows up as RAW, or it was formatted.',
+      summary: 'Opening the partition asks you to format it, it shows up as an unrecognized file system (RAW), or it was formatted.',
       symptoms: [
         'Windows says "You need to format the disk in drive before you can use it".',
         'Disk Management shows the partition\'s file system as RAW.',
@@ -139,8 +140,16 @@ const enUS: typeof zhCN = {
     },
   },
   features: {
-    pending: 'In development',
-    pendingReason: 'This feature is still in development and cannot be used yet.',
+    blocked: {
+      pending: 'In development',
+      engineFailed: 'Unavailable',
+      unsupported: 'Not supported',
+    },
+    blockedReason: {
+      pending: 'This feature is still in development and cannot be used yet.',
+      engineFailed: 'The recovery engine cannot start, so this cannot be used now; restart the program and try again, see About for details.',
+      unsupported: 'This version of the recovery engine does not support this feature.',
+    },
     suits: 'Good for:',
     limits: 'Limits:',
     catalogIntro:
@@ -148,7 +157,7 @@ const enUS: typeof zhCN = {
     undelete: {
       name: 'Recover deleted files',
       summary: 'Browse the folders on a partition, find deleted files and copy them, with their names and folders, to another disk.',
-      suits: 'The partition is still recognized (FAT, exFAT, NTFS), little has been written since the deletion, and you want to keep the original names.',
+      suits: 'The partition is still recognized as File Allocation Table (FAT), Extended File Allocation Table (exFAT) or New Technology File System (NTFS), little has been written since the deletion, and you want to keep the original names.',
       limits: 'Does not help once the partition has been formatted, will not open or is lost; files deleted on SSDs have often been wiped already.',
     },
     carve: {
@@ -172,14 +181,14 @@ const enUS: typeof zhCN = {
     repairPartition: {
       name: 'Repair a partition that will not open',
       summary: 'Diagnoses each partition\'s boot sector and its backup; if the boot sector is damaged but the backup is intact, browses with the backup and saves files to another disk. It can also repair the boot sector from the backup (a backup is saved first and you can roll back; repairing an image first is recommended).',
-      suits: 'The partition is still there but asks to be formatted or shows up as RAW (FAT32, exFAT and NTFS keep a backup boot sector).',
+      suits: 'The partition is still there but asks to be formatted or shows up as an unrecognized file system (RAW). 32-bit File Allocation Table (FAT32), Extended File Allocation Table (exFAT) and New Technology File System (NTFS) keep a backup boot sector.',
       limits: 'If the partition is gone entirely, use "Find lost partitions"; the disk Windows runs from and a single drive letter cannot be repaired; if both copies are damaged use "Deep recovery by file type".',
     },
     fsCheck: {
       name: 'Check a file system',
-      summary: 'Checks that the FAT and exFAT boot region, FAT chains, allocation bitmap and directory entries agree and lists the problems; lost clusters, broken chains, cross-links, FAT copies that disagree, directory entries, bitmap gaps, unreadable free clusters and more can be ticked for repair. The check itself is read-only.',
+      summary: 'On File Allocation Table (FAT) and Extended File Allocation Table (exFAT) partitions, checks that the boot region, FAT chains, allocation bitmap and directory entries agree and lists the problems; lost clusters, broken chains, cross-links, FAT copies that disagree, directory entries, bitmap gaps, unreadable free clusters and more can be ticked for repair. The check itself is read-only.',
       suits: 'The partition opens but file names are garbled, folders will not open, the space does not add up, or Windows asks to scan and fix after unplugging.',
-      limits: 'NTFS gets only the boot sector and master file table checks. On FAT and exFAT, unreadable folders and volumes with more than two FATs are only reported: make an image first and work on the image.',
+      limits: 'New Technology File System (NTFS) gets only the boot sector and master file table checks. On File Allocation Table (FAT) and Extended File Allocation Table (exFAT), unreadable folders and volumes with more than two FATs are only reported: make an image first and work on the image.',
     },
     image: {
       name: 'Create a disk image (bad-sector aware)',
@@ -237,9 +246,9 @@ const enUS: typeof zhCN = {
       title: 'How to read the result',
       clean: 'No unreadable ranges: the whole disk could be read this time, and no bad sectors were found.',
       unreadable:
-        'Unreadable ranges: these areas cannot be read now, most likely because of bad sectors, and files stored there will be incomplete. Ranges are recorded in 1 MiB units, so not every sector in a range is necessarily bad.',
+        'Unreadable ranges: these areas cannot be read now, most likely because of bad sectors, and files stored there will be incomplete. Each unreadable 1 MiB is read again in smaller pieces to find exactly which sectors are bad; a block that fails entirely, or too many bad areas, are recorded as whole blocks to avoid reading damaged areas over and over.',
       slow: 'Low or erratic read speed: even without unreadable ranges, the disk may be wearing out; copy important files off it soon.',
-      limits: 'Each area is read once, without retries: an area that fails only occasionally may read fine this time and fail next time.',
+      limits: 'Readable areas are read once, without retries: an area that fails only occasionally may read fine this time and fail next time. Cells marked "Read, but slowly" in the sector map took more than 2 seconds to read once (the disk retried internally), which often comes before bad sectors.',
     },
     diskHint:
       'Reading a physical disk needs administrator rights. The check is read-only but reads the whole disk, so larger disks take longer. If you already know the disk has bad sectors and the data matters, create an image first instead of checking.',
@@ -257,10 +266,24 @@ const enUS: typeof zhCN = {
       unreadableValue: '{count} range, {bytes} in total | {count} ranges, {bytes} in total',
       moreRanges: 'Showing the first {shown} of {count} ranges.',
       truncated: 'Too many unreadable ranges: only the first {count} were recorded; the total above still includes all of them.',
+      fine: 'The unreadable 1 MiB block was read again in smaller pieces; the ranges above are exact to the sector. | The {count} unreadable 1 MiB blocks were read again in smaller pieces; the ranges above are exact to the sector.',
+      fineTruncated: 'After {count} unreadable 1 MiB blocks the fine reading reached its limit (too many bad areas); later unreadable areas are recorded as whole blocks or pieces. With this much damage, create an image first.',
       nextClean:
         'Next: if the disk is still slow or reports errors, copy important files off it soon; to recover deleted files, pick the matching problem in the navigation.',
       nextFound:
         'Next: if the data matters, use "Create a disk image" first and recover from the image, reading this disk directly as little as possible. If you must recover now, "Recover deleted files" or "Deep recovery by file type" can also read it directly; save recovered files only to another disk.',
+    },
+  },
+  readMap: {
+    title: 'Sector map ({size} per cell)',
+    summary: 'Sector map with {cells} cells of {size}: {slow} slow, {partly} with unreadable sectors, {unreadable} entirely unreadable.',
+    cell: '{start} – {end}: {state}',
+    legend: '{state} ({count})',
+    state: {
+      good: 'Read',
+      slow: 'Read, but slowly',
+      partly: 'Some sectors unreadable',
+      unreadable: 'Entirely unreadable',
     },
   },
   diskImage: {
@@ -285,7 +308,7 @@ const enUS: typeof zhCN = {
         'The source must be the same: a physical disk is recognized by vendor, model and serial number, so another USB port or a new disk number does not matter; size and sector size must be unchanged.',
       noWrites:
         'Do not write to the source between runs (do not open, tidy up or repair it in the system). When the same image is chosen again, the partition table is compared and copied areas are spot-checked; if the source changed, the changes are listed and you choose to redo the changed parts, keep the old content and continue, or start a new image.',
-      ntfs: 'To image partition by partition in several runs, keep the image on an NTFS disk; images made by older versions or kept on FAT32 or exFAT can only be continued as a whole disk.',
+      ntfs: 'To image partition by partition in several runs, keep the image on a New Technology File System (NTFS) disk; images made by older versions or kept on 32-bit File Allocation Table (FAT32) or Extended File Allocation Table (exFAT) can only be continued as a whole disk.',
       crash:
         'If the program is closed, power fails or the disk disconnects: copied data is written to the image before the map is saved, so at most the last few seconds of progress are lost and nothing already written is damaged. Come back, choose the same image and continue.',
     },
@@ -424,6 +447,7 @@ const enUS: typeof zhCN = {
       rate: 'Read speed',
       rateValue: '{rate}/s',
       rateUnknown: 'Measuring…',
+      errorsInARow: '{count} reads in a row have failed. A large bad area does this; if this is an external disk and the damage should not be this large, the connection may be loose: check the data cable and power, use another port without a hub, then Stop and Continue to resume where it stopped.',
       remaining: 'Copy pass time left',
       remainingUnderMinute: 'Less than a minute',
       remainingMinutes: 'About {minutes} min',
@@ -636,8 +660,22 @@ const enUS: typeof zhCN = {
     imageSize: 'Original {width} × {height}',
     imageError: 'Cannot show the image: {reason}',
     hexTitle: 'First {bytes} of the file',
+    textTitle: 'First {bytes} of the file, shown as {encoding}',
+    encoding: {
+      utf8: 'UTF-8',
+      utf16le: 'UTF-16 LE',
+      utf16be: 'UTF-16 BE',
+      gbk: 'GBK',
+    },
+    showHex: 'Show hex',
+    showText: 'Show text',
+    streamsTitle: 'Alternate data streams ({count})',
+    streamsHint: 'Extra content attached to the same file, such as the address a browser download came from. Copying and Save as keep only the main content.',
+    streamLine: '{name} · {size}',
+    streamUnreadable: 'Cannot be read: encrypted or stored with an unsupported compression.',
   },
   partition: {
+    roleWithType: '{role} ({type})',
     gap: 'Unpartitioned space ({size})',
     line: 'Partition {number}{label} ({filesystem}, {size})',
     fs: {
@@ -690,7 +728,7 @@ const enUS: typeof zhCN = {
       role: 'Type',
       start: 'Start',
       size: 'Size',
-      none: 'No partition can be browsed. FAT12/16/32, exFAT and NTFS are supported; otherwise try deep recovery by file type.',
+      none: 'No partition can be browsed. File Allocation Table (FAT12/16/32), Extended File Allocation Table (exFAT) and New Technology File System (NTFS) are supported; otherwise try deep recovery by file type.',
       scanHint:
         'For an NTFS partition, Next first scans the MFT (master file table) for deleted files. A large partition may take from tens of seconds to minutes; you can cancel at any time.',
       reason: {
@@ -703,9 +741,9 @@ const enUS: typeof zhCN = {
       },
     },
     notes: {
-      primaryGptInvalid: 'The primary GPT is damaged; partitions are listed from the backup GPT at the end of the disk.',
-      backupGptInvalid: 'The backup GPT at the end of the disk is damaged; partitions are listed from the primary GPT, which now has no fallback.',
-      gptUnreadable: 'The disk is marked as GPT, but neither GPT copy can be read; listed as MBR below.',
+      primaryGptInvalid: 'The primary GUID Partition Table (GPT) is damaged; partitions are listed from the backup GPT at the end of the disk.',
+      backupGptInvalid: 'The backup GUID Partition Table (GPT) at the end of the disk is damaged; partitions are listed from the primary GPT, which now has no fallback.',
+      gptUnreadable: 'The disk is marked as GUID Partition Table (GPT), but neither GPT copy can be read; listed as Master Boot Record (MBR) below.',
       sectorSizeMismatch: 'The partition table was written with 4096-byte sectors, unlike the sector size the device reports.',
       extendedChainBroken: 'The extended partition chain is broken; only the logical partitions before the break are listed.',
       partitionTruncated: 'A partition extends past the end of the disk; its length was cut at the end of the disk.',
@@ -737,7 +775,7 @@ const enUS: typeof zhCN = {
         'This reads what is on the disk right now. While a partition is in use, recently written files may not have reached the disk yet; to recover deleted files, stop writing to this disk first.',
       stateHint:
         '"Likely intact" only means the space it used has not been taken by another file; it does not guarantee the contents. Open the copies to check them. On an SSD with TRIM, deleted files are often already zeroed. For files you cannot find here, try deep recovery by file type.',
-      timesUtc: 'This partition records times in UTC, which may differ by some hours from the local times shown by File Explorer.',
+      timesUtc: 'This partition records times in Coordinated Universal Time (UTC), which may differ by some hours from the local times shown by File Explorer.',
       revealMissing: 'Folder "{name}" was not found (it may have been deleted or renamed); showing its parent instead.',
     },
     browser: {
@@ -757,13 +795,13 @@ const enUS: typeof zhCN = {
       },
     },
     scan: {
-      running: 'Scanning the MFT for deleted files: {done} / {total} ({percent}%)',
-      starting: 'Scanning the MFT for deleted files…',
+      running: 'Scanning the Master File Table (MFT) for deleted files: {done} / {total} ({percent}%)',
+      starting: 'Scanning the Master File Table (MFT) for deleted files…',
       cancel: 'Cancel scan',
-      failed: 'Scanning the MFT failed: {reason}',
-      summary: 'The MFT has {records} records. Deleted files and folders found: {deleted}.',
+      failed: 'Scanning the Master File Table (MFT) failed: {reason}',
+      summary: 'The Master File Table (MFT) has {records} records. Deleted files and folders found: {deleted}.',
       orphans: '{count} of them has lost its original folder and is listed under "Files without their folder". | {count} of them have lost their original folder and are listed under "Files without their folder".',
-      unreadable: '{count} MFT record could not be read; files in it cannot be found. | {count} MFT records could not be read; files in them cannot be found.',
+      unreadable: '{count} Master File Table (MFT) record could not be read; files in it cannot be found. | {count} Master File Table (MFT) records could not be read; files in them cannot be found.',
     },
     state: {
       live: '',
@@ -772,14 +810,14 @@ const enUS: typeof zhCN = {
       unknown: 'Deleted · uncertain',
     },
     unsupported: {
-      compressed: 'NTFS compressed · not supported',
+      compressed: 'New Technology File System (NTFS) compressed · not supported',
       encrypted: 'Encrypted · not supported',
       systemCompressed: 'System compressed · not supported',
       reparse: 'Link · not supported',
     },
     unsupportedDetail: {
-      compressed: 'Stored with NTFS compression, which cannot be decompressed yet; the original contents cannot be read.',
-      encrypted: 'Encrypted with EFS; what can be read is ciphertext.',
+      compressed: 'Stored with New Technology File System (NTFS) compression, which cannot be decompressed yet; the original contents cannot be read.',
+      encrypted: 'Encrypted with Encrypting File System (EFS); what can be read is ciphertext.',
       systemCompressed: 'Stored with Windows system compression (WOF / CompactOS); the contents are in a compressed stream that cannot be read yet.',
       reparse: 'A symbolic link, junction or cloud placeholder; the contents are not here.',
     },
@@ -818,7 +856,7 @@ const enUS: typeof zhCN = {
       status: {
         starting: 'Starting the copy…',
         running: 'Copied {done} / {total} ({percent}%), {count} file | Copied {done} / {total} ({percent}%), {count} files',
-        scanning: 'Scanning the MFT for deleted files in the folders ({percent}%)…',
+        scanning: 'Scanning the Master File Table (MFT) for deleted files in the folders ({percent}%)…',
         completed: 'Copy finished',
         failed: 'Copy failed',
         cancelled: 'Cancelled; files already copied stay in the destination',
@@ -867,7 +905,7 @@ const enUS: typeof zhCN = {
         deep: 'Deep search.',
       },
       summary: 'Found {count} partition. | Found {count} partitions.',
-      none: 'No FAT, exFAT or NTFS partitions were found. You can still try "Recover files by type" for the files.',
+      none: 'No File Allocation Table (FAT), Extended File Allocation Table (exFAT) or New Technology File System (NTFS) partitions were found. You can still try "Recover files by type" for the files.',
       table: 'Current partition table: {scheme}.',
       scheme: {
         mbr: 'MBR',
@@ -914,7 +952,7 @@ const enUS: typeof zhCN = {
       opening: 'Opening the partition…',
       openFailed: 'Cannot open this partition: {reason}',
       unbrowsable: 'This partition cannot be browsed: {reason}',
-      scanCancelled: 'MFT scan stopped. An NTFS partition is scanned once before browsing, to find its deleted files.',
+      scanCancelled: 'Master File Table (MFT) scan stopped. A New Technology File System (NTFS) partition is scanned once before browsing, to find its deleted files.',
       retry: 'Open again',
     },
   },
@@ -942,14 +980,12 @@ const enUS: typeof zhCN = {
       partitionTitle: 'Partition {number}{logical}',
       type: 'Partition type and start',
       typeValue: '{type}, starts at {start}',
-      roleWithType: '{role} ({type})',
       primary: 'Boot sector',
       backup: 'Backup boot sector',
-      position: 'Sector {sector} (offset {offset} bytes)',
       volume: 'volume {size}, cluster {cluster}',
       copyOk: 'All checks passed.',
       note: 'Note (does not affect use): {text}',
-      noBackup: 'FAT12 and FAT16 have no backup boot sector.',
+      noBackup: '12-bit File Allocation Table (FAT12) and 16-bit File Allocation Table (FAT16) have no backup boot sector.',
       differences: 'Fields that differ between the boot sector and its backup',
       field: 'Field',
       tableIssues: 'The partition table disagrees with the boot sector',
@@ -974,18 +1010,18 @@ const enUS: typeof zhCN = {
       },
       unsupported: {
         title: 'Not diagnosed.',
-        detail: 'This is a BitLocker-encrypted volume or an ext file system; only FAT, exFAT and NTFS are diagnosed here.',
+        detail: 'This is a BitLocker-encrypted volume or an ext file system; only File Allocation Table (FAT), Extended File Allocation Table (exFAT) and New Technology File System (NTFS) are diagnosed here.',
       },
       unrecognized: {
         title: 'File system not recognised.',
-        detail: 'Neither the boot sector nor any backup location looks like FAT, exFAT or NTFS: the partition may be empty, hold another file system, or be damaged beyond recognition.',
+        detail: 'Neither the boot sector nor any backup location looks like File Allocation Table (FAT), Extended File Allocation Table (exFAT) or New Technology File System (NTFS): the partition may be empty, hold another file system, or be damaged beyond recognition.',
       },
     },
     next: {
       healthy: 'If the partition still will not open, the problem is not the boot sector: try "Recover deleted files" or "Deep recovery by file type".',
       backupDamaged: 'No need to act now; if needed, you can rewrite the backup from the primary boot sector.',
       primaryDamaged: 'Browse with the backup first and save your important files to another disk; then you can repair the primary boot sector from the backup (repair an image first).',
-      bothDamaged: 'The boot sector can be worked out from the structures left in the partition (FAT, root directory, master file table): browse with the worked-out parameters first, and once you recognise and have saved your files, rebuild the boot sector (on an image first). If nothing can be worked out, use "Deep recovery by file type".',
+      bothDamaged: 'The boot sector can be worked out from the structures left in the partition (file allocation table, root directory, master file table): browse with the worked-out parameters first, and once you recognise and have saved your files, rebuild the boot sector (on an image first). If nothing can be worked out, use "Deep recovery by file type".',
       unrecognized: 'If the partition does hold data, try browsing with worked-out parameters first; if nothing can be worked out, use "Deep recovery by file type".',
     },
     browse: {
@@ -1006,7 +1042,7 @@ const enUS: typeof zhCN = {
       volumeUnsupported: 'A single drive letter cannot be repaired: choose the whole disk instead, or create an image and repair the image.',
       setType: 'Change the partition type…',
       repairGpt: 'Repair the GPT…',
-      repairGptHint: 'The intact copy of the GPT is written over the damaged one; the partitions themselves are not changed.',
+      repairGptHint: 'The intact copy of the GUID Partition Table (GPT) is written over the damaged one; the partitions themselves are not changed.',
       outcome: '{action}: {outcome}',
     },
     issue: {
@@ -1019,17 +1055,17 @@ const enUS: typeof zhCN = {
       badBytesPerSector: 'Bytes per sector {value} is not valid.',
       sectorSizeMismatch: 'It records {value}-byte sectors, which does not match where it was found (assuming {expected}-byte sectors).',
       badSectorsPerCluster: 'Sectors per cluster {value} is not valid.',
-      badReservedSectors: 'Reserved sectors (the FAT offset on exFAT) {value} is not valid.',
+      badReservedSectors: 'Reserved sectors {value} is not valid; on Extended File Allocation Table (exFAT) this field holds the File Allocation Table (FAT) offset.',
       badFatCount: 'Number of FATs {value} is not valid (it must be 1 or 2).',
-      badFatSize: 'FAT size {value} sectors is wrong: it is 0 or too small for all clusters.',
+      badFatSize: 'File Allocation Table (FAT) size {value} sectors is wrong: it is 0 or too small for all clusters.',
       badMedia: 'Media descriptor {value} is not valid.',
       badRootEntries: 'Root directory entry count {value} does not match the file system type.',
       badTotalSectors: 'Total sectors is {value}.',
       badLayout: 'The data area lies outside the volume, or the cluster count does not match the volume length.',
       badRootCluster: 'Root directory cluster {value} is out of range.',
-      badActiveFat: 'The FAT it says to use exclusively does not exist (extended flags {value}).',
+      badActiveFat: 'The File Allocation Table (FAT) it says to use exclusively does not exist (extended flags {value}).',
       badBackupSector: 'The recorded backup boot sector location (sector {value}) is outside the reserved area, so it counts as not recorded; the backup is looked for at the usual locations.',
-      badRecordSize: 'The MFT record size is not valid.',
+      badRecordSize: 'The Master File Table (MFT) record size is not valid.',
       badIndexSize: 'The index block size is not valid.',
       mftOutside: 'The master file table ($MFT) starts at cluster {value}, outside the volume.',
       mirrorOutside: 'The master file table copy ($MFTMirr) starts at cluster {value}, outside the volume.',
@@ -1044,24 +1080,23 @@ const enUS: typeof zhCN = {
     target: 'Writes to',
     partition: 'Partition',
     partitionValue: 'Partition {number} · {filesystem}',
-    typeValue: '{role} ({type})',
     addLostValue: 'Adds a partition to the partition table: starting at {start}, {size}, type {type}',
     setTypeValue: 'Changes the type of this partition in the partition table to {type}',
     repairGptValue: {
-      primaryFromBackup: 'Rewrites the primary GPT (header and entries) at the start of the disk from the backup at the end; the partitions do not change',
-      backupFromPrimary: 'Rewrites the backup GPT (entries and header) at the end of the disk from the primary at the start; the partitions do not change',
+      primaryFromBackup: 'Rewrites the header and entries of the primary GUID Partition Table (GPT) at the start of the disk from the backup at the end; the partitions do not change',
+      backupFromPrimary: 'Rewrites the entries and header of the backup GUID Partition Table (GPT) at the end of the disk from the primary at the start; the partitions do not change',
     },
     tableRollbackValue: 'Restores the partition table to what it was before the last change',
     mftValue: 'Copies record(s) {records} of the {source} to the same place in the {target}; the {source} starts at {from}, the {target} at {to}',
     mftRollbackValue: 'Restores record(s) {records} of the {target} to what they were before the last change; the {target} starts at {to}',
     fsFixValue: {
-      fsInfo: 'Writes a new FSInfo sector with the free cluster count marked unknown',
+      fsInfo: 'Writes a new file system information (FSInfo) sector with the free cluster count marked unknown',
       bitmap: 'Marks {clusters} cluster(s) in the allocation bitmap ({items} run(s))',
-      tooLong: 'Shortens the FAT chain of {items} file(s), freeing {clusters} extra cluster(s)',
+      tooLong: 'Shortens the File Allocation Table (FAT) chain of {items} file(s), freeing {clusters} extra cluster(s)',
       lost: 'Frees {items} run(s) of lost clusters ({clusters} cluster(s))',
       dirty: 'Marks the volume as cleanly unmounted',
-      fatFromFirst: 'Takes the first FAT as correct and rewrites the {items} differing sector(s) of the second',
-      fatFromSecond: 'Takes the second FAT as correct and rewrites the {items} differing sector(s) of the first',
+      fatFromFirst: 'Takes the first File Allocation Table (FAT) as correct and rewrites the {items} differing sector(s) of the second',
+      fatFromSecond: 'Takes the second File Allocation Table (FAT) as correct and rewrites the {items} differing sector(s) of the first',
       chains: 'Repairs {items} broken chain(s) or invalid first cluster(s) (files are truncated to match; those with an invalid first cluster become empty files or empty folders)',
       crossLinks: 'Gives {items} cross-linked file(s) their own copy of {clusters} cluster(s)',
       entries: 'Repairs {items} directory entry problem(s)',
@@ -1086,7 +1121,6 @@ const enUS: typeof zhCN = {
     rebuiltField: '{name}: {value}',
     writes: 'Locations to overwrite',
     range: '{position}, {size}',
-    position: 'sector {sector} (offset {offset} bytes)',
     backup: 'Backup taken before writing',
     safety: {
       verify: 'Before writing, the current content at these locations is checked against the plan; if anything differs (it was changed since), not a single byte is written.',
@@ -1116,8 +1150,8 @@ const enUS: typeof zhCN = {
       addLost: 'Write the found {filesystem} partition (starting at {start}, {size}) back to the partition table',
       setType: 'Partition {number}: change the partition type to {type}',
       repairGpt: {
-        primaryFromBackup: 'Repair the primary GPT from the backup',
-        backupFromPrimary: 'Rewrite the backup GPT from the primary',
+        primaryFromBackup: 'Repair the primary GUID Partition Table (GPT) from the backup',
+        backupFromPrimary: 'Rewrite the backup GUID Partition Table (GPT) from the primary',
       },
       mirrorFromMft: 'Partition {number}: update the master file table copy from the master file table',
       mftFromMirror: 'Partition {number}: repair the master file table from its copy',
@@ -1237,11 +1271,11 @@ const enUS: typeof zhCN = {
       },
       entries: {
         label: 'Repair directory entries',
-        hint: 'exFAT entry counts, name lengths and checksums are recalculated from the entries present; orphaned entries and long names that do not match are marked deleted (the file keeps its short name); the . and .. entries of folders are rewritten.',
+        hint: 'Extended File Allocation Table (exFAT) entry counts, name lengths and checksums are recalculated from the entries present; orphaned entries and long names that do not match are marked deleted (the file keeps its short name); the . and .. entries of folders are rewritten.',
       },
       upcase: {
         label: 'Write the standard up-case table',
-        hint: 'Writes the standard up-case table used by Windows and the exFAT specification, into its own clusters when they are large enough, otherwise onto free clusters. If the content already is the standard table and only the recorded checksum is wrong, only the checksum is changed.',
+        hint: 'Writes the standard up-case table used by Windows and the Extended File Allocation Table (exFAT) specification, into its own clusters when they are large enough, otherwise onto free clusters. If the content already is the standard table and only the recorded checksum is wrong, only the checksum is changed.',
       },
       rebuildBitmap: {
         label: 'Rebuild the allocation bitmap from the directory tree',
@@ -1266,7 +1300,7 @@ const enUS: typeof zhCN = {
         hint: 'Afterwards new files will not be written over them.',
       },
       tooLong: {
-        label: 'Shorten FAT chains that are too long',
+        label: 'Shorten File Allocation Table (FAT) chains that are too long',
         hint: 'Each chain ends where the file size says; extra clusters owned only by that file are freed. File contents do not change.',
       },
       lost: {
@@ -1296,8 +1330,8 @@ const enUS: typeof zhCN = {
     partition: {
       caption: 'Choose the partition to check',
       start: 'Start check',
-      none: 'No partition can be checked. FAT12/16/32 and exFAT get a full check; NTFS gets only a few checks.',
-      hint: 'The check reads only file system metadata (boot region, FAT, directories), not file contents, and usually takes a few seconds to a few minutes.',
+      none: 'No partition can be checked. File Allocation Table (FAT12/16/32) and Extended File Allocation Table (exFAT) get a full check; New Technology File System (NTFS) gets only a few checks.',
+      hint: 'The check reads only file system metadata (boot region, file allocation table, directories), not file contents, and usually takes a few seconds to a few minutes.',
       note: {
         ntfs: 'only the boot sector and master file table are checked',
         unknown: 'not recognised; the check will try the backup boot sector',
@@ -1308,7 +1342,7 @@ const enUS: typeof zhCN = {
     },
     stages: {
       boot: 'checking the boot region',
-      fat: 'reading the FAT and allocation bitmap',
+      fat: 'reading the File Allocation Table (FAT) and allocation bitmap',
       directories: 'walking the directory tree',
       clusters: 'summing up cluster by cluster',
       mft: 'checking the master file table',
@@ -1332,7 +1366,7 @@ const enUS: typeof zhCN = {
       totalsValue: 'Data loss: {dataLoss}, structure errors: {structure}, can ignore: {minor}.',
       elapsed: 'Took {seconds} s',
       clean: 'No problems found.',
-      cleanDetail: 'No problems found: the boot region, FAT chains, directory entries and allocation all agree.',
+      cleanDetail: 'No problems found: the boot region, File Allocation Table (FAT) chains, directory entries and allocation all agree.',
       checked: 'Checked',
       skipped: 'Could not check',
       listSeparator: ', ',
@@ -1422,7 +1456,7 @@ const enUS: typeof zhCN = {
       },
       bootChecksum: {
         title: 'The {area} checksum is wrong',
-        detail: 'exFAT uses this checksum to confirm the boot region is intact; when it does not match, Windows may refuse to open the partition or ask to repair it.',
+        detail: 'Extended File Allocation Table (exFAT) uses this checksum to confirm the boot region is intact; when it does not match, Windows may refuse to open the partition or ask to repair it.',
         fix: 'Later the checksum can be recalculated; if the parameters themselves are wrong, restore from the backup first.',
       },
       backupBootInvalid: {
@@ -1451,22 +1485,22 @@ const enUS: typeof zhCN = {
         fix: 'Run "Bad sector check" first; if there are bad sectors, make an image and check and recover on the image.',
       },
       fsInfoInvalid: {
-        title: 'The FSInfo sector signature is wrong',
-        detail: 'FSInfo only holds hints such as the free cluster count; reading files is not affected.',
-        fix: 'Rewrite the FSInfo sector from the Repair section above.',
+        title: 'The file system information (FSInfo) sector signature is wrong',
+        detail: 'File system information (FSInfo) only holds hints such as the free cluster count; reading files is not affected.',
+        fix: 'Rewrite the file system information (FSInfo) sector from the Repair section above.',
       },
       fatCopiesDiffer: {
         title: 'The two FATs differ in {count} place, starting at cluster {cluster} | The two FATs differ in {count} places, starting at cluster {cluster}',
-        detail: 'The two FATs should be identical; a difference means a write was interrupted. The check uses the first FAT.',
+        detail: 'The two File Allocation Tables (FATs) should be identical; a difference means a write was interrupted. The check uses the first FAT.',
         fix: 'From the Repair section above, choose one copy as correct; what each direction leaves behind is shown first.',
       },
       fatMediaMismatch: {
-        title: 'FAT entry 0 ({actual}) does not match the media descriptor in the boot sector ({expected})',
+        title: 'File Allocation Table (FAT) entry 0 ({actual}) does not match the media descriptor in the boot sector ({expected})',
         detail: 'Usually harmless.',
-        fix: 'Later FAT entry 0 can be corrected.',
+        fix: 'Later File Allocation Table (FAT) entry 0 can be corrected.',
       },
       badClustersMarked: {
-        title: '{count} cluster is marked bad in the FAT | {count} clusters are marked bad in the FAT',
+        title: '{count} cluster is marked bad in the File Allocation Table (FAT) | {count} clusters are marked bad in the File Allocation Table (FAT)',
         detail: 'These clusters had read or write errors before and the system no longer uses them; the disk may have other bad sectors.',
         fix: 'No repair needed; make an image first if the data matters.',
       },
@@ -1491,32 +1525,32 @@ const enUS: typeof zhCN = {
         fix: 'From the Repair section above, the file can be made empty and a folder made an empty folder (the name is kept); try "Deep recovery by file type" for the contents first.',
       },
       chainOutOfRange: {
-        title: '{path}: the FAT chain points outside the cluster area at cluster {cluster} ({actual})',
+        title: '{path}: the File Allocation Table (FAT) chain points outside the cluster area at cluster {cluster} ({actual})',
         detail: 'The rest of the file after this point cannot be found.',
         fix: 'Copy the file out first, then end the chain here from the Repair section above.',
       },
       chainLoop: {
-        title: '{path}: the FAT chain loops back at cluster {cluster}',
+        title: '{path}: the File Allocation Table (FAT) chain loops back at cluster {cluster}',
         detail: 'The chain forms a loop: programs reading this file may never stop, and the contents read are wrong.',
         fix: 'Copy the file out first, then end the chain before the loop from the Repair section above.',
       },
       chainFree: {
-        title: '{path}: the FAT chain breaks at cluster {cluster} (the cluster is free in the FAT)',
+        title: '{path}: the File Allocation Table (FAT) chain breaks at cluster {cluster} (the cluster is free in the FAT)',
         detail: 'The rest of the file cannot be found, and this cluster may be taken by a new file at any time.',
         fix: 'End the chain here from the Repair section above; the clusters after the break become lost clusters, which can be saved before freeing.',
       },
       chainBadCluster: {
-        title: '{path}: the FAT chain passes through cluster {cluster}, which is marked bad',
+        title: '{path}: the File Allocation Table (FAT) chain passes through cluster {cluster}, which is marked bad',
         detail: 'This cluster had read or write errors before, and the chain breaks here.',
         fix: 'Make an image first; the file can be truncated to before the bad cluster from the Repair section above.',
       },
       chainTooShort: {
-        title: '{path}: the FAT chain has only {actual} cluster, but the file size needs {expected} | {path}: the FAT chain has only {actual} clusters, but the file size needs {expected}',
+        title: '{path}: the File Allocation Table (FAT) chain has only {actual} cluster, but the file size needs {expected} | {path}: the File Allocation Table (FAT) chain has only {actual} clusters, but the file size needs {expected}',
         detail: 'The end of the file has no space allocated, so it reads incomplete.',
         fix: 'Set the file size to what the chain holds from the Repair section above.',
       },
       chainTooLong: {
-        title: '{path}: the FAT chain has {actual} cluster, but the file size needs only {expected} | {path}: the FAT chain has {actual} clusters, but the file size needs only {expected}',
+        title: '{path}: the File Allocation Table (FAT) chain has {actual} cluster, but the file size needs only {expected} | {path}: the File Allocation Table (FAT) chain has {actual} clusters, but the file size needs only {expected}',
         detail: 'The extra clusters waste space; the file contents are fine.',
         fix: 'Shorten the chain and free the extra clusters from the Repair section above.',
       },
@@ -1597,12 +1631,12 @@ const enUS: typeof zhCN = {
       },
       mftInvalid: {
         title: 'The first record of the master file table is damaged',
-        detail: 'The master file table ($MFT) lists every file on NTFS. Its first record says where the table itself is and how large it is; with it damaged the partition will not open.',
-        fix: 'NTFS keeps a copy of the first few master file table records in the partition ($MFTMirr). The same record can be repaired from that copy, preferably on an image first; if the copy is damaged too, use "Deep recovery by file type".',
+        detail: 'The master file table ($MFT) lists every file on a New Technology File System (NTFS) volume. Its first record says where the table itself is and how large it is; with it damaged the partition will not open.',
+        fix: 'New Technology File System (NTFS) keeps a copy of the first few master file table records in the partition ($MFTMirr). The same record can be repaired from that copy, preferably on an image first; if the copy is damaged too, use "Deep recovery by file type".',
       },
       mftMirrorMismatch: {
         title: '{count} record in the master file table copy does not match the master file table | {count} records in the master file table copy do not match the master file table',
-        detail: 'NTFS keeps a copy ($MFTMirr) of the first few records of the master file table ($MFT, the list of every file) in the partition, used to recover the table if it breaks. The copy is now out of date or damaged, so there is no reliable copy left if the table breaks.',
+        detail: 'New Technology File System (NTFS) keeps a copy ($MFTMirr) of the first few records of the master file table ($MFT, the list of every file) in the partition, used to recover the table if it breaks. The copy is now out of date or damaged, so there is no reliable copy left if the table breaks.',
         fix: 'Once the master file table is confirmed good (the partition opens normally), update the copy from it.',
       },
     },

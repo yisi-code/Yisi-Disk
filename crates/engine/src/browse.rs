@@ -387,7 +387,26 @@ impl Session {
             .open_file(&file)
             .map_err(|error| unavailable(error_chain(&error)))?;
         let length = reader.size();
-        preview::preview_from(reader, length).map_err(|error| unavailable(error_chain(&error)))
+        let mut preview = preview::preview_from(reader, length)
+            .map_err(|error| unavailable(error_chain(&error)))?;
+        // 备用数据流列不出不影响预览主数据流
+        match volume.streams(&file) {
+            Ok(streams) => {
+                preview.streams = streams
+                    .into_iter()
+                    .take(protocol::MAX_STREAM_PREVIEWS)
+                    .map(|stream| {
+                        let content = volume
+                            .open_stream(&file, &stream.name)
+                            .inspect_err(|error| tracing::warn!(%error, "备用数据流打不开"))
+                            .ok();
+                        preview::stream_preview(stream.name, stream.size, content)
+                    })
+                    .collect();
+            }
+            Err(error) => tracing::warn!(%error, "列不出备用数据流"),
+        }
+        Ok(preview)
     }
 }
 

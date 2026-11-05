@@ -104,9 +104,7 @@ const copyStatusText = computed(() => {
         return t('partitionFiles.copy.status.scanning', { percent: copy.percent.value })
       }
       return t('partitionFiles.copy.status.running', {
-        done: formatBytes(copy.done.value),
-        total: formatBytes(copy.total.value),
-        percent: copy.percent.value,
+        ...copy.progressParams.value,
         count: copy.succeeded.value.length,
       }, copy.succeeded.value.length)
     case 'completed':
@@ -258,7 +256,7 @@ async function revealOutput() {
     <FsBrowser
       v-model:selected="selectedItem"
       v-model:checked="checkedItems"
-      class="partition-files__pane"
+      class="wizard__pane"
       :job-id="jobId"
       :partition="partition.number"
       :deleted-only="deletedOnly"
@@ -282,7 +280,7 @@ async function revealOutput() {
       </template>
     </FsBrowser>
     <FsEntryDetails
-      class="partition-files__pane"
+      class="wizard__pane"
       :job-id="jobId"
       :partition="partition.number"
       :item="selectedItem"
@@ -374,13 +372,6 @@ async function revealOutput() {
 <style scoped>
 .partition-files {
   display: contents;
-}
-
-/* 两栏各分标题、框体、底部三行，与父级网格的三行对齐 */
-.partition-files__pane {
-  display: grid;
-  grid-row: span 3;
-  grid-template-rows: subgrid;
 }
 
 /* 复制状态与对话框错误排在两栏下方，宽度与两栏合起来一样 */

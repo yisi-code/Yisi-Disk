@@ -7,8 +7,7 @@ use yisi_fs::{FsKind, mft_self_record_ok};
 use crate::check::issue::{Area, Issue, IssueKind};
 use crate::check::{CheckItem, Ctx, Stage, Summary, check_backup};
 
-/// `$MFTMirr` 至少镜像前 4 条记录（`$MFT`、`$MFTMirr`、`$LogFile`、`$Volume`）。
-const MIRRORED_RECORDS: u64 = 4;
+use crate::mft_fix::MIRRORED_RECORDS;
 
 /// 解析引导扇区：规则在 [`yisi_fs::bpb`]（与打开卷、引导扇区诊断共用）。有致命问题时参数为 `None`。
 fn parse(sector: &[u8]) -> (Option<Geometry>, Vec<Problem>) {

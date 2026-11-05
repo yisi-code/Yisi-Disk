@@ -4,17 +4,16 @@ use yisi_part::bytes::{le16, le32};
 
 use crate::bpb::FatBpb;
 use crate::clusters::{Clusters, Link};
-use crate::entry::{ClusterRef, Entry, FileRef, Listing, Location, State, dos_time};
-use crate::format::{LfnPart, MAX_LFN_PARTS, fat_first_cluster, lfn_name, lfn_ordered, lfn_part};
+use crate::entry::{ClusterRef, Entry, FileRef, Listing, Location, Stamp, State};
+use crate::format::{
+    ATTR_DIRECTORY, ATTR_LONG_NAME, ATTR_VOLUME_ID, DIR_ENTRY_SIZE as ENTRY,
+    FAT_DELETED as DELETED, LfnPart, MAX_LFN_PARTS, fat_first_cluster, lfn_name, lfn_ordered,
+    lfn_part,
+};
 use crate::reader::FileReader;
 use crate::region::{ChunkCache, Region};
 use crate::{FsError, FsKind, MAX_DIR_BYTES, MAX_ENTRIES, bpb};
 
-const ENTRY: usize = 32;
-const ATTR_READ_ONLY_ETC: u8 = 0x0F;
-const ATTR_VOLUME_ID: u8 = 0x08;
-const ATTR_DIRECTORY: u8 = 0x10;
-const DELETED: u8 = 0xE5;
 /// 名字首字节确实是 0xE5 时，目录项里存的是 0x05。
 const KANJI_E5: u8 = 0x05;
 
@@ -37,7 +36,8 @@ pub(crate) struct Fat {
 impl Fat {
     /// 按引导扇区 `boot`（主的或备份的）打开。
     pub fn open(region: Region, boot: &[u8]) -> Result<Self, FsError> {
-        let geometry = parse_boot(boot).ok_or(FsError::Invalid("文件分配表（FAT）引导扇区的参数不自洽"))?;
+        let geometry =
+            parse_boot(boot).ok_or(FsError::Invalid("文件分配表（FAT）引导扇区的参数不自洽"))?;
         let heap_offset = geometry.heap_offset();
         if heap_offset >= region.length() {
             return Err(FsError::Invalid("文件分配表（FAT）的数据区在分区之外"));
@@ -65,7 +65,9 @@ impl Fat {
             width: geometry.width(),
         };
         if kind == FsKind::Fat32 && !clusters.is_valid(geometry.root_cluster) {
-            return Err(FsError::Invalid("32 位文件分配表（FAT32）根目录的簇号不合法"));
+            return Err(FsError::Invalid(
+                "32 位文件分配表（FAT32）根目录的簇号不合法",
+            ));
         }
         let mut fat = Self {
             kind,
@@ -109,6 +111,7 @@ impl Fat {
                 valid_size: 0,
                 contiguous: false,
             }),
+            modified: None,
         }
     }
 
@@ -199,6 +202,7 @@ impl Fat {
                 valid_size: size,
                 contiguous: deleted,
             }),
+            modified: raw.modified.text().is_some().then_some(raw.modified),
         };
         let state = if deleted {
             // 早年的 Windows 删除 FAT32 文件时会清掉首簇的高 16 位。高位为 0、簇数又超过 16 位时，
@@ -218,8 +222,8 @@ impl Fat {
             short_name: Some(raw.short_name),
             name_uncertain: raw.name_uncertain,
             size: file.size,
-            modified: raw.modified,
-            created: raw.created,
+            modified: raw.modified.text(),
+            created: raw.created.text(),
             state,
             position: (raw.is_dir || size > 0)
                 .then(|| self.clusters.offset(raw.first_cluster))
@@ -288,8 +292,8 @@ struct RawEntry {
     first_cluster: u32,
     cluster_high: u16,
     size: u64,
-    modified: Option<String>,
-    created: Option<String>,
+    modified: Stamp,
+    created: Stamp,
 }
 
 struct RawListing {
@@ -308,7 +312,7 @@ fn parse_dir(bytes: &[u8], parent_deleted: bool, is_fat32: bool) -> RawListing {
         if first == 0 {
             break;
         }
-        if attr & 0x3F == ATTR_READ_ONLY_ETC {
+        if attr & 0x3F == ATTR_LONG_NAME {
             if let Some(part) = lfn_part(raw) {
                 if first & 0x40 != 0 && first != DELETED {
                     pending.clear();
@@ -403,7 +407,11 @@ fn raw_entry(
     } else {
         0
     };
-    let date_time = |date_at, time_at| dos_time(le16(raw, date_at)?, le16(raw, time_at)?);
+    let date_time = |date_at, time_at| Stamp::Dos {
+        stamp: (u32::from(le16(raw, date_at).unwrap_or(0)) << 16)
+            | u32::from(le16(raw, time_at).unwrap_or(0)),
+        utc_offset: 0,
+    };
     RawEntry {
         name: long.unwrap_or_else(|| short_name.clone()),
         short_name,

@@ -11,7 +11,7 @@ use super::record::{
 };
 use super::stream::Stream;
 use super::{BITMAP_RECORD, Ntfs, Value, file_names, truncated_on_delete, unsupported};
-use crate::entry::{Entry, FileRef, Location, State, Unsupported, nt_time};
+use crate::entry::{Entry, FileRef, Location, Stamp, State, Unsupported};
 use crate::{FsError, ScanSummary};
 
 /// 一次读这么多字节的 MFT 或分配位图。
@@ -138,7 +138,8 @@ struct DeletedName {
 struct ExtensionData {
     size: u64,
     position: u64,
-    compressed: bool,
+    /// 压缩了、又解不开（[`super::record::Attribute::undecodable_compression`]）。
+    undecodable_compression: bool,
     encrypted: bool,
 }
 
@@ -207,7 +208,9 @@ impl Scan {
     ) -> Result<Option<Self>, FsError> {
         let record_count = ntfs.record_count;
         if record_count > MAX_RECORDS {
-            return Err(FsError::Invalid("主文件表（MFT）记录超过 1600 万条，暂不支持扫描"));
+            return Err(FsError::Invalid(
+                "主文件表（MFT）记录超过 1600 万条，暂不支持扫描",
+            ));
         }
         let record_size = ntfs.record_size;
         let bitmap_record = ntfs
@@ -343,8 +346,8 @@ impl Scan {
             short_name: name.short_name.clone(),
             name_uncertain: false,
             size,
-            modified: nt_time(name.modified),
-            created: nt_time(name.created),
+            modified: Stamp::Nt(name.modified).text(),
+            created: Stamp::Nt(name.created).text(),
             state: if is_dir {
                 State::Intact
             } else {
@@ -360,6 +363,7 @@ impl Scan {
                     record: name.record,
                     sequence: summary.sequence,
                 },
+                modified: (name.modified != 0).then_some(Stamp::Nt(name.modified)),
             },
         })
     }
@@ -527,7 +531,7 @@ impl Builder<'_> {
                 summary.position = data.position;
                 if data.encrypted {
                     summary.set_unsupported(Some(Unsupported::Encrypted));
-                } else if data.compressed {
+                } else if data.undecodable_compression {
                     summary.set_unsupported(Some(Unsupported::Compressed));
                 }
             }
@@ -604,7 +608,7 @@ fn apply_extension(summary: &mut Summary, data: &ExtensionData, record: &Record)
     summary.position = data.position;
     let attributes = standard_attributes(record);
     summary.set_unsupported(unsupported(
-        data.compressed,
+        data.undecodable_compression,
         data.encrypted || attributes & super::FILE_ENCRYPTED != 0,
         reparse_tag(record),
         data.size,
@@ -633,7 +637,7 @@ fn extension_data(record: &Record, cluster_size: u64) -> Option<ExtensionData> {
         Some(ExtensionData {
             size,
             position,
-            compressed: attribute.compressed(),
+            undecodable_compression: attribute.undecodable_compression(cluster_size),
             encrypted: attribute.encrypted(),
         })
     })

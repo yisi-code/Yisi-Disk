@@ -9,10 +9,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
-use yisi_fs::boot::{exfat_boot_checksum, exfat_stored_checksum};
+use yisi_fs::boot::exfat_region_checksum_ok;
+use yisi_fs::boot_write::EXFAT_BOOT_REGION_SECTORS;
 use yisi_fs::format::{FatWidth, fat_entry_raw, fat_media_ok};
 use yisi_fs::{BootCopy, BootLayout, BootSector, FsKind, Volume, inspect_boot, mft_self_record_ok};
-use yisi_io::{BlockDevice, ScanControl, scan_device};
+use yisi_io::{BlockDevice, ScanControl, ranges_overlap as overlaps, scan_device};
+use yisi_part::boot_sector::{has_signature, starts_with_jump};
 use yisi_part::{PartitionKind, PartitionTable, Role};
 
 /// exFAT 的 FAT 第 0 项固定记介质描述符 `F8`（exFAT 的引导扇区里没有这一项）。
@@ -182,7 +184,10 @@ impl Search {
         let mut starts = BTreeSet::from([SMALL_ALIGNMENT]);
         for partition in self.table.iter().flat_map(|table| &table.partitions) {
             starts.insert(partition.offset);
-            follow(&mut starts, partition.offset.saturating_add(partition.length));
+            follow(
+                &mut starts,
+                partition.offset.saturating_add(partition.length),
+            );
         }
         let mut followed = 0;
         control.progress(0, size);
@@ -360,8 +365,7 @@ struct Finder {
 impl Finder {
     /// 看 `at` 处的一个扇区：是引导扇区的话，分别按主引导扇区、备份引导扇区推算分区起点，核对后记下。
     fn examine(&mut self, device: &dyn BlockDevice, at: u64, sector: &[u8]) {
-        let jump = matches!(sector.first(), Some(0xEB | 0xE9));
-        if !jump || sector.get(510..512) != Some([0x55, 0xAA].as_slice()) {
+        if !starts_with_jump(sector) || !has_signature(sector) {
             return;
         }
         let Some(boot) = inspect_boot(sector) else {
@@ -464,17 +468,14 @@ fn read(device: &dyn BlockDevice, at: u64, len: usize) -> Option<Vec<u8>> {
     device.read_exact_at(at, &mut bytes).ok().map(|()| bytes)
 }
 
-/// exFAT 引导区（12 个扇区）的第 11 个扇区填满了前 11 个扇区的校验和，计算时跳过卷标志与使用百分比。
+/// 读出 `region` 处的 exFAT 引导区，核对校验和（[`exfat_region_checksum_ok`]）。
 fn exfat_checksum_ok(device: &dyn BlockDevice, region: u64, bytes_per_sector: u64) -> bool {
-    let Ok(sector) = usize::try_from(bytes_per_sector) else {
+    let Ok(length) = usize::try_from(bytes_per_sector * EXFAT_BOOT_REGION_SECTORS) else {
         return false;
     };
-    let mut bytes = vec![0u8; sector * 12];
-    if device.read_exact_at(region, &mut bytes).is_err() {
-        return false;
-    }
-    let (covered, stored) = bytes.split_at(sector * 11);
-    exfat_stored_checksum(stored) == Some(exfat_boot_checksum(covered))
+    let mut bytes = vec![0u8; length];
+    device.read_exact_at(region, &mut bytes).is_ok()
+        && exfat_region_checksum_ok(&bytes, bytes_per_sector)
 }
 
 /// 与分区表比对：起点相同算表里已有；否则与哪个分区有重叠就算重叠。
@@ -503,10 +504,6 @@ fn relation(table: Option<&PartitionTable>, offset: u64, length: u64) -> Relatio
         .map_or(Relation::Lost, |partition| Relation::Overlaps {
             number: partition.number,
         })
-}
-
-fn overlaps(a_offset: u64, a_length: u64, b_offset: u64, b_length: u64) -> bool {
-    a_offset < b_offset.saturating_add(b_length) && b_offset < a_offset.saturating_add(a_length)
 }
 
 /// 候选分区按起点排好序：后一个的起点落在前面某个的范围里就是重叠。

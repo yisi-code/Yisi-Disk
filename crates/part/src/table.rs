@@ -5,9 +5,8 @@ use yisi_io::{BlockDevice, IoError};
 use crate::bytes::le16;
 use crate::{Guid, gpt, mbr};
 
-/// 引导扇区与 MBR 共用的结尾标志 `55 AA`。
-pub(crate) const BOOT_SIGNATURE: u16 = 0xAA55;
-pub(crate) const SIGNATURE_OFFSET: usize = 510;
+pub(crate) use crate::boot_sector::{BOOT_SIGNATURE, SIGNATURE_OFFSET};
+use crate::boot_sector::{bytes_per_sector_ok, fat_media_byte_ok, has_signature, starts_with_jump};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PartError {
@@ -86,7 +85,7 @@ pub fn read_table(device: &dyn BlockDevice) -> Result<PartitionTable, PartError>
     first.truncate(read);
 
     let mut notes = Vec::new();
-    let has_signature = le16(&first, SIGNATURE_OFFSET) == Some(BOOT_SIGNATURE);
+    let has_signature = has_signature(&first);
     let entries = if has_signature {
         mbr::primary_entries(&first)
     } else {
@@ -157,8 +156,7 @@ fn finish(
 /// 两者都以 `55 AA` 结尾。引导扇区以跳转指令开头，并且要么带 exFAT / NTFS 的标识，
 /// 要么 BPB 的各项参数自洽；MBR 的引导代码一般不以跳转指令开头，即使是，BPB 的位置也不是合理的参数。
 pub(crate) fn looks_like_boot_sector(sector: &[u8]) -> bool {
-    let jump = matches!(sector.first(), Some(0xEB | 0xE9));
-    if !jump {
+    if !starts_with_jump(sector) {
         return false;
     }
     let oem = sector.get(3..11);
@@ -170,11 +168,11 @@ pub(crate) fn looks_like_boot_sector(sector: &[u8]) -> bool {
     let reserved = le16(sector, 14).unwrap_or(0);
     let fats = sector.get(16).copied().unwrap_or(0);
     let media = sector.get(21).copied().unwrap_or(0);
-    matches!(bytes_per_sector, 512 | 1024 | 2048 | 4096)
+    bytes_per_sector_ok(u64::from(bytes_per_sector))
         && sectors_per_cluster.is_power_of_two()
         && reserved > 0
         && matches!(fats, 1 | 2)
-        && (media == 0xF0 || media >= 0xF8)
+        && fat_media_byte_ok(media)
 }
 
 #[cfg(test)]

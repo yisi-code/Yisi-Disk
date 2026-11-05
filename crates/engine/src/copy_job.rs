@@ -1,24 +1,22 @@
 //! 复制任务：把分区里选中的文件与目录（连同其中全部内容）复制到输出目录，保留相对路径。
 //! 源只读；单个文件读不出时记为失败、继续下一个，写输出出错（例如输出盘满）时整个任务失败。
 //! NTFS 分区上选了目录时，先扫一遍 MFT，目录里已删除的项才能一起复制。
+//! 复制出的文件带上卷上记的修改时间（目录不带：往里写文件时系统会改它）。
 
-use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use yisi_carve::{PARTIAL_SUFFIX, partial_path, rename_new};
 use yisi_engine::protocol::{COPIED, CopiedFile, CopySummary, JobCopied};
-use yisi_fs::{FileRef, Volume};
+use yisi_fs::{FileRef, Moment, Stamp, Volume};
 
 use crate::browse::STAGE_SCAN_MFT;
-use crate::job::{JobContext, JobOutcome};
+use crate::job::{Batcher, JobContext, JobOutcome};
 use crate::runtime::error_chain;
 
-const COPIED_BATCH: usize = 100;
-const COPIED_INTERVAL: Duration = Duration::from_millis(250);
 const CHUNK: usize = 1 << 20;
 /// 展开目录时最多这么多层、这么多项，挡住构造出来的环与超大目录树。
 const MAX_DEPTH: usize = 64;
@@ -258,6 +256,9 @@ fn copy_one(
         context.progress(*done, total);
         reporter.tick();
     };
+    if matches!(outcome, CopyResult::Done { .. }) {
+        set_modified(&output, file.modified, target);
+    }
     drop(output);
     match outcome {
         CopyResult::Done { .. } => {
@@ -271,6 +272,31 @@ fn copy_one(
         }
     }
     Ok(outcome)
+}
+
+/// 把卷上记的修改时间设到复制出的文件上；没记、记的不合法或设不上都不算复制失败。
+fn set_modified(output: &File, stamp: Option<Stamp>, target: &Path) {
+    let Some(time) = stamp.and_then(|stamp| stamp.moment()).and_then(system_time) else {
+        return;
+    };
+    if let Err(error) = output.set_modified(time) {
+        tracing::warn!(target = %target.display(), %error, "设不上修改时间");
+    }
+}
+
+/// FAT 记的本地时间按本机时区换算（[`yisi_io::local_to_utc`]）。
+fn system_time(moment: Moment) -> Option<SystemTime> {
+    let (seconds, nanos) = match moment {
+        Moment::Utc { seconds, nanos } => (seconds, nanos),
+        Moment::Local { seconds } => (yisi_io::local_to_utc(seconds)?, 0),
+    };
+    let whole = Duration::from_secs(seconds.unsigned_abs());
+    let base = if seconds >= 0 {
+        UNIX_EPOCH.checked_add(whole)?
+    } else {
+        UNIX_EPOCH.checked_sub(whole)?
+    };
+    base.checked_add(Duration::from_nanos(u64::from(nanos)))
 }
 
 /// 输出路径：每一级清洗成系统允许的名字；与本任务起过的名字、目录里已有的文件（含写入中途的 `.part`）
@@ -383,47 +409,38 @@ pub fn sanitize(name: &str) -> String {
 /// 把复制好（或失败）的文件攒成一批发出；保存「只扫描」的结果时也用它。
 pub(crate) struct Reporter<'a> {
     context: &'a JobContext,
-    pending: RefCell<Vec<CopiedFile>>,
-    last_flush: Cell<Instant>,
+    batch: Batcher<CopiedFile>,
 }
 
 impl<'a> Reporter<'a> {
     pub(crate) fn new(context: &'a JobContext) -> Self {
         Self {
             context,
-            pending: RefCell::new(Vec::new()),
-            last_flush: Cell::new(Instant::now()),
+            batch: Batcher::new(),
         }
+    }
+
+    fn send(&self, files: Vec<CopiedFile>) {
+        self.context.notify(
+            COPIED,
+            JobCopied {
+                job_id: self.context.id().to_owned(),
+                files,
+            },
+        );
     }
 
     pub(crate) fn push(&self, file: CopiedFile) {
-        self.pending.borrow_mut().push(file);
-        if self.pending.borrow().len() >= COPIED_BATCH {
-            self.flush();
-        } else {
-            self.tick();
-        }
+        self.batch.push(file, |files| self.send(files));
     }
 
-    /// 攒着的到时间了就发出去。处理一个大文件的过程中也要调用，免得之前做完的几个一直等到它结束才通知。
+    /// 处理一个大文件的过程中也要调用，免得之前做完的几个一直等到它结束才通知。
     pub(crate) fn tick(&self) {
-        if !self.pending.borrow().is_empty() && self.last_flush.get().elapsed() >= COPIED_INTERVAL {
-            self.flush();
-        }
+        self.batch.tick(|files| self.send(files));
     }
 
     pub(crate) fn flush(&self) {
-        let files = std::mem::take(&mut *self.pending.borrow_mut());
-        self.last_flush.set(Instant::now());
-        if !files.is_empty() {
-            self.context.notify(
-                COPIED,
-                JobCopied {
-                    job_id: self.context.id().to_owned(),
-                    files,
-                },
-            );
-        }
+        self.batch.flush(|files| self.send(files));
     }
 }
 

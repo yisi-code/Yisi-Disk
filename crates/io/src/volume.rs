@@ -88,10 +88,9 @@ pub struct VolumeOnDisk {
 impl VolumeOnDisk {
     /// 这个卷在这块盘上的区段与 `[offset, offset + length)` 是否相交。
     pub fn overlaps(&self, offset: u64, length: u64) -> bool {
-        let end = offset.saturating_add(length);
-        self.extents.iter().any(|extent| {
-            offset < extent.offset.saturating_add(extent.length) && extent.offset < end
-        })
+        self.extents
+            .iter()
+            .any(|extent| crate::ranges_overlap(offset, length, extent.offset, extent.length))
     }
 }
 

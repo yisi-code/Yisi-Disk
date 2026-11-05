@@ -2,6 +2,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watchEffect } from 'vue'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import { reportJobState, type EngineState } from './useEngineStatus'
 import { useReadHealth } from './useReadHealth'
+import { formatBytes } from '../utils/format'
 import {
   cancelJob,
   onJobEvent,
@@ -77,6 +78,13 @@ export function useJob<TResult>(
   const percent = computed(() =>
     total.value > 0 ? Math.floor((done.value / total.value) * 100) : 0,
   )
+  /** 进度文案的参数：已读、总量、百分比、速度（还没测出速度时为 '-'） */
+  const progressParams = computed(() => ({
+    done: formatBytes(done.value),
+    total: formatBytes(total.value),
+    percent: percent.value,
+    rate: bytesPerSecond.value === null ? '-' : formatBytes(bytesPerSecond.value),
+  }))
   /** 报给底栏的引擎状态 */
   const engineState = computed<EngineState | null>(() => {
     switch (status.value) {
@@ -262,6 +270,7 @@ export function useJob<TResult>(
     total,
     stage,
     percent,
+    progressParams,
     bytesPerSecond,
     failure,
     isUnresponsive,

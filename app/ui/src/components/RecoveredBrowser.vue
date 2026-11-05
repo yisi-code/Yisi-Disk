@@ -368,7 +368,7 @@ function fileDetail(file: FoundFile): string {
       </fieldset>
     </div>
 
-    <p v-if="files.length === 0" class="recovered-browser__empty">
+    <p v-if="files.length === 0" class="tree-list__footer">
       {{ t('carve.browser.empty') }}
     </p>
     <div
@@ -384,7 +384,7 @@ function fileDetail(file: FoundFile): string {
       @keydown="handleKeydown"
     >
       <div
-        class="recovered-browser__spacer"
+        class="tree-list__spacer"
         role="presentation"
         :style="{ height: `${rows.length * ROW_HEIGHT}px` }"
       >
@@ -392,11 +392,11 @@ function fileDetail(file: FoundFile): string {
           v-for="{ row, index } in visibleRows"
           :id="domId(row.id)"
           :key="row.id"
-          class="recovered-browser__row"
+          class="tree-list__row"
           :class="{
             'recovered-browser__row--group': row.kind === 'group',
-            'recovered-browser__row--active': row.id === activeId,
-            'recovered-browser__row--selected':
+            'tree-list__row--active': row.id === activeId,
+            'tree-list__row--selected':
               row.kind === 'file' && row.file.name === selectedFile?.name,
           }"
           :style="{ transform: `translateY(${index * ROW_HEIGHT}px)`, height: `${ROW_HEIGHT}px` }"
@@ -420,10 +420,10 @@ function fileDetail(file: FoundFile): string {
               :aria-label="t('carve.browser.checkGroup', { name: row.group.label })"
               @click.stop="toggleChecked(row)"
             />
-            <span class="recovered-browser__chevron" aria-hidden="true">
+            <span class="tree-list__chevron" aria-hidden="true">
               {{ row.isExpanded ? '▾' : '▸' }}
             </span>
-            <span class="recovered-browser__name">{{ row.group.label }}</span>
+            <span class="tree-list__name">{{ row.group.label }}</span>
             <span class="recovered-browser__meta">
               {{
                 t('carve.browser.groupTotals', {
@@ -443,16 +443,16 @@ function fileDetail(file: FoundFile): string {
               :aria-label="t('carve.browser.check', { name: row.file.name })"
               @click.stop="toggleChecked(row)"
             />
-            <span class="recovered-browser__name recovered-browser__name--file">
+            <span class="tree-list__name">
               {{ row.file.name }}
             </span>
             <span class="recovered-browser__meta">{{ fileDetail(row.file) }}</span>
-            <span class="recovered-browser__size">{{ formatBytes(row.file.length) }}</span>
+            <span class="tree-list__size">{{ formatBytes(row.file.length) }}</span>
           </template>
         </div>
       </div>
     </div>
-    <div class="recovered-browser__footer">
+    <div class="tree-list__footer">
       <p class="tree-list__hint">
         {{ selectable ? t('carve.browser.selectHint') : t('carve.browser.hint') }}
       </p>
@@ -486,29 +486,10 @@ function fileDetail(file: FoundFile): string {
   cursor: pointer;
 }
 
-.recovered-browser__empty,
-.recovered-browser__footer {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-md);
-}
-
-.recovered-browser__spacer {
-  position: relative;
-}
-
-.recovered-browser__row {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  display: flex;
-  align-items: center;
+/* 这一列的行距与缩进；其余几何在 wizard.css 的 tree-list__row 里 */
+.tree-list__row {
   gap: var(--space-sm);
   padding: 0 var(--space-sm) 0 calc(var(--space-sm) + var(--space-md));
-  cursor: default;
-  user-select: none;
-  font-variant-numeric: tabular-nums;
 }
 
 .recovered-browser__row--group {
@@ -517,39 +498,10 @@ function fileDetail(file: FoundFile): string {
   cursor: pointer;
 }
 
-.recovered-browser__row--selected {
-  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
-}
-
-/* 键盘焦点所在的行；只在列表有焦点时画出来 */
-.tree-list__viewport:focus-visible .recovered-browser__row--active {
-  box-shadow: inset 0 0 0 1px var(--color-accent);
-}
-
-.recovered-browser__chevron {
-  flex: none;
-  width: var(--space-md);
-  color: var(--color-text-muted);
-}
-
-.recovered-browser__name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.recovered-browser__meta,
-.recovered-browser__size {
+.recovered-browser__meta {
   flex: none;
   color: var(--color-text-muted);
   font-size: var(--font-size-small);
   font-weight: normal;
-}
-
-.recovered-browser__size {
-  min-width: 72px;
-  text-align: right;
 }
 </style>

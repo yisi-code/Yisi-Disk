@@ -12,7 +12,12 @@ use crate::fat::short_checksum;
 use crate::format::{FatWidth, fat_entry_span, put_fat_entry};
 
 mod ntfs;
-pub use ntfs::{NtfsImage, ROOT as NTFS_ROOT, TAG_WOF};
+pub use ntfs::{COMPRESSION_UNIT_CLUSTERS, CompressedUnit, NtfsImage, ROOT as NTFS_ROOT, TAG_WOF};
+
+/// 系统 `RtlCompressBuffer`（LZNT1）压出来的一个 64 KiB 压缩单元：原文与压缩结果。
+/// 原文是 16 KiB 文本、8 KiB 随机字节（压出来是原样存放的块）、8 KiB 全 0、32 KiB 含长距离重复的文本。
+pub const LZNT1_PLAIN: &[u8] = include_bytes!("samples/lznt1/plain.bin");
+pub const LZNT1_PACKED: &[u8] = include_bytes!("samples/lznt1/packed.bin");
 
 const SECTOR: usize = 512;
 /// FAT32 样本的备份引导扇区。

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useI18n } from 'vue-i18n'
+import { usePositionText } from '../composables/usePositionText'
 import type { ByteRange } from '../services/host'
 import { formatBytes } from '../utils/format'
 
@@ -11,14 +12,8 @@ defineProps<{
   ranges: ByteRange[]
 }>()
 
-const { t, locale } = useI18n()
-
-function formatPosition(offset: number): string {
-  return t('common.ranges.positionValue', {
-    position: formatBytes(offset),
-    offset: offset.toLocaleString(locale.value),
-  })
-}
+const { t } = useI18n()
+const { rangePosition: formatPosition } = usePositionText()
 </script>
 
 <template>

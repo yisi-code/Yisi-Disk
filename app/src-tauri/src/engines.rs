@@ -4,6 +4,7 @@ mod image;
 mod partitions;
 
 use std::collections::HashMap;
+use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -61,8 +62,23 @@ const SCAN_TIMEOUT: Duration = Duration::from_secs(24 * 3600);
 const UNRESPONSIVE_AFTER: Duration = Duration::from_secs(10);
 /// 发出取消后等这么久，引擎还没退出就强制结束它。
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
-/// 镜像文件不记录扇区大小，按最常见的 512 字节处理。
+/// 镜像文件不记录扇区大小：旁边没有坏区图（或坏区图里没记）时按最常见的 512 字节处理。
 pub(crate) const IMAGE_SECTOR_SIZE: u32 = 512;
+/// 坏区图的头几行在开头，只读这么多。
+const MAP_HEAD_BYTES: u64 = 4096;
+
+/// 镜像按多大的扇区打开：本程序做的镜像旁边有坏区图，里面记着源的扇区大小（4 KiB 扇区的盘做的镜像要按 4096 打开），
+/// 其他按 [`IMAGE_SECTOR_SIZE`]。读源、生成与执行写入计划都按这一个函数。
+pub(crate) fn image_sector_size(image_path: &Path) -> u32 {
+    let Ok(file) = std::fs::File::open(yisi_io::map_path(image_path)) else {
+        return IMAGE_SECTOR_SIZE;
+    };
+    let mut head = Vec::new();
+    if file.take(MAP_HEAD_BYTES).read_to_end(&mut head).is_err() {
+        return IMAGE_SECTOR_SIZE;
+    }
+    yisi_io::recorded_sector_size(&String::from_utf8_lossy(&head)).unwrap_or(IMAGE_SECTOR_SIZE)
+}
 /// 磁盘代理只接受 1 到 3 位数字的磁盘编号。
 /// Windows 的 `CREATE_NO_WINDOW`：引擎是控制台程序，不弹出控制台窗口。
 #[cfg(windows)]
@@ -927,8 +943,8 @@ fn resolve_source(
 ) -> Result<Source, HostError> {
     match target {
         Target::Image { path } => Ok(Source::Image {
+            sector_size: image_sector_size(Path::new(&path)),
             path,
-            sector_size: IMAGE_SECTOR_SIZE,
         }),
         Target::Disk { disk_number } => Ok(Source::Disk {
             handle: broker.open_disk(&disk_path(disk_number)?, engine_pid)?,

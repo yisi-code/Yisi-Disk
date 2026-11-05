@@ -25,7 +25,8 @@ pub const GPT_DATA_NAME: &str = "Basic data partition";
 /// （按柱面分的老盘）、1 个扇区。先找原来那个 EBR 的残留，找不到再用空着的扇区。
 const EBR_GAPS: [u64; 4] = [2048, 128, 63, 1];
 /// MBR 扇区里分区表项区的起点（之前是引导代码，不动）。
-const TABLE_AREA: usize = 446;
+use crate::boot_sector::MBR_TABLE_OFFSET as TABLE_AREA;
+use yisi_io::{merge_writes as merge_adjacent, ranges_overlap as overlaps};
 
 /// 怎么改分区表。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -391,8 +392,9 @@ fn le_signature(sector: &[u8]) -> bool {
 
 fn plan_gpt(device: &dyn BlockDevice, edit: &TableEdit) -> Result<Vec<SectorWrite>, EditError> {
     let sector = u64::from(device.sector_size());
-    let primary =
-        gpt::read_primary(device)?.ok_or(EditError::Unsupported("主 GUID 分区表（GPT）读不出或校验和不对"))?;
+    let primary = gpt::read_primary(device)?.ok_or(EditError::Unsupported(
+        "主 GUID 分区表（GPT）读不出或校验和不对",
+    ))?;
     let mut entries = primary.entries.clone();
     match *edit {
         TableEdit::Add {
@@ -595,22 +597,6 @@ fn header_sector(device: &dyn BlockDevice, lba: u64, header: &[u8]) -> Result<Ve
 }
 
 /// 首尾相接的段合成一段；内容没变的段去掉。
-fn merge_adjacent(writes: Vec<SectorWrite>) -> Vec<SectorWrite> {
-    let mut merged: Vec<SectorWrite> = Vec::new();
-    for write in writes {
-        if let Some(last) = merged.last_mut()
-            && last.offset.checked_add(last.len()) == Some(write.offset)
-        {
-            last.before.extend_from_slice(&write.before);
-            last.after.extend_from_slice(&write.after);
-            continue;
-        }
-        merged.push(write);
-    }
-    merged.retain(|write| write.before != write.after);
-    merged
-}
-
 fn put_u32(bytes: &mut [u8], at: usize, value: u32) -> Result<(), EditError> {
     bytes
         .get_mut(at..at + 4)
@@ -625,10 +611,6 @@ fn put_u64(bytes: &mut [u8], at: usize, value: u64) -> Result<(), EditError> {
         .ok_or(EditError::Unsupported("表头太短"))?
         .copy_from_slice(&value.to_le_bytes());
     Ok(())
-}
-
-fn overlaps(a_offset: u64, a_length: u64, b_offset: u64, b_length: u64) -> bool {
-    a_offset < b_offset.saturating_add(b_length) && b_offset < a_offset.saturating_add(a_length)
 }
 
 /// 新表项的唯一 GUID（第 4 版、随机）。随机数取自系统给每个 `RandomState` 的随机种子，只求不重复。

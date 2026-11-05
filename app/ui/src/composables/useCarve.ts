@@ -50,6 +50,7 @@ export function useCarve() {
     total: job.total,
     percent: job.percent,
     bytesPerSecond: job.bytesPerSecond,
+    progressParams: job.progressParams,
     foundCount,
     files,
     summary,

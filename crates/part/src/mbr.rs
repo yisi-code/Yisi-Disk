@@ -11,7 +11,7 @@ use crate::{Note, PartError, Partition, PartitionKind};
 pub(crate) const GPT_PROTECTIVE: u8 = 0xEE;
 /// 扩展分区的类型：CHS 扩展、LBA 扩展、Linux 扩展。
 pub(crate) const EXTENDED: [u8; 3] = [0x05, 0x0F, 0x85];
-const TABLE_OFFSET: usize = 446;
+use crate::boot_sector::MBR_TABLE_OFFSET as TABLE_OFFSET;
 const ENTRY_SIZE: usize = 16;
 /// CHS 地址写成「超出 CHS 能表示的范围，按 LBA 找」：磁头 254、扇区 63、柱面 1023。
 const CHS_BEYOND: [u8; 3] = [0xFE, 0xFF, 0xFF];

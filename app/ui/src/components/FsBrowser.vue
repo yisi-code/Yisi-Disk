@@ -463,7 +463,7 @@ function withShownName(entry: FsEntry): FsEntry {
       @keydown="handleKeydown"
     >
       <div
-        class="fs-browser__spacer"
+        class="tree-list__spacer"
         role="presentation"
         :style="{ height: `${rows.length * ROW_HEIGHT}px` }"
       >
@@ -471,10 +471,10 @@ function withShownName(entry: FsEntry): FsEntry {
           v-for="{ row, index } in visibleRows"
           :id="domId(row.id)"
           :key="row.id"
-          class="fs-browser__row"
+          class="tree-list__row"
           :class="{
-            'fs-browser__row--active': row.id === activeId,
-            'fs-browser__row--selected': row.kind === 'entry' && row.id === selected?.id,
+            'tree-list__row--active': row.id === activeId,
+            'tree-list__row--selected': row.kind === 'entry' && row.id === selected?.id,
             'fs-browser__row--deleted': row.kind === 'entry' && row.entry.deleted,
             'fs-browser__row--status': row.kind === 'status',
           }"
@@ -501,11 +501,11 @@ function withShownName(entry: FsEntry): FsEntry {
               :aria-label="t('partitionFiles.browser.check', { name: row.entry.name })"
               @click.stop="handleCheckClick($event, row)"
             />
-            <span class="fs-browser__chevron" aria-hidden="true">
+            <span class="tree-list__chevron" aria-hidden="true">
               {{ row.entry.isDir ? (row.isExpanded ? '▾' : '▸') : '' }}
             </span>
             <span
-              class="fs-browser__name"
+              class="tree-list__name"
               :class="{
                 'fs-browser__name--dir': row.entry.isDir,
                 'fs-browser__name--virtual': row.entry.virtualDir !== null,
@@ -527,16 +527,16 @@ function withShownName(entry: FsEntry): FsEntry {
             >
               {{ t(`partitionFiles.unsupported.${row.entry.unsupported}`) }}
             </span>
-            <span class="fs-browser__size">
+            <span class="tree-list__size">
               {{ row.entry.isDir ? '' : formatBytes(row.entry.size) }}
             </span>
-            <span class="fs-browser__time">{{ row.entry.modified ?? '' }}</span>
+            <span class="tree-list__time">{{ row.entry.modified ?? '' }}</span>
           </template>
           <span v-else class="fs-browser__status">{{ statusText(row) }}</span>
         </div>
       </div>
     </div>
-    <div class="fs-browser__footer">
+    <div class="tree-list__footer">
       <p class="tree-list__hint">{{ t('partitionFiles.browser.hint') }}</p>
       <slot name="actions"></slot>
     </div>
@@ -545,52 +545,15 @@ function withShownName(entry: FsEntry): FsEntry {
 
 <style scoped>
 
-.fs-browser__spacer {
-  position: relative;
-}
-
-.fs-browser__row {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--space-xs);
+/* 这一列的右边距；其余几何在 wizard.css 的 tree-list__row 里 */
+.tree-list__row {
   padding-right: var(--space-sm);
-  cursor: default;
-  user-select: none;
-  font-variant-numeric: tabular-nums;
-}
-
-.fs-browser__row--selected {
-  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
-}
-
-/* 键盘焦点所在的行；只在列表有焦点时画出来 */
-.tree-list__viewport:focus-visible .fs-browser__row--active {
-  box-shadow: inset 0 0 0 1px var(--color-accent);
 }
 
 /* 随上级文件夹一起复制：仍是已勾选的样子，只是淡一些、点了不变 */
 .tree-list__check[aria-disabled='true'] {
   opacity: 0.6;
   cursor: not-allowed;
-}
-
-.fs-browser__chevron {
-  flex: none;
-  width: var(--space-md);
-  color: var(--color-text-muted);
-  text-align: center;
-}
-
-.fs-browser__name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .fs-browser__name--dir {
@@ -603,7 +566,7 @@ function withShownName(entry: FsEntry): FsEntry {
 }
 
 /* 已删除：名字划线、变淡，旁边另有文字标签，不只靠颜色区分 */
-.fs-browser__row--deleted .fs-browser__name {
+.fs-browser__row--deleted .tree-list__name {
   color: var(--color-text-muted);
   text-decoration: line-through;
 }
@@ -631,22 +594,6 @@ function withShownName(entry: FsEntry): FsEntry {
   border-style: dashed;
 }
 
-.fs-browser__size,
-.fs-browser__time {
-  flex: none;
-  color: var(--color-text-muted);
-  font-size: var(--font-size-small);
-  text-align: right;
-}
-
-.fs-browser__size {
-  min-width: 72px;
-}
-
-.fs-browser__time {
-  min-width: 132px;
-}
-
 .fs-browser__row--status {
   color: var(--color-text-muted);
   font-size: var(--font-size-small);
@@ -654,12 +601,6 @@ function withShownName(entry: FsEntry): FsEntry {
 
 .fs-browser__status {
   padding-left: calc(var(--space-md) + var(--space-md));
-}
-
-.fs-browser__footer {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-md);
 }
 
 </style>

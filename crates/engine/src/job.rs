@@ -233,6 +233,51 @@ fn panic_message(payload: &(dyn Any + Send)) -> String {
     }
 }
 
+/// 一批最多这么多项，或距上次发出满这么久就发出。
+const BATCH: usize = 100;
+const BATCH_INTERVAL: Duration = Duration::from_millis(250);
+
+/// 边做边报的一批项（深度恢复找到的文件、复制好的文件）：攒满 [`BATCH`] 项或距上次发出满 [`BATCH_INTERVAL`]
+/// 就交给 `send`。处理一个大文件的过程中也要 [`tick`](Self::tick)，免得之前做完的一直等到它结束才通知。
+pub(crate) struct Batcher<T> {
+    pending: std::cell::RefCell<Vec<T>>,
+    last_flush: std::cell::Cell<Instant>,
+}
+
+impl<T> Batcher<T> {
+    pub fn new() -> Self {
+        Self {
+            pending: std::cell::RefCell::new(Vec::new()),
+            last_flush: std::cell::Cell::new(Instant::now()),
+        }
+    }
+
+    pub fn push(&self, item: T, send: impl FnOnce(Vec<T>)) {
+        self.pending.borrow_mut().push(item);
+        if self.pending.borrow().len() >= BATCH {
+            self.flush(send);
+        } else {
+            self.tick(send);
+        }
+    }
+
+    /// 攒着的到时间了就发出去。
+    pub fn tick(&self, send: impl FnOnce(Vec<T>)) {
+        if !self.pending.borrow().is_empty() && self.last_flush.get().elapsed() >= BATCH_INTERVAL {
+            self.flush(send);
+        }
+    }
+
+    /// 攒着的全发出去（结束时）。
+    pub fn flush(&self, send: impl FnOnce(Vec<T>)) {
+        let items = std::mem::take(&mut *self.pending.borrow_mut());
+        self.last_flush.set(Instant::now());
+        if !items.is_empty() {
+            send(items);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{Cursor, Write};

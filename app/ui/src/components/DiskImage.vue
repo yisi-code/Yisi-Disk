@@ -27,6 +27,7 @@ import {
   type JobTarget,
 } from '../services/host'
 import { formatBytes, formatSeconds } from '../utils/format'
+import { joinPath } from '../utils/path'
 
 /** 报告里最多列出的读不出区段数；其余只计入总数 */
 const MAX_LISTED_RANGES = 20
@@ -490,10 +491,6 @@ function defaultImageName(): string {
   return stem === '' ? 'disk-image.img' : `${stem}-image.img`
 }
 
-function joinPath(folder: string, name: string): string {
-  return /[\\/]$/.test(folder) ? `${folder}${name}` : `${folder}\\${name}`
-}
-
 /** 盘符开头（C:\ 或 C:/）或网络路径（\\server\share） */
 function isAbsolutePath(path: string): boolean {
   return /^[a-zA-Z]:[\\/]/.test(path) || /^[\\/]{2}[^\\/]/.test(path)
@@ -577,6 +574,7 @@ function changeText(change: { kind: string; number: number; before: ByteRange | 
           :disabled="isBusy"
           :current-path="trimmedImagePath"
           @use="useHistory"
+          @reveal="(item) => history.reveal(item.record.imagePath)"
           @relocate="relocateHistory"
           @remove="removeHistory"
         />
@@ -830,6 +828,13 @@ function changeText(change: { kind: string; number: number; before: ByteRange | 
           </template>
         </dl>
 
+        <p
+          v-if="isBusy && imaging?.checkConnection"
+          class="wizard__hint wizard__hint--warning"
+          role="status"
+        >
+          {{ t('diskImage.run.errorsInARow', { count: imaging.errorsInARow }) }}
+        </p>
         <p v-if="isUnresponsive" class="wizard__error" role="alert">
           {{ t('diskImage.unresponsive') }}
         </p>
@@ -893,7 +898,23 @@ function changeText(change: { kind: string; number: number; before: ByteRange | 
             }}
           </dd>
           <dt>{{ t('diskImage.result.imagePath') }}</dt>
-          <dd class="wizard__path-text">{{ finishedSummary.imagePath }}</dd>
+          <dd class="wizard__path-text">
+            {{ finishedSummary.imagePath }}
+            <button
+              class="wizard__button wizard__button--secondary disk-image__reveal"
+              type="button"
+              @click="history.reveal(finishedSummary.imagePath)"
+            >
+              {{ t('common.reveal') }}
+            </button>
+          </dd>
+          <dd
+            v-if="history.actionError.value?.imagePath === finishedSummary.imagePath"
+            class="wizard__error"
+            role="alert"
+          >
+            {{ formatHostError(history.actionError.value.error) }}
+          </dd>
           <dt>{{ t('diskImage.result.mapPath') }}</dt>
           <dd class="wizard__path-text">{{ finishedSummary.mapPath }}</dd>
         </dl>
@@ -944,6 +965,10 @@ function changeText(change: { kind: string; number: number; before: ByteRange | 
   padding: 0 var(--space-xs);
   font-size: inherit;
   font-weight: 600;
+}
+
+.disk-image__reveal {
+  margin-left: var(--space-sm);
 }
 
 .disk-image__resume {

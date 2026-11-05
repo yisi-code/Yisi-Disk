@@ -117,6 +117,131 @@ fn fat32_is_rebuilt_from_its_two_fats() {
     );
 }
 
+/// 一块 MBR 盘，1 号分区是 `kind` 的 FAT（根目录里一个文件，`with_dir` 时另有一个子目录）：
+/// 给出盘、分区起点、原来的引导扇区与那个文件的内容。
+fn fat_disk(kind: FatType, with_dir: bool) -> (Vec<u8>, u64, Vec<u8>, Vec<u8>) {
+    let mut fat = FatImage::new(kind);
+    fat.set_label(b"OLDFAT     ");
+    let root = fat.root();
+    let notes = pattern(5, 3000);
+    fat.add_file(root, "notes.txt", &notes, Layout::Contiguous);
+    if with_dir {
+        let dir = fat.mkdir(root, "Docs");
+        fat.add_file(
+            dir.as_dir(),
+            "inner.bin",
+            &pattern(6, 9000),
+            Layout::Contiguous,
+        );
+    }
+    let volume = fat.finish();
+    let start = 2048usize;
+    let mut image = yisi_part::samples::mbr_disk(
+        start * SECTOR + volume.len(),
+        &[yisi_part::samples::MbrEntry::new(
+            0x06,
+            start as u32,
+            (volume.len() / SECTOR) as u32,
+        )],
+    );
+    image[start * SECTOR..][..volume.len()].copy_from_slice(&volume);
+    (
+        image,
+        (start * SECTOR) as u64,
+        volume[..SECTOR].to_vec(),
+        notes,
+    )
+}
+
+#[test]
+fn fat12_and_fat16_are_rebuilt_from_their_fats_and_root_directory() {
+    // FAT16 样本：4 个保留扇区、512 项根目录、2 扇区一簇；FAT12 样本：软盘的 224 项根目录
+    for (kind, fs) in [
+        (FatType::Fat16, FsKind::Fat16),
+        (FatType::Fat12, FsKind::Fat12),
+    ] {
+        let (mut image, offset, original, notes) = fat_disk(kind, true);
+        image[offset as usize..offset as usize + SECTOR].fill(0);
+        let part = partition(&image, 1);
+        // 分区表的类型说是 FAT，FAT12/16 又没有备份：主备都不能用
+        assert_eq!(
+            diagnose_partition(&device(&image), &part).verdict,
+            Verdict::BothDamaged
+        );
+        for asked in [fs, FsKind::Unknown] {
+            let rebuilt = rebuild(&device(&image), &part, asked, SERIAL).unwrap();
+            assert_eq!(rebuilt.kind, fs);
+            same_fields(
+                fs,
+                &original,
+                &rebuilt.boot,
+                &["hiddenSectors", "volumeSerial"],
+            );
+            assert_eq!(rebuilt.label.as_deref(), Some("OLDFAT"));
+            // 没有备份，只写主引导扇区
+            assert_eq!(rebuilt.writes.len(), 1);
+            assert_eq!(rebuilt.writes[0].offset, offset);
+        }
+        let rebuilt = rebuild(&device(&image), &part, fs, SERIAL).unwrap();
+        apply(&mut image, &rebuilt.writes);
+        assert_eq!(read_file(&image, 1, "notes.txt"), notes, "{fs:?}");
+        assert_eq!(
+            diagnose_partition(&device(&image), &part).verdict,
+            Verdict::Healthy
+        );
+    }
+}
+
+#[test]
+fn fat12_16_root_size_needs_a_subdirectory_unless_it_is_the_standard_512() {
+    // 根目录里没有子目录：512 项的（硬盘上的写法）照样推得出
+    let (mut image, offset, original, _) = fat_disk(FatType::Fat16, false);
+    image[offset as usize..offset as usize + SECTOR].fill(0);
+    let rebuilt = rebuild(
+        &device(&image),
+        &partition(&image, 1),
+        FsKind::Unknown,
+        SERIAL,
+    )
+    .unwrap();
+    same_fields(
+        FsKind::Fat16,
+        &original,
+        &rebuilt.boot,
+        &["hiddenSectors", "volumeSerial"],
+    );
+    // 224 项的软盘写法没有子目录可核对：不给结果，免得写进去的是错的
+    let (mut image, offset, _, _) = fat_disk(FatType::Fat12, false);
+    image[offset as usize..offset as usize + SECTOR].fill(0);
+    assert!(matches!(
+        rebuild(
+            &device(&image),
+            &partition(&image, 1),
+            FsKind::Fat12,
+            SERIAL
+        ),
+        Err(RebuildError::NotFound(_))
+    ));
+    // 两份 FAT 的表头都清掉：推不出来
+    let (mut image, offset, original, _) = fat_disk(FatType::Fat16, true);
+    let reserved = usize::from(u16::from_le_bytes([original[14], original[15]]));
+    let fat_sectors = usize::from(u16::from_le_bytes([original[22], original[23]]));
+    image[offset as usize..offset as usize + SECTOR].fill(0);
+    for sector in [reserved, reserved + fat_sectors] {
+        let at = offset as usize + sector * SECTOR;
+        image[at..at + 4].fill(0);
+    }
+    assert!(
+        rebuild(
+            &device(&image),
+            &partition(&image, 1),
+            FsKind::Fat16,
+            SERIAL
+        )
+        .is_err()
+    );
+}
+
 #[test]
 fn exfat_is_rebuilt_from_its_root_directory() {
     let mut disk = search_disk();
@@ -246,7 +371,7 @@ fn missing_structures_are_not_guessed() {
         ),
         Err(RebuildError::NotFound(_))
     ));
-    // FAT12/16 不重建
+    // 按 FAT12/16 同样推不出来
     assert!(matches!(
         rebuild(
             &device(&disk.image),
@@ -254,7 +379,7 @@ fn missing_structures_are_not_guessed() {
             FsKind::Fat16,
             SERIAL
         ),
-        Err(RebuildError::Unsupported(FsKind::Fat16))
+        Err(RebuildError::NotFound(_))
     ));
 }
 

@@ -17,8 +17,8 @@ import { useSourceSelection } from '../composables/useSourceSelection'
 import { useWritePlan } from '../composables/useWritePlan'
 import { useWritePlanText } from '../composables/useWritePlanText'
 import {
+  canWritePlan,
   isDeviceKind,
-  sameTarget,
   toHostError,
   type HostError,
   type PartitionInfo,
@@ -90,10 +90,7 @@ const isPartitionBusy = computed(
 )
 
 /** 镜像文件与整块磁盘可以写回分区表；卷上没有分区表 */
-const canWrite = computed(() => {
-  const kind = search.target.value?.kind
-  return kind === 'image' || kind === 'disk'
-})
+const canWrite = computed(() => canWritePlan(search.target.value))
 
 /** 选中的是「丢失」、又不与别的候选重叠的分区：可以写回分区表 */
 const canWriteBack = computed(() => {
@@ -105,10 +102,7 @@ const canWriteBack = computed(() => {
 const isConfirming = computed(() => step.value === 'results' && writePlan.plan.value !== null)
 
 /** 刚执行的那次写入（同一个源时才显示）；写下去过、还没回滚的可以回滚 */
-const lastRecord = computed(() => {
-  const record = writePlan.lastRecord.value
-  return record !== null && sameTarget(record.target, search.target.value) ? record : null
-})
+const lastRecord = writePlan.lastRecordFor(() => search.target.value)
 const canRollbackLast = computed(() => {
   const record = lastRecord.value
   return record !== null && record.kind !== 'rollback' && record.outcome.written > 0
@@ -125,18 +119,9 @@ const statusText = computed(() => {
     case 'running':
     case 'cancelling':
       if (search.isPaused.value) {
-        return t('findPartitions.status.paused', {
-          done: formatBytes(search.done.value),
-          total: formatBytes(search.total.value),
-          percent: search.percent.value,
-        })
+        return t('findPartitions.status.paused', search.progressParams.value)
       }
-      return t('findPartitions.status.running', {
-        done: formatBytes(search.done.value),
-        total: formatBytes(search.total.value),
-        percent: search.percent.value,
-        rate: search.bytesPerSecond.value === null ? '-' : formatBytes(search.bytesPerSecond.value),
-      })
+      return t('findPartitions.status.running', search.progressParams.value)
     case 'completed':
       return t('findPartitions.status.completed')
     case 'failed':
@@ -530,7 +515,7 @@ async function openSelected() {
 
         <p v-if="candidates.length === 0" class="wizard__note">{{ t('findPartitions.results.none') }}</p>
         <div v-else class="find-partitions__results wizard__fill">
-          <section class="find-partitions__pane" :aria-labelledby="`${domPrefix}-list`">
+          <section class="wizard__pane" :aria-labelledby="`${domPrefix}-list`">
             <h3 :id="`${domPrefix}-list`" class="wizard__section-title find-partitions__title">
               {{ t('findPartitions.list.title') }}
             </h3>
@@ -587,7 +572,7 @@ async function openSelected() {
           />
           <section
             v-else
-            class="find-partitions__pane find-partitions__pane--wide"
+            class="wizard__pane find-partitions__pane--wide"
             :aria-labelledby="`${domPrefix}-files`"
           >
             <h3 :id="`${domPrefix}-files`" class="wizard__section-title find-partitions__title">
@@ -643,13 +628,6 @@ async function openSelected() {
   grid-template-columns: minmax(240px, 1.2fr) minmax(0, 2.4fr) minmax(0, 1.6fr);
   grid-template-rows: auto 1fr auto;
   gap: var(--space-sm) var(--space-lg);
-}
-
-.find-partitions__pane {
-  display: grid;
-  grid-row: span 3;
-  grid-template-rows: subgrid;
-  min-width: 0;
 }
 
 .find-partitions__pane--wide {

@@ -7,15 +7,14 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use yisi_engine::protocol::{
-    ByteRange, IMAGING, ImageStarted, ImageSummary, JobImaging, MAX_UNREADABLE_RANGES,
-    RegionProgress, error_code,
+    ByteRange, ERRORS_IN_A_ROW_NOTICE, IMAGING, ImageStarted, ImageSummary, JobImaging,
+    MAX_UNREADABLE_RANGES, RegionProgress, error_code,
 };
 use yisi_io::{
     BadMap, BlockDevice, ImageStore, ImagingControl, ImagingOptions, ImagingOutcome, IoError,
@@ -66,16 +65,7 @@ impl ImageJob {
     }
 }
 
-/// 坏区图与镜像放在一起：同一路径加 `.map`。
-pub fn map_path(image_path: &Path) -> PathBuf {
-    with_suffix(image_path, ".map")
-}
-
-fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = OsString::from(path.as_os_str());
-    name.push(suffix);
-    PathBuf::from(name)
-}
+pub use yisi_io::map_path;
 
 /// 只读一部分时总会一起读的几小段：开头与末尾各 1 MiB（MBR、GPT 与它的备份），每个分区之前的 1 MiB
 /// （逻辑分区的链表项就在它前面），都只取不属于任何分区的部分。没有这些，镜像里认不出分区。
@@ -558,7 +548,7 @@ pub struct FileStore {
 
 impl FileStore {
     fn new(image: File, map_path: PathBuf) -> Self {
-        let temp_path = with_suffix(&map_path, ".tmp");
+        let temp_path = yisi_io::temp_path(&map_path);
         Self {
             image,
             map_path,
@@ -587,11 +577,7 @@ impl ImageStore for FileStore {
 
     fn commit(&mut self, map: &BadMap) -> io::Result<()> {
         self.image.sync_data()?;
-        let mut temp = File::create(&self.temp_path)?;
-        temp.write_all(map.to_text().as_bytes())?;
-        temp.sync_all()?;
-        drop(temp);
-        fs::rename(&self.temp_path, &self.map_path)
+        yisi_io::write_then_replace(&self.map_path, map.to_text().as_bytes())
     }
 }
 
@@ -604,6 +590,7 @@ struct Reporter<'a> {
     last_sent: Cell<Option<Instant>>,
     /// 最近一段时间里各次发送时的（时刻，已读字节数），用来算读速。
     samples: RefCell<VecDeque<(Instant, u64)>>,
+    errors_in_a_row: Cell<u32>,
 }
 
 impl<'a> Reporter<'a> {
@@ -615,6 +602,7 @@ impl<'a> Reporter<'a> {
             round: Cell::new(Round::Copy),
             last_sent: Cell::new(None),
             samples: RefCell::new(VecDeque::new()),
+            errors_in_a_row: Cell::new(0),
         }
     }
 
@@ -649,6 +637,8 @@ impl<'a> Reporter<'a> {
                 scrape_bytes: progress.scrape_bytes,
                 bytes_per_second,
                 copy_only: self.copy_only,
+                errors_in_a_row: self.errors_in_a_row.get(),
+                check_connection: self.errors_in_a_row.get() >= ERRORS_IN_A_ROW_NOTICE,
             },
         );
     }
@@ -691,6 +681,15 @@ impl ImagingControl for Reporter<'_> {
 
     fn read_failed(&self, offset: u64, length: u64, error: &IoError) {
         tracing::warn!(offset, length, error = %error_chain(error), "读不出");
+    }
+
+    fn errors_in_a_row(&self, count: u32) {
+        // 刚开始连着读错、或刚恢复读成功时立刻告诉界面，不等节流
+        let crossed = (self.errors_in_a_row.replace(count) >= ERRORS_IN_A_ROW_NOTICE)
+            != (count >= ERRORS_IN_A_ROW_NOTICE);
+        if crossed {
+            self.last_sent.set(None);
+        }
     }
 }
 
@@ -868,7 +867,7 @@ mod tests {
             .map(|(offset, length)| (offset, offset + length))
             .collect();
         assert_eq!(saved_bad, bad);
-        assert!(!with_suffix(&map_path(&image_path), ".tmp").exists());
+        assert!(!yisi_io::temp_path(&map_path(&image_path)).exists());
 
         let summary = summary_of(&job, &image_path);
         assert!(!summary.partial);

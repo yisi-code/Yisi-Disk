@@ -121,6 +121,8 @@ struct Recorder {
     cancel_after: Option<usize>,
     checks: Cell<usize>,
     rounds: RefCell<Vec<Round>>,
+    /// 每次读之后报的连续读错次数。
+    errors_in_a_row: RefCell<Vec<u32>>,
 }
 
 impl ImagingControl for Recorder {
@@ -135,6 +137,10 @@ impl ImagingControl for Recorder {
         if rounds.last() != Some(&round) {
             rounds.push(round);
         }
+    }
+
+    fn errors_in_a_row(&self, count: u32) {
+        self.errors_in_a_row.borrow_mut().push(count);
     }
 }
 
@@ -189,6 +195,32 @@ fn bad_ranges(map: &BadMap) -> Vec<(u64, u64)> {
     map.ranges(SegmentState::Bad)
         .map(|(offset, length)| (offset, offset + length))
         .collect()
+}
+
+#[test]
+fn reads_failing_in_a_row_are_counted_and_reset_by_a_success() {
+    let device = damaged_device();
+    let mut map = new_map(&device);
+    let mut store = MemoryStore::new(device.size());
+    let recorder = Recorder::default();
+    run_imaging(
+        &device,
+        &mut map,
+        &mut store,
+        &recorder,
+        &ImagingOptions::default(),
+    )
+    .unwrap();
+    let counts = recorder.errors_in_a_row.borrow();
+    // 每次读都报一次；细读 2.5 MiB 的坏区时一个扇区接一个扇区地读错，次数一直往上涨
+    assert!(counts.iter().max().copied().unwrap() > 1000);
+    // 每次上涨都是一步一步来的，读成功一次就回到 0
+    assert!(
+        counts
+            .windows(2)
+            .all(|pair| pair[1] == 0 || pair[1] == pair[0] + 1)
+    );
+    assert!(counts.contains(&0));
 }
 
 #[test]

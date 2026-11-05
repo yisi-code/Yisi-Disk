@@ -23,7 +23,10 @@ mod scope;
 use std::io;
 use std::time::{Duration, Instant};
 
-pub use map::{BadMap, MapError, MapHeader, RecordedPartition, Segment, SegmentState};
+pub use map::{
+    BadMap, MapError, MapHeader, RecordedPartition, Segment, SegmentState, map_path,
+    recorded_sector_size,
+};
 pub use scope::Scope;
 
 use crate::{BlockDevice, IoError};
@@ -47,6 +50,12 @@ pub trait ImagingControl {
     /// 一次读取出错（之后才判断设备是否还在），供记日志。
     fn read_failed(&self, offset: u64, length: u64, error: &IoError) {
         let _ = (offset, length, error);
+    }
+
+    /// 每读一次报告到现在为止连续读错了几次（读成功一次就回到 0），在 [`progress`](Self::progress) 之前。
+    /// 坏区很大时会连着读错；接触不良的外接盘也会，最近读成功的扇区却还读得出，所以不会按断开停下。
+    fn errors_in_a_row(&self, count: u32) {
+        let _ = count;
     }
 }
 
@@ -170,6 +179,7 @@ pub fn run_imaging(
         last_good,
         last_commit: Instant::now(),
         round: Round::Copy,
+        errors_in_a_row: 0,
     };
     let result = imager.run_rounds();
     let committed = imager.store.commit(imager.map);
@@ -213,6 +223,7 @@ struct Imager<'a> {
     last_good: Option<u64>,
     last_commit: Instant,
     round: Round,
+    errors_in_a_row: u32,
 }
 
 impl Imager<'_> {
@@ -365,14 +376,17 @@ impl Imager<'_> {
                 self.map.set(offset, length, SegmentState::Done);
                 // 记下这一段的最后一个扇区，下次出错时重读它，离磁头当前位置最近
                 self.last_good = Some(align_down(offset + length - 1, self.sector));
+                self.errors_in_a_row = 0;
                 true
             }
             Err(error) => {
                 self.control.read_failed(offset, length, &error);
                 self.ensure_source_alive(offset, error)?;
+                self.errors_in_a_row = self.errors_in_a_row.saturating_add(1);
                 false
             }
         };
+        self.control.errors_in_a_row(self.errors_in_a_row);
         self.control.progress(self.round, self.map);
         if self.last_commit.elapsed() >= self.commit_interval {
             self.commit()?;

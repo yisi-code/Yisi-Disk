@@ -15,6 +15,7 @@ mod tests;
 
 use yisi_fs::FsKind;
 use yisi_fs::boot::{BackupFamily, backup_candidates, backup_kind, remnant_kind, usable_kind};
+use yisi_fs::boot_write::EXFAT_BOOT_REGION_SECTORS;
 use yisi_fs::bpb::{self, Problem, Rule};
 use yisi_fs::format::{FatWidth, Run};
 use yisi_io::BlockDevice;
@@ -535,7 +536,8 @@ fn load(
     match kind {
         FsKind::Exfat => {
             let bytes_per_sector = bpb::check_exfat(sector).bytes_per_sector?;
-            let mut region = vec![0u8; usize::try_from(12 * bytes_per_sector).ok()?];
+            let mut region =
+                vec![0u8; usize::try_from(EXFAT_BOOT_REGION_SECTORS * bytes_per_sector).ok()?];
             let area = if from_backup {
                 Area::BackupBoot
             } else {

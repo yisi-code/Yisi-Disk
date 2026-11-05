@@ -1,4 +1,4 @@
-import { ref, shallowRef } from 'vue'
+import { computed, ref, shallowRef, toValue, type MaybeRefOrGetter } from 'vue'
 import {
   discardWritePlan,
   executeWritePlan,
@@ -8,6 +8,7 @@ import {
   planMft,
   planPartitionTable,
   planRollback,
+  sameTarget,
   toHostError,
   type BootFix,
   type ClusterRun,
@@ -129,6 +130,14 @@ export function useWritePlan() {
     }
   }
 
+  /** 刚执行的那次写入：只有同一个源时才给出（换了源不显示上一次的结果） */
+  function lastRecordFor(target: MaybeRefOrGetter<JobTarget | null>) {
+    return computed(() => {
+      const record = lastRecord.value
+      return record !== null && sameTarget(record.target, toValue(target)) ? record : null
+    })
+  }
+
   /** 放弃等确认的计划（宿主删掉它的备份） */
   async function discard() {
     const current = plan.value
@@ -152,6 +161,7 @@ export function useWritePlan() {
     isExecuting,
     failure,
     loadRecords,
+    lastRecordFor,
     prepareBootSector,
     prepareTableFix,
     prepareMftFix,

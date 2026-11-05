@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use yisi_engine::protocol::{
@@ -12,7 +12,7 @@ use yisi_engine::protocol::{
     CARVE_START, COMPLETED, COPIED, COPY_FILES, CarveSummary, CopiedFile, CopySummary, FOUND,
     FS_CHECK, FileListPage, FilePreview, FoundFile, FsCheckReport, HEARTBEAT, IMAGE_CREATE,
     IMAGE_RESUME, IMAGING, ImageStarted, ImageSummary, JobImaging, LIST_FILE_TYPES, LIST_FILES,
-    PAUSE, PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS, READ_SCAN, RESUME,
+    PAUSE, PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS, READ_SCAN, RESUME, ReadMapCell,
     ReadScanReport, SCAN_DELETED, ScanResult, error_code,
 };
 use yisi_formats::samples;
@@ -252,6 +252,14 @@ fn read_scan_reports_progress_then_completes_and_exits() {
     assert_eq!(report.size, size as u64);
     assert_eq!(report.bytes_read, size as u64);
     assert!(report.unreadable.is_empty());
+    // 扇区图：一格整 MiB，全都读出了
+    assert_eq!(report.map_cell_bytes % (1 << 20), 0);
+    assert_eq!(
+        report.map.len() as u64,
+        (size as u64).div_ceil(report.map_cell_bytes)
+    );
+    assert!(report.map.iter().all(|cell| *cell == ReadMapCell::Good));
+    assert_eq!(report.fine_read_blocks, 0);
 
     // 任务结束后引擎自行退出
     assert!(engine.wait_exit().success());
@@ -653,7 +661,25 @@ fn browse_lists_pages_previews_and_copies_deleted_files() {
         std::fs::read(output.join("report (1).docx")).unwrap(),
         report
     );
+    // 卷上记的修改时间是本地的 2024-03-05 13:45:30（样本），按本机时区换算成 UTC 设到复制出的文件上
+    let local = yisi_io::local_to_utc(SAMPLE_WALL_TIME).unwrap();
+    for path in [
+        output.join("Photos").join("海边.jpg"),
+        output.join("report (1).docx"),
+    ] {
+        assert_eq!(
+            modified(&path),
+            UNIX_EPOCH + Duration::from_secs(local as u64)
+        );
+    }
     assert!(copier.wait_exit().success());
+}
+
+/// 样本卷记的修改时间 2024-03-05 13:45:30：NTFS 是这个 UTC 时刻，FAT / exFAT 是这个本地时间。
+const SAMPLE_WALL_TIME: i64 = 1_709_646_330;
+
+fn modified(path: &Path) -> SystemTime {
+    std::fs::metadata(path).unwrap().modified().unwrap()
 }
 
 #[test]
@@ -824,14 +850,19 @@ fn scan_only_then_preview_and_save_selected_files() {
     assert!(again.wait_exit().success());
 }
 
-/// 一块 MBR 盘，1 号分区是 NTFS：现存与删除的文件、删除的目录、找不到原目录的文件。
+/// `keep.txt` 带的备用数据流。
+const ZONE_IDENTIFIER: &[u8] = b"[ZoneTransfer]\r\nZoneId=3\r\n";
+
+/// 一块 MBR 盘，1 号分区是 NTFS：现存与删除的文件（`keep.txt` 带一个备用数据流）、删除的目录、
+/// 找不到原目录的文件。
 fn ntfs_image(dir: &Path) -> (String, Vec<u8>, Vec<u8>) {
     use yisi_fs::samples::{NTFS_ROOT, NtfsImage, pattern};
     use yisi_part::samples::{MbrEntry, mbr_disk};
 
     let mut ntfs = NtfsImage::new();
     ntfs.set_label("NTFSDATA");
-    ntfs.add_file(NTFS_ROOT, "keep.txt", b"keep");
+    let keep = ntfs.add_file(NTFS_ROOT, "keep.txt", b"keep");
+    ntfs.add_stream(keep, "Zone.Identifier", ZONE_IDENTIFIER);
     let docs = ntfs.mkdir(NTFS_ROOT, "Docs");
     let live = pattern(1, 9000);
     ntfs.add_file(docs, "a.bin", &live);
@@ -899,6 +930,30 @@ fn ntfs_partition_is_scanned_listed_and_copied() {
     };
     let before = list(&mut engine, None);
     assert!(before.entries.iter().all(|entry| !entry.deleted));
+
+    // 预览带上备用数据流：名字、长度与开头（Base64）
+    let keep = before
+        .entries
+        .iter()
+        .find(|entry| entry.name == "keep.txt")
+        .unwrap();
+    let preview: FilePreview = serde_json::from_value(
+        engine
+            .call(
+                PREVIEW_FS_FILE,
+                json!({"jobId": "n1", "partition": 1, "file": keep.file}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(preview.length, 4);
+    assert_eq!(preview.streams.len(), 1);
+    let stream = &preview.streams[0];
+    assert_eq!(
+        (stream.name.as_str(), stream.length),
+        ("Zone.Identifier", ZONE_IDENTIFIER.len() as u64)
+    );
+    assert_eq!(stream.head, "W1pvbmVUcmFuc2Zlcl0NClpvbmVJZD0zDQo=");
 
     // 没在扫的分区：停止扫描什么也不做
     engine
@@ -1005,6 +1060,13 @@ fn ntfs_partition_is_scanned_listed_and_copied() {
         std::fs::read(output.join("Docs").join("deleted.bin")).unwrap(),
         gone
     );
+    // NTFS 记的是 UTC，原样设上；已删除的文件取扫描到的时间
+    for name in ["a.bin", "deleted.bin"] {
+        assert_eq!(
+            modified(&output.join("Docs").join(name)),
+            UNIX_EPOCH + Duration::from_secs(SAMPLE_WALL_TIME as u64)
+        );
+    }
     assert!(copier.wait_exit().success());
 }
 

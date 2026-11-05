@@ -3,22 +3,24 @@
 //! 依据公开的 NTFS 结构资料实现，只读。
 
 mod index;
+pub(crate) mod lznt1;
 mod record;
 mod scan;
 mod stream;
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use yisi_part::bytes::{le16, le32, le64};
+use yisi_part::bytes::{le16, le16_units, le32, le64};
 
 use self::record::{
     ATTRIBUTE_LIST, Body, DATA, Extent, FILE_NAME, INDEX_ROOT, NAMESPACE_DOS, REPARSE_POINT,
-    Record, STANDARD_INFORMATION, VOLUME_NAME, decode_runs, parse_file_name, split_ref, utf16,
+    Record, STANDARD_INFORMATION, VOLUME_NAME, compression_unit_clusters, decode_runs,
+    parse_file_name, split_ref, utf16,
 };
 use self::scan::Scan;
 use self::stream::Stream;
 use crate::bpb::NtfsBpb;
-use crate::entry::{Entry, FileRef, Listing, Location, State, Unsupported, nt_time};
+use crate::entry::{Entry, FileRef, Listing, Location, Stamp, State, Unsupported};
 use crate::reader::{FileReader, Piece};
 use crate::region::Region;
 use crate::{FsError, MAX_ENTRIES, ScanSummary, bpb};
@@ -33,7 +35,6 @@ const FIRST_USER_RECORD: u64 = 16;
 
 /// 文件属性（`$STANDARD_INFORMATION` 与 `$FILE_NAME` 里的）。
 const FILE_REPARSE_POINT: u32 = 0x0400;
-const FILE_COMPRESSED: u32 = 0x0800;
 const FILE_ENCRYPTED: u32 = 0x4000;
 /// `$FILE_NAME` 里表示目录的位。
 const FILE_NAME_DIRECTORY: u32 = 0x1000_0000;
@@ -41,6 +42,16 @@ const FILE_NAME_DIRECTORY: u32 = 0x1000_0000;
 const TAG_WOF: u32 = 0x8000_0017;
 const TAG_MOUNT_POINT: u32 = 0xA000_0003;
 const TAG_SYMLINK: u32 = 0xA000_000C;
+
+/// 一个文件最多列这么多个备用数据流。
+const MAX_STREAMS: usize = 64;
+
+/// NTFS 的备用数据流（有名字的 `$DATA`，例如浏览器下载时加的 `Zone.Identifier`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedStream {
+    pub name: String,
+    pub size: u64,
+}
 
 /// 属性列表最多读这么多字节、跟这么多条扩展记录。
 const MAX_ATTRIBUTE_LIST: u64 = 1 << 20;
@@ -53,11 +64,11 @@ pub(crate) fn parse_boot(sector: &[u8]) -> Option<NtfsBpb> {
 
 /// 一个属性的内容（数据流、索引等）。
 pub(crate) enum Value {
-    /// 常驻：内容就在 MFT 记录里，`position` 是它在分区里的偏移。
+    /// 常驻：内容就在 MFT 记录里，`position` 是它在分区里的偏移。常驻的内容不压缩（属性上的压缩标记
+    /// 只表示文件是压缩属性），原样能读。
     Resident {
         bytes: Vec<u8>,
         position: Option<u64>,
-        compressed: bool,
         encrypted: bool,
     },
     NonResident {
@@ -66,19 +77,29 @@ pub(crate) enum Value {
         initialized: u64,
         compressed: bool,
         encrypted: bool,
+        /// 压缩单元（见 [`record::NonResident::compression_unit`]）。
+        compression_unit: u8,
     },
 }
 
 impl Value {
-    fn compressed(&self) -> bool {
-        match self {
-            Self::Resident { compressed, .. } | Self::NonResident { compressed, .. } => *compressed,
-        }
-    }
-
     fn encrypted(&self) -> bool {
         match self {
             Self::Resident { encrypted, .. } | Self::NonResident { encrypted, .. } => *encrypted,
+        }
+    }
+
+    /// 压缩了、又解不开：与 [`record::Attribute::undecodable_compression`] 同一条规则。
+    fn undecodable_compression(&self, cluster_size: u64) -> bool {
+        match self {
+            Self::Resident { .. } => false,
+            Self::NonResident {
+                compressed,
+                compression_unit,
+                ..
+            } => {
+                *compressed && compression_unit_clusters(*compression_unit, cluster_size).is_none()
+            }
         }
     }
 
@@ -153,7 +174,9 @@ fn is_mft_self(record: &Record) -> bool {
 impl Ntfs {
     /// 按引导扇区 `boot`（主的或备份的）打开。
     pub fn open(region: Region, boot: &[u8]) -> Result<Self, FsError> {
-        let geometry = parse_boot(boot).ok_or(FsError::Invalid("新技术文件系统（NTFS）引导扇区的参数不自洽"))?;
+        let geometry = parse_boot(boot).ok_or(FsError::Invalid(
+            "新技术文件系统（NTFS）引导扇区的参数不自洽",
+        ))?;
         let cluster_size = geometry.cluster_size;
         let cluster_count = geometry.total_bytes().min(region.length()) / cluster_size;
         let record_size = geometry.record_size;
@@ -222,13 +245,7 @@ impl Ntfs {
                 .find(VOLUME_NAME, &[])
                 .and_then(|attribute| attribute.resident_value())
         {
-            let units: Vec<u16> = name
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|unit| u16::from_le_bytes(*unit))
-                .collect();
-            let label = String::from_utf16_lossy(&units);
+            let label = String::from_utf16_lossy(&le16_units(name));
             if !label.is_empty() {
                 ntfs.label = Some(label);
             }
@@ -253,6 +270,7 @@ impl Ntfs {
                 record: ROOT_RECORD,
                 sequence: self.root_sequence,
             },
+            modified: None,
         }
     }
 
@@ -348,7 +366,8 @@ impl Ntfs {
             .and_then(|attribute| attribute.resident_value())
             .and_then(|value| le32(value, 0));
         let unsupported = unsupported(
-            data.as_ref().is_some_and(Value::compressed),
+            data.as_ref()
+                .is_some_and(|value| value.undecodable_compression(self.cluster_size)),
             data.as_ref().is_some_and(Value::encrypted) || attributes & FILE_ENCRYPTED != 0,
             reparse_tag,
             data.as_ref().map_or(0, Value::size),
@@ -384,7 +403,9 @@ impl Ntfs {
                 .record(record)?
                 .ok_or(FsError::Invalid("目录的主文件表（MFT）记录读不出"))?;
             if !base.in_use() || !base.is_dir() || base.sequence != sequence {
-                return Err(FsError::Invalid("目录已不在原处：它的主文件表（MFT）记录已被重用"));
+                return Err(FsError::Invalid(
+                    "目录已不在原处：它的主文件表（MFT）记录已被重用",
+                ));
             }
             let (keys, partial) = index::read(self, record, &base)?;
             truncated = partial;
@@ -423,7 +444,8 @@ impl Ntfs {
         })
     }
 
-    pub fn open_file(&self, file: &FileRef) -> Result<FileReader, FsError> {
+    /// 文件的基本记录：定位信息要对得上（记录号、序号、是否删除），否则记录已被重用。
+    fn base_record(&self, file: &FileRef) -> Result<(u64, Record), FsError> {
         let Location::Mft { record, sequence } = file.location else {
             return Err(FsError::BadRef);
         };
@@ -434,8 +456,15 @@ impl Ntfs {
             .record(record)?
             .ok_or(FsError::Invalid("文件的主文件表（MFT）记录读不出"))?;
         if !base.is_base() || base.sequence != sequence || base.in_use() == file.deleted {
-            return Err(FsError::Invalid("主文件表（MFT）记录已被重用，内容已不是这个文件"));
+            return Err(FsError::Invalid(
+                "主文件表（MFT）记录已被重用，内容已不是这个文件",
+            ));
         }
+        Ok((record, base))
+    }
+
+    pub fn open_file(&self, file: &FileRef) -> Result<FileReader, FsError> {
+        let (record, base) = self.base_record(file)?;
         let described = self.describe(record, &base)?;
         if let Some(reason) = described.unsupported {
             return Err(FsError::Unreadable(reason));
@@ -445,7 +474,70 @@ impl Ntfs {
                 "删除时新技术文件系统（NTFS）先把这个文件截成了 0 字节，它的数据位置已不在主文件表（MFT）里",
             ));
         }
-        Ok(match described.data {
+        Ok(self.reader(described.data))
+    }
+
+    /// 文件的备用数据流：名字与长度，按在记录（或属性列表）里的顺序，最多 [`MAX_STREAMS`] 个。
+    pub fn streams(&self, file: &FileRef) -> Result<Vec<NamedStream>, FsError> {
+        let (record, base) = self.base_record(file)?;
+        let mut names: Vec<Vec<u16>> = Vec::new();
+        let mut add = |name: Vec<u16>| {
+            if !name.is_empty() && !names.contains(&name) && names.len() < MAX_STREAMS {
+                names.push(name);
+            }
+        };
+        match base.find(ATTRIBUTE_LIST, &[]) {
+            Some(list) => {
+                for entry in list_entries(&attribute_list_bytes(
+                    &self.region,
+                    self.cluster_size,
+                    &list,
+                )?)? {
+                    if entry.kind == DATA {
+                        add(entry.name);
+                    }
+                }
+            }
+            None => {
+                for attribute in base.attributes() {
+                    if attribute.kind == DATA {
+                        add(attribute.name_units());
+                    }
+                }
+            }
+        }
+        names
+            .into_iter()
+            .map(|name| {
+                let size = self
+                    .value(record, &base, DATA, &name)?
+                    .map_or(0, |value| value.size());
+                Ok(NamedStream {
+                    name: String::from_utf16_lossy(&name),
+                    size,
+                })
+            })
+            .collect()
+    }
+
+    /// 读一个备用数据流。加密或解不开的压缩照样按不支持拒绝。
+    pub fn open_stream(&self, file: &FileRef, name: &str) -> Result<FileReader, FsError> {
+        let (record, base) = self.base_record(file)?;
+        let value = self
+            .value(record, &base, DATA, &utf16(name))?
+            .ok_or(FsError::Invalid("没有这个数据流"))?;
+        if value.encrypted() {
+            return Err(FsError::Unreadable(Unsupported::Encrypted));
+        }
+        if value.undecodable_compression(self.cluster_size) {
+            return Err(FsError::Unreadable(Unsupported::Compressed));
+        }
+        Ok(self.reader(Some(value)))
+    }
+
+    /// 把一个属性的内容换成读取器；压缩的按压缩单元读时解开（调用方已拒绝解不开的）。
+    fn reader(&self, value: Option<Value>) -> FileReader {
+        match value {
             None => FileReader::from_pieces(self.region.clone(), Vec::new(), 0, 0),
             Some(Value::Resident { bytes, .. }) => {
                 let size = bytes.len() as u64;
@@ -455,12 +547,18 @@ impl Ntfs {
                 extents,
                 size,
                 initialized,
+                compressed,
+                compression_unit,
                 ..
             }) => {
-                let pieces = self.stream(extents, size).pieces(size);
+                let stream = self.stream(extents, size);
+                let pieces = match compression_unit_clusters(compression_unit, self.cluster_size) {
+                    Some(unit) if compressed => stream.compressed_pieces(size, unit),
+                    _ => stream.pieces(size),
+                };
                 FileReader::from_pieces(self.region.clone(), pieces, size, initialized)
             }
-        })
+        }
     }
 }
 
@@ -475,8 +573,9 @@ pub(crate) fn truncated_on_delete(record: &Record, data: Option<&Value>) -> bool
 }
 
 /// 存放方式是否暂不支持读出。目录只看链接类的重分析点（目录本身带压缩、加密属性只表示新文件的默认方式）。
+/// `undecodable_compression`：压缩了、又解不开（LZNT1 压缩能读出）。
 fn unsupported(
-    compressed: bool,
+    undecodable_compression: bool,
     encrypted: bool,
     reparse_tag: Option<u32>,
     size: u64,
@@ -493,7 +592,7 @@ fn unsupported(
         None
     } else if encrypted {
         Some(Unsupported::Encrypted)
-    } else if compressed {
+    } else if undecodable_compression {
         Some(Unsupported::Compressed)
     } else {
         None
@@ -520,8 +619,9 @@ fn live_entries(keys: &[index::Key], dir: u64, scan: Option<&Scan>) -> Vec<Entry
         let is_dir = name.flags & FILE_NAME_DIRECTORY != 0;
         let mut size = if is_dir { 0 } else { name.size };
         let reparse = (name.flags & FILE_REPARSE_POINT != 0).then_some(name.reparse_tag);
+        // 目录索引里只有「压缩」这个属性，看不出解不解得开：按解得开列出，读的时候以记录为准
         let mut unsupported = unsupported(
-            name.flags & FILE_COMPRESSED != 0,
+            false,
             name.flags & FILE_ENCRYPTED != 0,
             reparse,
             size,
@@ -546,8 +646,8 @@ fn live_entries(keys: &[index::Key], dir: u64, scan: Option<&Scan>) -> Vec<Entry
             short_name: short_name(key.record).filter(|short| *short != name.name),
             name_uncertain: false,
             size,
-            modified: nt_time(name.modified),
-            created: nt_time(name.created),
+            modified: Stamp::Nt(name.modified).text(),
+            created: Stamp::Nt(name.created).text(),
             state: State::Live,
             position,
             unsupported,
@@ -559,6 +659,7 @@ fn live_entries(keys: &[index::Key], dir: u64, scan: Option<&Scan>) -> Vec<Entry
                     record: key.record,
                     sequence: key.sequence,
                 },
+                modified: (name.modified != 0).then_some(Stamp::Nt(name.modified)),
             },
         });
         if entries.len() >= MAX_ENTRIES {
@@ -589,45 +690,13 @@ fn collect(
             .map(|segment| segment.into_value(cluster_size))
             .transpose();
     };
-    let list_bytes = match &list.body {
-        Body::Resident { value, .. } => value.to_vec(),
-        Body::NonResident(body) => {
-            let extents =
-                decode_runs(body.runs, 0).ok_or(FsError::Invalid("属性列表的运行表不对"))?;
-            let size = body.size.min(MAX_ATTRIBUTE_LIST);
-            let mut bytes = vec![0u8; size as usize];
-            Stream::new(region.clone(), cluster_size, extents, size).read_at(0, &mut bytes)?;
-            bytes
-        }
-    };
     let mut segments = Vec::new();
     let mut extension_reads = 0usize;
-    let mut offset = 0usize;
-    while let (Some(entry_kind), Some(length)) =
-        (le32(&list_bytes, offset), le16(&list_bytes, offset + 4))
-    {
-        let length = usize::from(length);
-        if length < 0x1A {
-            break;
-        }
-        let entry = list_bytes
-            .get(offset..offset + length)
-            .ok_or(FsError::Invalid("属性列表的项越界"))?;
-        offset += length;
-        let name_length = usize::from(*entry.get(6).unwrap_or(&0));
-        let name_offset = usize::from(*entry.get(7).unwrap_or(&0));
-        let entry_name: Vec<u16> = entry
-            .get(name_offset..name_offset + name_length * 2)
-            .unwrap_or_default()
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|unit| u16::from_le_bytes(*unit))
-            .collect();
-        if entry_kind != kind || entry_name != name {
+    for entry in list_entries(&attribute_list_bytes(region, cluster_size, &list)?)? {
+        if entry.kind != kind || entry.name != name {
             continue;
         }
-        let (Some(reference), Some(id)) = (le64(entry, 0x10), le16(entry, 0x18)) else {
+        let (Some(reference), Some(id)) = (entry.reference, entry.id) else {
             return Err(broken);
         };
         let (holder, holder_sequence) = split_ref(reference);
@@ -698,6 +767,63 @@ fn collect(
         .transpose()
 }
 
+/// 属性列表的内容（常驻在记录里，或按运行表读出，最多 [`MAX_ATTRIBUTE_LIST`] 字节）。
+fn attribute_list_bytes(
+    region: &Region,
+    cluster_size: u64,
+    list: &record::Attribute<'_>,
+) -> Result<Vec<u8>, FsError> {
+    Ok(match &list.body {
+        Body::Resident { value, .. } => value.to_vec(),
+        Body::NonResident(body) => {
+            let extents =
+                decode_runs(body.runs, 0).ok_or(FsError::Invalid("属性列表的运行表不对"))?;
+            let size = body.size.min(MAX_ATTRIBUTE_LIST);
+            let mut bytes = vec![0u8; size as usize];
+            Stream::new(region.clone(), cluster_size, extents, size).read_at(0, &mut bytes)?;
+            bytes
+        }
+    })
+}
+
+/// 属性列表的一项：属性类型与名字、它在哪条记录（引用）与属性号；后两个读不出时为 `None`。
+struct ListEntry {
+    kind: u32,
+    name: Vec<u16>,
+    reference: Option<u64>,
+    id: Option<u16>,
+}
+
+/// 依次解析属性列表的项；项长不足 0x1A 时结束，项越界时报错。
+fn list_entries(bytes: &[u8]) -> Result<Vec<ListEntry>, FsError> {
+    let mut entries = Vec::new();
+    let mut offset = 0usize;
+    while let (Some(kind), Some(length)) = (le32(bytes, offset), le16(bytes, offset + 4)) {
+        let length = usize::from(length);
+        if length < 0x1A {
+            break;
+        }
+        let entry = bytes
+            .get(offset..offset + length)
+            .ok_or(FsError::Invalid("属性列表的项越界"))?;
+        offset += length;
+        let name_length = usize::from(*entry.get(6).unwrap_or(&0));
+        let name_offset = usize::from(*entry.get(7).unwrap_or(&0));
+        let name = le16_units(
+            entry
+                .get(name_offset..name_offset + name_length * 2)
+                .unwrap_or_default(),
+        );
+        entries.push(ListEntry {
+            kind,
+            name,
+            reference: le64(entry, 0x10),
+            id: le16(entry, 0x18),
+        });
+    }
+    Ok(entries)
+}
+
 /// 属性的一段，已经从记录里复制出来。
 struct Segment {
     lowest_vcn: u64,
@@ -708,6 +834,7 @@ struct Segment {
     initialized: u64,
     compressed: bool,
     encrypted: bool,
+    compression_unit: u8,
 }
 
 fn owned_segment(attribute: &record::Attribute<'_>) -> Result<Segment, FsError> {
@@ -720,6 +847,7 @@ fn owned_segment(attribute: &record::Attribute<'_>) -> Result<Segment, FsError> 
             initialized: value.len() as u64,
             compressed: attribute.compressed(),
             encrypted: attribute.encrypted(),
+            compression_unit: 0,
         },
         Body::NonResident(body) => {
             let extents = decode_runs(body.runs, body.lowest_vcn)
@@ -739,6 +867,7 @@ fn owned_segment(attribute: &record::Attribute<'_>) -> Result<Segment, FsError> 
                 initialized: body.initialized.min(body.size),
                 compressed: attribute.compressed(),
                 encrypted: attribute.encrypted(),
+                compression_unit: body.compression_unit,
             }
         }
     })
@@ -750,7 +879,6 @@ impl Segment {
             return Ok(Value::Resident {
                 bytes,
                 position: Some(offset as u64),
-                compressed: self.compressed,
                 encrypted: self.encrypted,
             });
         }
@@ -772,6 +900,7 @@ impl Segment {
             initialized: self.initialized,
             compressed: self.compressed,
             encrypted: self.encrypted,
+            compression_unit: self.compression_unit,
         })
     }
 }

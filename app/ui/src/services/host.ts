@@ -72,6 +72,14 @@ export function isDeviceKind(kind: JobTarget['kind'] | null | undefined): boolea
   return kind === 'disk' || kind === 'volume'
 }
 
+/**
+ * 能不能为这个源生成写盘计划：镜像文件与整块磁盘拿到的偏移就是盘上的偏移；
+ * 卷上的偏移从卷首算起，换算到盘上要另做，所以卷不写
+ */
+export function canWritePlan(target: JobTarget | null): boolean {
+  return target !== null && (target.kind === 'image' || target.kind === 'disk')
+}
+
 /** 两个源是不是同一个 */
 export function sameTarget(a: JobTarget | null, b: JobTarget | null): boolean {
   if (a === null || b === null || a.kind !== b.kind) {
@@ -139,6 +147,15 @@ export interface FilePreview {
   image: ImagePreview | null
   /** 内容是 JPEG 或 PNG 但解码失败时的原因 */
   imageError: string | null
+  /** NTFS 文件的备用数据流（有名字的数据流），其他情况为空 */
+  streams: StreamPreview[]
+}
+
+export interface StreamPreview {
+  name: string
+  length: number
+  /** 开头最多 1024 字节，Base64；读不出（加密、压缩方式不支持）时为空 */
+  head: string
 }
 
 /** 打开卷时用哪一份引导扇区 */
@@ -397,7 +414,16 @@ export interface ReadScanReport {
   unreadableBytes: number
   unreadableRangesTruncated: boolean
   elapsedMs: number
+  /** 扇区图：设备按 mapCellBytes 一格分开，每格的状态 */
+  map: ReadMapCell[]
+  mapCellBytes: number
+  /** 细读过的 1 MiB 块数；细读到了上限，之后读不出的只按整块或当时那一段记 */
+  fineReadBlocks: number
+  fineReadTruncated: boolean
 }
+
+/** 扇区图一格：都读出了、读出了但有一次超过 2 秒、有读不出的扇区、整格读不出 */
+export type ReadMapCell = 'good' | 'slow' | 'partly' | 'unreadable'
 
 /** 制作镜像的读取轮次：复制、修边、细读 */
 export type ImagingRound = 'copy' | 'trim' | 'scrape'
@@ -416,6 +442,10 @@ export interface ImagingStatus {
   bytesPerSecond: number | null
   /** 只做复制这一轮 */
   copyOnly: boolean
+  /** 到现在为止连续读错了几次（读成功一次就回到 0） */
+  errorsInARow: number
+  /** 连续读错到了要提示检查连接的次数（引擎判断） */
+  checkConnection: boolean
 }
 
 /** 制作镜像的结果；字节数只算本次的范围，device* 是整个源的 */
@@ -1122,6 +1152,11 @@ export function listImageHistory(): Promise<ImageHistoryItem[]> {
 /** 从做过的镜像列表移除（不删除文件） */
 export function removeImageHistory(imagePath: string): Promise<void> {
   return invoke<void>('image_history_remove', { imagePath })
+}
+
+/** 在文件夹中显示做过的镜像；只认列表里记着的路径（否则 imageRecordNotFound） */
+export function revealImage(imagePath: string): Promise<void> {
+  return invoke<void>('image_reveal', { imagePath })
 }
 
 /**

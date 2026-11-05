@@ -14,8 +14,8 @@ use yisi_fs::bpb;
 use yisi_fs::{mft_record_ok, mft_self_record_ok};
 use yisi_io::{BlockDevice, Overlay, SectorWrite};
 
-/// 比较、修复前这么多条记录。
-const MIRRORED_RECORDS: u64 = 4;
+/// `$MFTMirr` 至少镜像前 4 条记录（`$MFT`、`$MFTMirr`、`$LogFile`、`$Volume`）：检查比较、修复改的都是这几条。
+pub(crate) const MIRRORED_RECORDS: u64 = 4;
 
 /// 往哪个方向修。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

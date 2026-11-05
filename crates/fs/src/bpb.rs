@@ -9,7 +9,9 @@
 use yisi_part::bytes::{le16, le32, le64};
 
 use crate::FsKind;
-use crate::format::FatWidth;
+use yisi_part::boot_sector::{bytes_per_sector_ok, has_signature};
+
+use crate::format::{EXFAT_VOLUME_FLAGS_AT, FatWidth, fat_media_byte_ok};
 
 /// 一项规则；诊断按它给出问题类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,13 +205,30 @@ impl FatBpb {
         let fits = length.saturating_sub(self.heap_offset()) / self.cluster_size().max(1);
         self.cluster_count
             .min(self.fat_capacity)
-            .min(0x0FFF_FFF5)
+            .min(FAT32_MAX_CLUSTERS)
             .min(fits)
     }
 }
 
 /// 核对 FAT 引导扇区。`hint` 为 FAT32 时按 FAT32 核对（诊断按残留的类型字符串认出 FAT32、参数却坏了的情况），
 /// 不给时按 16 位的 FAT 扇区数是否为 0 判断。
+/// FAT12 最多这么多簇，FAT16 最多这么多簇（规范按簇数定类型：少于 4085 是 FAT12，少于 65525 是 FAT16）。
+pub const FAT12_MAX_CLUSTERS: u64 = 4084;
+pub const FAT16_MAX_CLUSTERS: u64 = 65_524;
+/// FAT32 的簇数上限（表项 28 位，`0x0FFFFFF6` 起是保留值与标记）。
+pub const FAT32_MAX_CLUSTERS: u64 = 0x0FFF_FFF5;
+
+/// 不是 FAT32 的 FAT 按簇数是 FAT12 还是 FAT16；簇数多到只能是 FAT32 时为 `None`。
+pub fn fat_kind_by_clusters(clusters: u64) -> Option<FsKind> {
+    if clusters <= FAT12_MAX_CLUSTERS {
+        Some(FsKind::Fat12)
+    } else if clusters <= FAT16_MAX_CLUSTERS {
+        Some(FsKind::Fat16)
+    } else {
+        None
+    }
+}
+
 pub fn check_fat(sector: &[u8], hint: Option<FsKind>) -> Checked<FatBpb> {
     let mut checked = Checked::new();
     check_jump(sector, &mut checked);
@@ -219,7 +238,7 @@ pub fn check_fat(sector: &[u8], hint: Option<FsKind>) -> Checked<FatBpb> {
     let u32_at = |at| u64::from(le32(sector, at).unwrap_or(0));
 
     let bps = u16_at(11);
-    let bps_valid = matches!(bps, 512 | 1024 | 2048 | 4096);
+    let bps_valid = bytes_per_sector_ok(bps);
     if !bps_valid {
         checked.fatal(Rule::BytesPerSector, "bytesPerSector", bps);
     }
@@ -238,7 +257,7 @@ pub fn check_fat(sector: &[u8], hint: Option<FsKind>) -> Checked<FatBpb> {
         checked.fatal(Rule::FatCount, "fatCount", fats);
     }
     let media = sector.get(21).copied().unwrap_or(0);
-    if !(media == 0xF0 || media >= 0xF8) {
+    if !fat_media_byte_ok(media) {
         checked.fatal(Rule::Media, "mediaDescriptor", u64::from(media));
     }
     let total = match u16_at(19) {
@@ -300,22 +319,16 @@ pub fn check_fat(sector: &[u8], hint: Option<FsKind>) -> Checked<FatBpb> {
     bpb.cluster_count = clusters;
     bpb.kind = if is_fat32 {
         FsKind::Fat32
-    } else if clusters < 4085 {
-        FsKind::Fat12
-    } else if clusters < 65525 {
-        FsKind::Fat16
+    } else if let Some(kind) = fat_kind_by_clusters(clusters) {
+        kind
     } else {
         checked.fatal(Rule::ClusterCount, "clusterCount", clusters);
         return checked;
     };
-    if is_fat32 && clusters > 0x0FFF_FFF5 {
+    if is_fat32 && clusters > FAT32_MAX_CLUSTERS {
         checked.fatal(Rule::ClusterCount, "clusterCount", clusters);
     }
-    let bits: u64 = match bpb.kind {
-        FsKind::Fat12 => 12,
-        FsKind::Fat16 => 16,
-        _ => 32,
-    };
+    let bits = bpb.width().bits();
     bpb.fat_capacity = (fat_sectors.saturating_mul(bps).saturating_mul(8) / bits).saturating_sub(2);
     if bpb.fat_capacity < clusters {
         checked.minor(Rule::FatSize, "fatSize", fat_sectors);
@@ -510,7 +523,7 @@ pub fn check_exfat(sector: &[u8]) -> Checked<ExfatBpb> {
             heap_offset,
             cluster_count,
             root_cluster: u32::try_from(root).unwrap_or(0),
-            flags: le16(sector, 106).unwrap_or(0),
+            flags: le16(sector, EXFAT_VOLUME_FLAGS_AT).unwrap_or(0),
             fats,
         });
     }
@@ -538,7 +551,7 @@ impl NtfsBpb {
 }
 
 /// 簇大小的上限：64 KiB 以上的簇有专门的写法，Windows 最大到 2 MiB。
-const MAX_NTFS_CLUSTER: u64 = 2 << 20;
+pub const MAX_NTFS_CLUSTER: u64 = 2 << 20;
 
 /// 核对 NTFS 引导扇区。
 pub fn check_ntfs(sector: &[u8]) -> Checked<NtfsBpb> {
@@ -549,7 +562,7 @@ pub fn check_ntfs(sector: &[u8]) -> Checked<NtfsBpb> {
     }
     check_signature(sector, &mut checked);
     let bps = u64::from(le16(sector, 0x0B).unwrap_or(0));
-    let bps_valid = bps.is_power_of_two() && (512..=4096).contains(&bps);
+    let bps_valid = bytes_per_sector_ok(bps);
     if !bps_valid {
         checked.fatal(Rule::BytesPerSector, "bytesPerSector", bps);
     }
@@ -640,7 +653,12 @@ pub fn check_ntfs(sector: &[u8]) -> Checked<NtfsBpb> {
     checked
 }
 
-/// NTFS「每条记录几簇」这类字段：正数是簇数，负数 -n 表示 2^n 字节；结果要是 512 字节到 64 KiB 之间的 2 的幂。
+/// NTFS 的记录、索引块大小要是 512 字节到 64 KiB 之间的 2 的幂（打开卷、读目录索引、重建引导扇区都按它）。
+pub fn ntfs_size_ok(size: u64) -> bool {
+    size.is_power_of_two() && (512..=65536).contains(&size)
+}
+
+/// NTFS「每条记录几簇」这类字段：正数是簇数，负数 -n 表示 2^n 字节；结果要合 [`ntfs_size_ok`]。
 fn ntfs_size(raw: u8, cluster_size: u64) -> Option<u64> {
     let value = raw as i8;
     let size = if value > 0 {
@@ -648,7 +666,7 @@ fn ntfs_size(raw: u8, cluster_size: u64) -> Option<u64> {
     } else {
         1u64.checked_shl(u32::from(value.unsigned_abs()))?
     };
-    (size.is_power_of_two() && (512..=65536).contains(&size)).then_some(size)
+    ntfs_size_ok(size).then_some(size)
 }
 
 /// 规范写的跳转指令：`EB xx 90` 或 `E9 xx xx`。
@@ -663,7 +681,7 @@ fn check_jump<G>(sector: &[u8], checked: &mut Checked<G>) {
 }
 
 fn check_signature<G>(sector: &[u8], checked: &mut Checked<G>) {
-    if le16(sector, 510) != Some(0xAA55) {
+    if !has_signature(sector) {
         checked.fatal(Rule::Signature, "signature", 0);
     }
 }

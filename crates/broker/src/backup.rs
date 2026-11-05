@@ -74,9 +74,7 @@ impl SavedBackup {
             path: path.to_path_buf(),
             reason: error.to_string(),
         })?;
-        let mut temp = path.as_os_str().to_owned();
-        temp.push(".tmp");
-        let temp = PathBuf::from(temp);
+        let temp = yisi_io::temp_path(path);
         let mut out = File::create(&temp).map_err(io_error)?;
         out.write_all(&text).map_err(io_error)?;
         out.sync_all().map_err(io_error)?;

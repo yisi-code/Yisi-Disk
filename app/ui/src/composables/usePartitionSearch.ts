@@ -46,6 +46,7 @@ export function usePartitionSearch() {
     total: job.total,
     percent: job.percent,
     bytesPerSecond: job.bytesPerSecond,
+    progressParams: job.progressParams,
     found,
     summary,
     failure: job.failure,

@@ -19,12 +19,13 @@ use yisi_broker::execute::{self, ImageFile};
 /// 执行的结果：成功，或停在哪一步、失败前已经写下去几段。与磁盘代理的答复同一个类型。
 pub use yisi_broker::protocol::WriteExecuted as WriteOutcome;
 use yisi_engine::protocol::{
-    BootFix, BootSectorPlan, ClusterRun, FsFix, FsFixCount, FsFixPlan, MftFix, MftPlan,
-    PartitionRef, PartitionTableFix, PartitionTablePlan, RebuiltBoot, WritePlan, image_identity,
+    BootFix, BootSectorPlan, ClusterRun, FsFix, FsFixCount, FsFixPlan, MBR_TABLE_OFFSET, MftFix,
+    MftPlan, PartitionRef, PartitionTableFix, PartitionTablePlan, RebuiltBoot, SIGNATURE_OFFSET,
+    WritePlan, has_signature, image_identity,
 };
 
 use crate::broker::BrokerSession;
-use crate::engines::{Engines, HostError, IMAGE_SECTOR_SIZE, Target, lock};
+use crate::engines::{Engines, HostError, Target, image_sector_size, lock};
 use crate::record_file::{self, now_ms};
 
 /// 写盘记录最多留这么多条，最新的在前。备份文件不随记录删除。
@@ -39,9 +40,6 @@ const MAX_BOOT_SECTOR_BYTES: u64 = 12 * 4096;
 const TABLE_AREA: u64 = 64 * 1024;
 /// 一份改写分区表的计划最多写这么多个 EBR（加逻辑分区：前一个 EBR 与新 EBR）。
 const MAX_EBR_WRITES: usize = 2;
-/// MBR 扇区里分区表项区的起点与签名的位置。
-const MBR_TABLE_AT: usize = 446;
-const MBR_SIGNATURE_AT: usize = 510;
 
 /// `$MFT` 与 `$MFTMirr` 互修最多改 4 条记录，每条最大 4 KiB。
 const MAX_MFT_RECORDS: usize = 4;
@@ -595,7 +593,7 @@ fn device_of(target: &Target) -> Result<Writable, HostError> {
             Ok(Writable {
                 identity: image_identity(&real),
                 size,
-                sector_size: IMAGE_SECTOR_SIZE,
+                sector_size: image_sector_size(&real),
                 model: String::new(),
                 serial: String::new(),
             })
@@ -667,8 +665,8 @@ fn execute_on(
 ) -> Result<WriteOutcome, HostError> {
     match target {
         Target::Image { path } => {
-            let mut image =
-                ImageFile::open(Path::new(path), IMAGE_SECTOR_SIZE).map_err(|error| {
+            let mut image = ImageFile::open(Path::new(path), image_sector_size(Path::new(path)))
+                .map_err(|error| {
                     let code = if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
                         "imageInUse"
                     } else {
@@ -759,9 +757,9 @@ fn is_ebr_write(write: &yisi_engine::protocol::SectorWrite, sector: u64) -> bool
     let same =
         |range: std::ops::Range<usize>| write.before.get(range.clone()) == write.after.get(range);
     write.len() == sector
-        && write.after.get(MBR_SIGNATURE_AT..MBR_SIGNATURE_AT + 2) == Some([0x55, 0xAA].as_slice())
-        && same(0..MBR_TABLE_AT)
-        && same(MBR_SIGNATURE_AT + 2..write.after.len())
+        && has_signature(&write.after)
+        && same(0..MBR_TABLE_OFFSET)
+        && same(SIGNATURE_OFFSET + 2..write.after.len())
 }
 
 /// `$MFT` 与 `$MFTMirr` 互修的计划最多 4 段、每段不超过一条记录的最大长度，都落在请求的分区里

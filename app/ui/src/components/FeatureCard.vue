@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, useId } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { FEATURE_VIEWS, type FeatureKey, type FeatureView } from '../navigation'
+import { useEngineCapabilities } from '../composables/useEngineCapabilities'
+import { FEATURE_METHODS, FEATURE_VIEWS, type FeatureKey, type FeatureView } from '../navigation'
 
 const props = defineProps<{
   feature: FeatureKey
@@ -18,8 +19,19 @@ const { t } = useI18n()
 const id = useId()
 
 const cardElement = ref<HTMLButtonElement | null>(null)
+const engine = useEngineCapabilities()
 
-const view = computed(() => FEATURE_VIEWS[props.feature])
+/** 不能进入时的原因：还在开发中、引擎起不来、这个版本的引擎不支持；能进入时为 null */
+const blockedReason = computed(() => {
+  if (FEATURE_VIEWS[props.feature] === null) {
+    return 'pending'
+  }
+  if (engine.failure.value !== null) {
+    return 'engineFailed'
+  }
+  return engine.supports(FEATURE_METHODS[props.feature]) ? null : 'unsupported'
+})
+const view = computed(() => (blockedReason.value === null ? FEATURE_VIEWS[props.feature] : null))
 const describedBy = computed(() =>
   [
     view.value === null ? `${id}-reason` : null,
@@ -31,6 +43,7 @@ const describedBy = computed(() =>
 )
 
 onMounted(() => {
+  void engine.load()
   if (props.shouldFocus) {
     cardElement.value?.focus()
   }
@@ -60,8 +73,8 @@ function handleClick() {
         {{ t('problems.step', { step }) }}
       </span>
       <span :id="`${id}-name`" class="feature-card__name">{{ t(`features.${feature}.name`) }}</span>
-      <span v-if="view === null" class="feature-card__badge" aria-hidden="true">
-        {{ t('features.pending') }}
+      <span v-if="blockedReason" class="feature-card__badge" aria-hidden="true">
+        {{ t(`features.blocked.${blockedReason}`) }}
       </span>
     </span>
     <span v-if="stepNote" :id="`${id}-note`" class="feature-card__note">{{ stepNote }}</span>
@@ -76,8 +89,8 @@ function handleClick() {
       <span class="feature-card__fit-label">{{ t('features.limits') }}</span>
       {{ t(`features.${feature}.limits`) }}
     </span>
-    <span v-if="view === null" :id="`${id}-reason`" class="feature-card__pending-reason">
-      {{ t('features.pendingReason') }}
+    <span v-if="blockedReason" :id="`${id}-reason`" class="feature-card__pending-reason">
+      {{ t(`features.blockedReason.${blockedReason}`) }}
     </span>
   </button>
 </template>

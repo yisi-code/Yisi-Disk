@@ -8,14 +8,15 @@ import WriteHistoryList from './WriteHistoryList.vue'
 import WritePlanConfirm from './WritePlanConfirm.vue'
 import { useBrowse } from '../composables/useBrowse'
 import { useHostErrorText } from '../composables/useHostErrorText'
+import { usePositionText } from '../composables/usePositionText'
 import { usePartitionText } from '../composables/usePartitionText'
 import { useSourceSelection } from '../composables/useSourceSelection'
 import { useWritePlan } from '../composables/useWritePlan'
 import { useWritePlanText } from '../composables/useWritePlanText'
 import {
+  canWritePlan,
   isDeviceKind,
   diagnoseBoot,
-  sameTarget,
   toHostError,
   type BootCopy,
   type BootCopyReport,
@@ -28,7 +29,7 @@ import {
   type PartitionRef,
   type WriteRecord,
 } from '../services/host'
-import { formatBytes, formatHex } from '../utils/format'
+import { formatBytes, formatCount, formatHex } from '../utils/format'
 
 const STEPS = ['source', 'diagnose', 'result'] as const
 type WizardStep = (typeof STEPS)[number]
@@ -37,8 +38,17 @@ const emit = defineEmits<{ exit: [] }>()
 
 const { t, te, locale } = useI18n()
 const { formatHostError } = useHostErrorText()
-const { filesystemName, tableNote, sourceName, partitionLabel, partitionLine, bootFieldName, bootFieldValue } =
-  usePartitionText()
+const { sectorPosition } = usePositionText()
+const {
+  filesystemName,
+  tableNote,
+  sourceName,
+  partitionLabel,
+  partitionLine,
+  bootFieldName,
+  bootFieldValue,
+  roleName,
+} = usePartitionText()
 const browse = useBrowse()
 const writePlan = useWritePlan()
 const { writeActionText, writeOutcomeText } = useWritePlanText()
@@ -94,16 +104,13 @@ const isBusy = computed(
 const isConfirming = computed(() => step.value === 'result' && !isBrowsing.value && writePlan.plan.value !== null)
 
 /** 镜像文件与整块磁盘可以修（Windows 所在的盘由宿主拒绝）；卷上的偏移不是盘上的偏移，不修 */
-const canWrite = computed(() => diagnosedTarget.value?.kind === 'image' || diagnosedTarget.value?.kind === 'disk')
+const canWrite = computed(() => canWritePlan(diagnosedTarget.value))
 
 /** 诊断的这个源的写盘记录（宿主按认盘标识筛好） */
 const targetRecords = computed(() => writePlan.records.value)
 
 /** 刚执行的那次写入（同一个源时才显示） */
-const lastRecord = computed(() => {
-  const record = writePlan.lastRecord.value
-  return record !== null && sameTarget(record.target, diagnosedTarget.value) ? record : null
-})
+const lastRecord = writePlan.lastRecordFor(() => diagnosedTarget.value)
 
 const canGoNext = computed(() => step.value === 'source' && target.value !== null && !isBusy.value)
 
@@ -266,21 +273,11 @@ function partitionTitle(partition: PartitionBoot): string {
 
 /** 分区表里的类型：常见的给本地化名称，MBR 另附类型字节 */
 function partitionRole(partition: PartitionBoot): string {
-  const key = `partition.role.${partition.role ?? ''}`
-  if (partition.role === null || !te(key)) {
-    return partition.typeId === '' ? '-' : partition.typeId
-  }
-  return partition.typeId.startsWith('0x')
-    ? t('repair.result.roleWithType', { role: t(key), type: partition.typeId })
-    : t(key)
+  return roleName(partition, 'byte')
 }
 
 function positionText(copy: BootCopyReport): string {
-  const sectorSize = diagnosis.value?.sectorSize ?? 512
-  return t('repair.result.position', {
-    sector: Math.floor(copy.offset / sectorSize).toLocaleString(locale.value),
-    offset: copy.offset.toLocaleString(locale.value),
-  })
+  return sectorPosition(copy.offset, diagnosis.value?.sectorSize ?? 512)
 }
 
 function volumeText(copy: BootCopyReport): string | null {
@@ -291,10 +288,6 @@ function volumeText(copy: BootCopyReport): string | null {
     size: formatBytes(copy.volumeBytes),
     cluster: formatBytes(copy.clusterSize),
   })
-}
-
-function plain(value: number | null): string {
-  return value === null ? '' : value.toLocaleString(locale.value)
 }
 
 function issueText(issue: BootIssue): string {
@@ -314,7 +307,7 @@ function issueText(issue: BootIssue): string {
     case 'badMedia':
       return t(key, { value: formatHex(issue.value ?? 0, 2) })
     default:
-      return t(key, { value: plain(issue.value), expected: plain(issue.expected) })
+      return t(key, { value: formatCount(issue.value, locale.value), expected: formatCount(issue.expected, locale.value) })
   }
 }
 
@@ -386,13 +379,9 @@ function fixDirection(partition: PartitionBoot): BootFix | null {
   return partition.verdict === 'backupDamaged' ? 'backupFromPrimary' : null
 }
 
-/** 主备都坏了（或两处都认不出）、又不是 FAT12/16（没有备份，这一版不重建）：可以按分区里的结构推算引导扇区 */
+/** 主备都坏了（FAT12/16 没有备份，主引导扇区坏了就是这样）或两处都认不出：可以按分区里的结构推算引导扇区 */
 function canRebuild(partition: PartitionBoot): boolean {
-  return (
-    (partition.verdict === 'bothDamaged' || partition.verdict === 'unrecognized') &&
-    partition.filesystem !== 'fat12' &&
-    partition.filesystem !== 'fat16'
-  )
+  return partition.verdict === 'bothDamaged' || partition.verdict === 'unrecognized'
 }
 
 /** 主引导扇区坏了、备份核对通过并且打得开：可以用备份浏览 */
