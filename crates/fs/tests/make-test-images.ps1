@@ -4,7 +4,7 @@
 产出固定大小的 VHD（就是 raw 镜像末尾多 512 字节），以及每个镜像的清单 <镜像名>.tsv：
 卷标、路径、长度、SHA-256、类别（live / live-fragmented / live-compressed / deleted / deleted-fragmented / deleted-shortname）。
 NTFS 卷另有：常驻在 MFT 记录里的小文件、稀疏文件、硬链接、带备用数据流的文件、NTFS 压缩的文件，
-以及运行表长到要用属性列表的稀疏文件（删除一个、保留一个）。
+运行表长到要用属性列表的稀疏文件（删除一个、保留一个），以及系统压缩（WOF，类别 live-wof / deleted-wof）的文件。
 
 需要管理员权限（diskpart 建虚拟磁盘、挂载）。Windows PowerShell 5.1 按系统代码页读不带 BOM 的脚本，
 所以按 UTF-8 读进来再执行：
@@ -114,6 +114,49 @@ function Fill-NtfsExtras($Manifest, [string] $Label, [string] $Root, [int] $Seed
     # 64 KiB 数据、64 KiB 空洞交替 600 次：运行表 1200 段，一条 MFT 记录放不下，要用属性列表
     Write-ManyRuns $Manifest $Label $Root 'listed-a.bin' ($Seed + 40) 'live-fragmented'
     Write-ManyRuns $Manifest $Label $Root 'listed-b.bin' ($Seed + 41) 'deleted-fragmented'
+
+    # 系统压缩（WOF）的四种算法，现存的各一个，再删掉一个 LZX 的
+    $index = 0
+    foreach ($algorithm in @('xpress4k', 'xpress8k', 'xpress16k', 'lzx', 'lzx')) {
+        $kind = if ($index -eq 4) { 'deleted-wof' } else { 'live-wof' }
+        $path = if ($index -eq 4) { "deleted/wof-$algorithm.bin" } else { "wof/$algorithm.bin" }
+        Write-WofFile $Manifest $Label $Root $path ($Seed + 50 + $index) $algorithm $kind
+        $index++
+    }
+}
+
+# 压得动的内容：随机单词拼成的文字，中间夹一段随机字节（这一段压不动，按原样存放）
+function New-Compressible([int] $Seed, [int] $Length) {
+    $random = New-Object System.Random $Seed
+    $words = @('disk', 'sector', 'cluster', 'volume', 'record', 'index', 'stream', 'chunk', 'window', 'symbol', 'length', 'offset', 'table', 'header', 'bitmap', 'journal')
+    $text = New-Object System.Text.StringBuilder
+    while ($text.Length -lt $Length) {
+        [void]$text.Append($words[$random.Next($words.Count)])
+        [void]$text.Append($(if ($random.Next(12) -eq 0) { "`r`n" } else { ' ' }))
+    }
+    $bytes = [System.Text.Encoding]::ASCII.GetBytes($text.ToString().Substring(0, $Length))
+    $noise = New-Content ($Seed + 1) 40000
+    [Array]::Copy($noise, 0, $bytes, [Math]::Min(100000, $Length - $noise.Length), $noise.Length)
+    return , $bytes
+}
+
+# 写一个文件后用 compact /exe 做系统压缩；压不成就按普通文件对照。WOF 驱动对外藏起了重分析点
+# （fsutil reparsepoint query 查不到、属性里也没有），只能看占用空间是否小于文件长度
+function Write-WofFile($Manifest, [string] $Label, [string] $Root, [string] $Path, [int] $Seed, [string] $Algorithm, [string] $Kind) {
+    if (-not ('YisiTest.Kernel32' -as [type])) {
+        Add-Type -Namespace YisiTest -Name Kernel32 -MemberDefinition '[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern uint GetCompressedFileSizeW(string name, out uint high);'
+    }
+    $full = Join-Path $Root ($Path -replace '/', '\')
+    New-Item -ItemType Directory -Force -Path (Split-Path $full -Parent) | Out-Null
+    $bytes = New-Compressible $Seed 300001
+    [System.IO.File]::WriteAllBytes($full, $bytes)
+    compact /c /q /exe:$Algorithm $full | Out-Null
+    $high = [uint32]0
+    $stored = [YisiTest.Kernel32]::GetCompressedFileSizeW($full, [ref] $high)
+    if ($high -ne 0 -or $stored -ge $bytes.Length) {
+        $Kind = $Kind -replace '-wof$', ''
+    }
+    $Manifest.Add([pscustomobject]@{ Label = $Label; Path = $Path; Length = $bytes.Length; Sha = (Get-Sha256 $bytes); Kind = $Kind; Full = $full })
 }
 
 # 稀疏文件里每隔 64 KiB 写 64 KiB（64 KiB 是 4 KiB 簇卷上稀疏分配的单位，也是 64 KiB 簇卷的一簇）

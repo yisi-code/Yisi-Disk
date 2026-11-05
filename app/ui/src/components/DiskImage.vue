@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import ImageHistoryList from './ImageHistoryList.vue'
 import ImageRegionPicker from './ImageRegionPicker.vue'
+import JobControls from './JobControls.vue'
 import SourcePicker from './SourcePicker.vue'
 import UnreadableRanges from './UnreadableRanges.vue'
 import { useDiskImage } from '../composables/useDiskImage'
@@ -24,6 +25,7 @@ import {
   type ImageHistoryItem,
   type ImagePlan,
   type ImageRegion,
+  type ImagingTuning,
   type JobTarget,
 } from '../services/host'
 import { formatBytes, formatSeconds } from '../utils/format'
@@ -31,6 +33,12 @@ import { joinPath } from '../utils/path'
 
 /** 报告里最多列出的读不出区段数；其余只计入总数 */
 const MAX_LISTED_RANGES = 20
+/** 读取参数的可选值；不选（「默认」）时不传，用引擎的默认值 */
+const BLOCK_CHOICES = [64 << 10, 256 << 10, 1 << 20, 4 << 20, 8 << 20]
+const SKIP_CHOICES = [64 << 10, 1 << 20, 16 << 20]
+const RETRY_CHOICES = [0, 1, 2, 3, 5, 10]
+const SLOW_READ_CHOICES = [0, 1000, 2000, 5000, 10000, 30000]
+const STALL_CHOICES = [0, 5, 10, 30, 60].map((minutes) => minutes * 60_000)
 /** 改完路径停下这么久再去看源与镜像位置，不在每敲一个字时都去读 */
 const INSPECT_DELAY_MS = 700
 
@@ -47,9 +55,13 @@ const {
   failure,
   isUnresponsive,
   isBusy,
+  isPaused,
+  isTogglingPause,
   start,
   continueLast,
   cancel,
+  pause,
+  resume,
 } = useDiskImage()
 const history = useImageHistory()
 const {
@@ -78,6 +90,8 @@ const selectedRegions = ref<number[]>([])
 /** 清掉所选范围已有的进度，从头重读 */
 const redoSelected = ref(false)
 const copyOnly = ref(false)
+/** 读取参数（高级）：没选的项用引擎的默认值 */
+const tuning = ref<Partial<ImagingTuning>>({})
 /** 源在上次之后变过时怎么办：重做变化的部分，或保留旧内容接着做 */
 const changeChoice = ref<'redo' | 'keep' | null>(null)
 const disks = ref<DiskSummary[]>([])
@@ -166,7 +180,7 @@ const plan = computed<ImagePlan>(() => {
   if (changeChoice.value === 'redo') {
     reset.push(...changedRanges.value)
   }
-  return { ranges, reset, copyOnly: copyOnly.value }
+  return { ranges, reset, copyOnly: copyOnly.value, tuning: { ...tuning.value } }
 })
 
 /** 这一次最多还要写入多少：范围里还没读完的（清掉进度的按整段算），只读一部分时加上分区表区域 */
@@ -229,11 +243,16 @@ const canStart = computed(
 const sourceLost = computed(
   () => status.value === 'completed' && summary.value !== null && summary.value.sourceLostAt !== null,
 )
+/** 很久没有读成功、按设定停下了：可以续做 */
+const stalled = computed(
+  () => status.value === 'completed' && summary.value !== null && summary.value.stalledAt !== null,
+)
 const canContinue = computed(
-  () => (status.value === 'cancelled' || sourceLost.value) && lastRequest.value !== null,
+  () =>
+    (status.value === 'cancelled' || sourceLost.value || stalled.value) && lastRequest.value !== null,
 )
 const finishedSummary = computed(() =>
-  status.value === 'completed' && !sourceLost.value ? summary.value : null,
+  status.value === 'completed' && !sourceLost.value && !stalled.value ? summary.value : null,
 )
 const listedRanges = computed(
   () => finishedSummary.value?.badRanges.slice(0, MAX_LISTED_RANGES) ?? [],
@@ -269,7 +288,7 @@ const statusText = computed(() => {
     case 'running':
       return imaging.value === null
         ? t('diskImage.status.preparing')
-        : t('diskImage.status.running', {
+        : t(isPaused.value ? 'diskImage.status.paused' : 'diskImage.status.running', {
             round: t(`diskImage.round.${imaging.value.round}`),
             percent:
               imaging.value.size > 0
@@ -279,7 +298,10 @@ const statusText = computed(() => {
     case 'cancelling':
       return t('diskImage.status.stopping')
     case 'completed':
-      return sourceLost.value ? t('diskImage.status.sourceLost') : t('diskImage.status.completed')
+      if (sourceLost.value) {
+        return t('diskImage.status.sourceLost')
+      }
+      return stalled.value ? t('diskImage.status.stalled') : t('diskImage.status.completed')
     case 'failed':
       return t('diskImage.status.failed')
     case 'cancelled':
@@ -748,6 +770,53 @@ function changeText(change: { kind: string; number: number; before: ByteRange | 
             </span>
           </label>
 
+          <details class="disk-image__tuning">
+            <summary class="disk-image__tuning-summary">{{ t('diskImage.tuning.title') }}</summary>
+            <p class="wizard__hint">{{ t('diskImage.tuning.hint') }}</p>
+            <div class="disk-image__tuning-grid">
+              <label for="tuning-block">{{ t('diskImage.tuning.block') }}</label>
+              <select id="tuning-block" v-model="tuning.blockBytes" class="wizard__input">
+                <option :value="undefined">{{ t('diskImage.tuning.default') }}</option>
+                <option v-for="size in BLOCK_CHOICES" :key="size" :value="size">{{ formatBytes(size) }}</option>
+              </select>
+              <span class="wizard__note">{{ t('diskImage.tuning.blockHint') }}</span>
+
+              <label for="tuning-skip">{{ t('diskImage.tuning.skip') }}</label>
+              <select id="tuning-skip" v-model="tuning.skipBytes" class="wizard__input">
+                <option :value="undefined">{{ t('diskImage.tuning.default') }}</option>
+                <option v-for="size in SKIP_CHOICES" :key="size" :value="size">{{ formatBytes(size) }}</option>
+              </select>
+              <span class="wizard__note">{{ t('diskImage.tuning.skipHint') }}</span>
+
+              <label for="tuning-slow">{{ t('diskImage.tuning.slowRead') }}</label>
+              <select id="tuning-slow" v-model="tuning.slowReadMs" class="wizard__input">
+                <option :value="undefined">{{ t('diskImage.tuning.default') }}</option>
+                <option v-for="ms in SLOW_READ_CHOICES" :key="ms" :value="ms">
+                  {{ ms === 0 ? t('diskImage.tuning.off') : t('common.seconds', { seconds: ms / 1000 }) }}
+                </option>
+              </select>
+              <span class="wizard__note">{{ t('diskImage.tuning.slowReadHint') }}</span>
+
+              <label for="tuning-retries">{{ t('diskImage.tuning.retries') }}</label>
+              <select id="tuning-retries" v-model="tuning.retries" class="wizard__input">
+                <option :value="undefined">{{ t('diskImage.tuning.default') }}</option>
+                <option v-for="count in RETRY_CHOICES" :key="count" :value="count">
+                  {{ count === 0 ? t('diskImage.tuning.off') : t('diskImage.tuning.retryCount', { count }, count) }}
+                </option>
+              </select>
+              <span class="wizard__note">{{ t('diskImage.tuning.retriesHint') }}</span>
+
+              <label for="tuning-stall">{{ t('diskImage.tuning.stall') }}</label>
+              <select id="tuning-stall" v-model="tuning.stallLimitMs" class="wizard__input">
+                <option :value="undefined">{{ t('diskImage.tuning.default') }}</option>
+                <option v-for="ms in STALL_CHOICES" :key="ms" :value="ms">
+                  {{ ms === 0 ? t('diskImage.tuning.off') : t('diskImage.tuning.minutes', { minutes: ms / 60_000 }) }}
+                </option>
+              </select>
+              <span class="wizard__note">{{ t('diskImage.tuning.stallHint') }}</span>
+            </div>
+          </details>
+
           <p
             v-if="current.output && (!isSelecting || chosenRegions.length > 0)"
             :class="isShortOfSpace ? 'wizard__error' : 'wizard__note'"
@@ -772,15 +841,15 @@ function changeText(change: { kind: string; number: number; before: ByteRange | 
           <button v-if="!isBusy" class="wizard__button" type="submit" :disabled="!canStart">
             {{ canResume ? t('diskImage.continue') : t('diskImage.start') }}
           </button>
-          <button
+          <JobControls
             v-else
-            class="wizard__button wizard__button--secondary"
-            type="button"
-            :disabled="status !== 'running'"
-            @click="handleCancel"
-          >
-            {{ status === 'cancelling' ? t('diskImage.stopping') : t('diskImage.stop') }}
-          </button>
+            :status="status"
+            :pause="{ isPaused, isToggling: isTogglingPause }"
+            keeps-result
+            @pause="pause"
+            @resume="resume"
+            @cancel="handleCancel"
+          />
         </div>
       </form>
 
@@ -949,6 +1018,20 @@ function changeText(change: { kind: string; number: number; before: ByteRange | 
 </template>
 
 <style scoped>
+.disk-image__tuning-summary {
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* 每项一行：名称、下拉框、说明 */
+.disk-image__tuning-grid {
+  display: grid;
+  grid-template-columns: max-content minmax(8rem, max-content) 1fr;
+  gap: var(--space-xs) var(--space-sm);
+  align-items: center;
+  margin-top: var(--space-sm);
+}
+
 .disk-image__section {
   display: flex;
   flex-direction: column;

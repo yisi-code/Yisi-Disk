@@ -13,9 +13,11 @@ pub struct Png;
 
 static INFO: FormatInfo = FormatInfo {
     extension: "png",
+    variants: &[],
     description: "Portable Network Graphics image",
     max_size: 256 << 20,
     enabled_by_default: true,
+    nests_files: false,
 };
 
 static SIGNATURES: [Signature; 1] = [Signature {
@@ -37,7 +39,9 @@ impl FileFormat for Png {
         let is_png = block.starts_with(MAGIC)
             && be32(block, 8) == Some(13)
             && block.get(12..16) == Some(b"IHDR".as_slice());
-        is_png.then(|| Box::new(Walker::new(PngStructure::Header)) as Box<dyn Recovering>)
+        is_png.then(|| {
+            Box::new(Walker::new(INFO.max_size, PngStructure::Header)) as Box<dyn Recovering>
+        })
     }
 }
 

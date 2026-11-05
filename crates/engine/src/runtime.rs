@@ -293,11 +293,14 @@ fn dispatch_now(
                         format!("不认识的格式 {extension}"),
                     )
                 })?;
-            // 不给输出目录时只扫描：什么都不写，也就不用核对输出盘
-            let output_dir = params
-                .output_dir
-                .as_ref()
-                .map(|dir| Path::new(dir).join(format!("recovered-{}", short_id(&params.job_id))));
+            // 不给输出目录时只扫描：什么都不写，也就不用核对输出盘；续扫边扫边存的接着用上次的目录
+            let output_dir = match &params.continue_dir {
+                Some(dir) => Some(PathBuf::from(dir)),
+                None => params.output_dir.as_ref().map(|dir| {
+                    Path::new(dir).join(format!("recovered-{}", short_id(&params.job_id)))
+                }),
+            };
+            let start_at = params.start_at;
             let (device, mut sink): (Box<dyn BlockDevice>, Box<dyn Sink + Send>) = match &output_dir
             {
                 Some(dir) => {
@@ -321,6 +324,7 @@ fn dispatch_now(
                         device.as_ref(),
                         &registry,
                         enabled,
+                        start_at,
                         sink.as_mut(),
                         output_dir.as_deref(),
                         context,
@@ -492,6 +496,7 @@ fn dispatch_now(
                 ranges: params.ranges,
                 reset: params.reset,
                 copy_only: params.copy_only,
+                tuning: params.tuning,
             };
             let prepared = if request.method == IMAGE_CREATE {
                 image_job::create(device, image_path, identity, &image_request)?
@@ -499,9 +504,12 @@ fn dispatch_now(
                 image_job::resume(device, image_path, identity, &image_request)?
             };
             let started = prepared.started();
-            state.job = Some(start_job(params.job_id, outbox, events, move |context| {
-                image_job::run(prepared, context)
-            }));
+            state.job = Some(
+                start_job(params.job_id, outbox, events, move |context| {
+                    image_job::run(prepared, context)
+                })
+                .pausable(),
+            );
             to_result(&started)
         }
         IMAGE_INSPECT => {

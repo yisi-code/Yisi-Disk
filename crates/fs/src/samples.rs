@@ -18,6 +18,15 @@ pub use ntfs::{COMPRESSION_UNIT_CLUSTERS, CompressedUnit, NtfsImage, ROOT as NTF
 /// 原文是 16 KiB 文本、8 KiB 随机字节（压出来是原样存放的块）、8 KiB 全 0、32 KiB 含长距离重复的文本。
 pub const LZNT1_PLAIN: &[u8] = include_bytes!("samples/lznt1/plain.bin");
 pub const LZNT1_PACKED: &[u8] = include_bytes!("samples/lznt1/packed.bin");
+/// `compact /exe` 把 [`LZNT1_PLAIN`] 的前 [`WOF_PLAIN_LEN`] 字节系统压缩后的 `WofCompressedData` 流（开头是块偏移表），
+/// 按算法编号（0 XPRESS4K、1 LZX、2 XPRESS8K、3 XPRESS16K）。最后一块不满，XPRESS 有原样存放的块，LZX 有 E8 转换。
+pub const WOF_PLAIN_LEN: usize = 60000;
+pub const WOF_PACKED: [(u32, &[u8]); 4] = [
+    (0, include_bytes!("samples/wof/xpress4k.bin")),
+    (1, include_bytes!("samples/wof/lzx.bin")),
+    (2, include_bytes!("samples/wof/xpress8k.bin")),
+    (3, include_bytes!("samples/wof/xpress16k.bin")),
+];
 
 const SECTOR: usize = 512;
 /// FAT32 样本的备份引导扇区。

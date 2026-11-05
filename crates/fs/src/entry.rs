@@ -16,11 +16,11 @@ pub enum State {
 /// 内容读不出来（或读出来不是原样）的存放方式。目前只有 NTFS 会有。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unsupported {
-    /// NTFS 压缩（LZNT1）。
+    /// NTFS 压缩（LZNT1），但压缩单元不认得、解不开。
     Compressed,
     /// EFS 加密：读出来是密文。
     Encrypted,
-    /// Windows 的系统压缩（WOF）：内容在压缩流里，常规数据流是空的。
+    /// Windows 的系统压缩（WOF），但算法不认得，或内容不在本文件里（WIMBoot 放在 WIM 文件中）。
     SystemCompressed,
     /// 其他重分析点（符号链接、云端占位文件等）：内容不在这里。
     Reparse,

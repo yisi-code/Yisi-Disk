@@ -3,13 +3,16 @@
 //!
 //! 三段流水线：读线程顺序读设备，调用线程识别文件，写线程写出，读盘、识别、写盘同时进行。
 //!
-//! 目前只处理连续存放的文件；碎片重组、块大小探测、断点续传在后续阶段加入。
+//! 目前只处理连续存放的文件；碎片重组、块大小探测在后续阶段加入。
+//!
+//! 续扫：扫描时不断给出检查点（[`CarveControl::checkpoint`]），即从哪里接着扫不会漏掉、也不会重复已经报出的文件；
+//! 停下后从最后一个检查点（[`CarveOptions::start`]）接着扫。
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 mod sink;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::panic;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
@@ -42,6 +45,8 @@ pub struct CarveOptions {
     pub block_size: u32,
     /// 按注册表里的格式序号给出是否启用。
     pub enabled: Vec<bool>,
+    /// 从这里开始扫（续扫时是上次的检查点），按块大小往下取整。从头扫是 0。
+    pub start: u64,
 }
 
 /// 扫描过程中查询取消、报告进度与找到的文件。
@@ -50,6 +55,10 @@ pub trait CarveControl {
     fn is_cancelled(&self) -> bool;
     fn progress(&self, done: u64, total: u64);
     fn found(&self, file: &RecoveredFile);
+
+    /// 检查点：到此为止找到的文件都已经报出（[`found`](Self::found)），从 `resume_at` 接着扫不会漏掉、不会重复。
+    /// 扫描中随进度给出（不会往回退）；被取消时，在报完全部文件之后再给出最后一个。
+    fn checkpoint(&self, _resume_at: u64) {}
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -95,7 +104,7 @@ pub fn carve(
     let started = Instant::now();
     let mut report = CarveReport::default();
 
-    let finished = thread::scope(|scope| {
+    let stopped_at = thread::scope(|scope| {
         let (commands, inbox) = mpsc::sync_channel(QUEUE_DEPTH);
         let (written, done) = mpsc::channel();
         let writer = scope.spawn(move || write_files(sink, inbox, written));
@@ -105,6 +114,7 @@ pub fn carve(
             pending: Vec::new(),
             current: None,
             opened: false,
+            unreported: VecDeque::new(),
         };
         let mut reader = ChunkReader::spawn(scope, device, block_size);
         let scanned = scan(
@@ -133,7 +143,9 @@ pub fn carve(
         scanned
     })?;
 
-    if !finished {
+    if let Some(resume_at) = stopped_at {
+        // 写线程已经把排着的文件写完、报完，这时的检查点不会漏掉它们
+        control.checkpoint(resume_at);
         return Ok(None);
     }
     let size = device.size();
@@ -142,7 +154,7 @@ pub fn carve(
     Ok(Some(report))
 }
 
-/// 读设备、识别文件，把要写的内容排进 `output`。扫完返回 `true`，被取消返回 `false`。
+/// 读设备、识别文件，把要写的内容排进 `output`。扫完返回 `None`，被取消时返回接着扫的位置。
 #[expect(
     clippy::too_many_arguments,
     reason = "扫描所需的各方都由 carve 现场建好传入"
@@ -156,11 +168,11 @@ fn scan(
     output: &mut Output,
     report: &mut CarveReport,
     control: &dyn CarveControl,
-) -> Result<bool, CarveError> {
+) -> Result<Option<u64>, CarveError> {
     let block = block_size as u64;
     let mut active: Option<Active> = None;
-    let mut position = 0u64;
-    let mut next_progress = 0u64;
+    let mut position = options.start / block * block;
+    let mut next_progress = position;
 
     loop {
         if position >= size {
@@ -175,7 +187,7 @@ fn scan(
                 .or_else(|| current.recovering.finish(current.received));
             match length {
                 Some(length) => {
-                    output.commit(length)?;
+                    output.commit(length, current.recovering.extension())?;
                     break;
                 }
                 None => {
@@ -188,13 +200,16 @@ fn scan(
         if position >= next_progress {
             control.progress(position, size);
             output.collect(report, control);
+            control.checkpoint(output.safe_point(resume_point(active.as_ref(), position)));
             next_progress = position + CHUNK_SIZE as u64;
         }
         if control.is_cancelled() {
+            // 正在恢复的文件放弃了，接着扫要从它开头重新认
+            let resume_at = resume_point(active.as_ref(), position);
             if active.take().is_some() {
                 output.discard()?;
             }
-            return Ok(false);
+            return Ok(Some(resume_at));
         }
 
         let Some(data) = reader.block(position) else {
@@ -215,9 +230,22 @@ fn scan(
             && let Some(mut current) = active.take()
         {
             match current.recovering.finish(current.received) {
-                Some(length) => output.commit(length)?,
+                Some(length) => output.commit(length, current.recovering.extension())?,
                 None => output.discard()?,
             }
+            continue;
+        }
+
+        // 只按文件头声明的长度取数据（内容已无从核对）的文件，中途某块开头是别的文件头：它后面多半已经被
+        // 那个文件覆盖了，放弃它，从这一块重新找。里面本来就可能装着别的文件的格式不这样判（nests_files）
+        if let Some(current) = &active
+            && position > current.start
+            && current.known_length.is_some()
+            && !current.nests_files
+            && registry.match_header(data, &options.enabled).is_some()
+        {
+            active = None;
+            output.discard()?;
             continue;
         }
 
@@ -239,6 +267,7 @@ fn scan(
                 recovering: found.recovering,
                 received: 0,
                 known_length: None,
+                nests_files: info.nests_files,
             });
         }
         let Some(current) = active.as_mut() else {
@@ -251,8 +280,8 @@ fn scan(
                 length,
                 before_block,
             } => {
-                active = None;
-                output.commit(length)?;
+                let extension = active.take().and_then(|done| done.recovering.extension());
+                output.commit(length, extension)?;
                 if !before_block {
                     position += block;
                 }
@@ -266,7 +295,12 @@ fn scan(
             }
         }
     }
-    Ok(true)
+    Ok(None)
+}
+
+/// 不算还在写线程里的文件，从哪里接着扫：有文件恢复到一半时是它的开头，否则是当前位置。
+fn resume_point(active: Option<&Active>, position: u64) -> u64 {
+    active.map_or(position, |current| current.start)
 }
 
 struct Active {
@@ -278,6 +312,8 @@ struct Active {
     received: u64,
     /// 插件给出的文件长度超过已收到的数据时，记下长度，之后按长度取数据。
     known_length: Option<u64>,
+    /// 见 [`yisi_formats::FormatInfo::nests_files`]。
+    nests_files: bool,
 }
 
 enum Fed {
@@ -388,7 +424,11 @@ enum Command {
         extension: &'static str,
     },
     Write(Vec<u8>),
-    Commit(u64),
+    /// 文件完整，截到这个长度；`extension` 是插件按内容定的扩展名（没有时用格式本身的）。
+    Commit {
+        length: u64,
+        extension: Option<&'static str>,
+    },
     Discard,
 }
 
@@ -402,6 +442,8 @@ struct Output {
     current: Option<(u64, &'static str)>,
     /// 写线程是否已经为当前文件建了 `.part`。
     opened: bool,
+    /// 已经确认完整、写线程还没写完报回来的文件的起点，按顺序。检查点不能越过它们。
+    unreported: VecDeque<u64>,
 }
 
 impl Output {
@@ -419,11 +461,14 @@ impl Output {
         Ok(())
     }
 
-    fn commit(&mut self, length: u64) -> Result<(), CarveError> {
+    fn commit(&mut self, length: u64, extension: Option<&'static str>) -> Result<(), CarveError> {
+        if let Some((offset, _)) = self.current {
+            self.unreported.push_back(offset);
+        }
         self.flush()?;
         self.current = None;
         self.opened = false;
-        self.send(Command::Commit(length))
+        self.send(Command::Commit { length, extension })
     }
 
     fn discard(&mut self) -> Result<(), CarveError> {
@@ -457,10 +502,18 @@ impl Output {
     }
 
     /// 把写线程已经写完的文件计入报告并通知。
-    fn collect(&self, report: &mut CarveReport, control: &dyn CarveControl) {
+    fn collect(&mut self, report: &mut CarveReport, control: &dyn CarveControl) {
         for file in self.done.try_iter() {
+            self.unreported.pop_front();
             record(&file, report, control);
         }
+    }
+
+    /// 检查点：`resume_at` 与还没报回来的文件里最早的一个，取较前的。
+    fn safe_point(&self, resume_at: u64) -> u64 {
+        self.unreported
+            .front()
+            .map_or(resume_at, |&first| first.min(resume_at))
     }
 }
 
@@ -481,10 +534,10 @@ fn write_files(
                     file.write(&data)?;
                 }
             }
-            Command::Commit(length) => {
+            Command::Commit { length, extension } => {
                 if let Some(file) = current.take() {
                     // 调用线程 panic 时没人接收，文件照样留在磁盘上
-                    let _ = written.send(file.commit(length)?);
+                    let _ = written.send(file.commit(length, extension)?);
                 }
             }
             Command::Discard => {
@@ -756,11 +809,16 @@ mod tests {
             Ok(())
         }
 
-        fn commit(mut self: Box<Self>, length: u64) -> io::Result<RecoveredFile> {
+        fn commit(
+            mut self: Box<Self>,
+            length: u64,
+            extension: Option<&str>,
+        ) -> io::Result<RecoveredFile> {
             self.data.truncate(length as usize);
+            let extension = extension.map_or_else(|| self.extension.clone(), str::to_owned);
             let file = RecoveredFile {
-                name: format!("f{}.{}", self.offset, self.extension),
-                extension: self.extension.clone(),
+                name: format!("f{}.{}", self.offset, extension),
+                extension,
                 offset: self.offset,
                 length,
             };
@@ -778,6 +836,8 @@ mod tests {
         cancel_after_progress: Option<usize>,
         progress_calls: Cell<usize>,
         found: RefCell<Vec<RecoveredFile>>,
+        /// 检查点，以及给出它时已经报出了几个文件。
+        checkpoints: RefCell<Vec<(u64, usize)>>,
     }
 
     impl CarveControl for Recorder {
@@ -792,6 +852,11 @@ mod tests {
 
         fn found(&self, file: &RecoveredFile) {
             self.found.borrow_mut().push(file.clone());
+        }
+
+        fn checkpoint(&self, resume_at: u64) {
+            let reported = self.found.borrow().len();
+            self.checkpoints.borrow_mut().push((resume_at, reported));
         }
     }
 
@@ -865,6 +930,7 @@ mod tests {
         let options = CarveOptions {
             block_size: BLOCK as u32,
             enabled: enabled.unwrap_or_else(|| vec![true; registry.formats().len()]),
+            start: 0,
         };
         let mut sink = MemorySink::default();
         let report = carve(device, &registry, &options, &mut sink, control).unwrap();
@@ -910,6 +976,142 @@ mod tests {
         assert_eq!(report.by_type.len(), 5);
         assert_eq!(report.unreadable_bytes, 0);
         assert_eq!(control.found.borrow().len(), 5);
+    }
+
+    #[test]
+    fn files_are_named_by_what_they_contain() {
+        let mut image = ImageBuilder::new();
+        image
+            .garbage(1)
+            .file(
+                "docx",
+                samples::zip(
+                    &[
+                        ("[Content_Types].xml", 40, false),
+                        ("word/document.xml", 600, true),
+                    ],
+                    b"",
+                ),
+            )
+            .garbage(1)
+            .file(
+                "mov",
+                samples::iso_media(b"qt  ", &[(b"moov", 80), (b"mdat", 3000)]),
+            )
+            .garbage(1)
+            .file("zip", samples::zip(&[("notes.txt", 70, false)], b""))
+            .garbage(1);
+        let (report, saved) = run(&image.device(vec![]), None, &Recorder::default());
+        let named: Vec<_> = saved
+            .iter()
+            .map(|(file, _)| {
+                (
+                    file.extension.as_str(),
+                    file.name.rsplit('.').next().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(named, [("docx", "docx"), ("mov", "mov"), ("zip", "zip")]);
+        // 按存成的扩展名统计
+        let types: Vec<_> = report.unwrap().by_type.into_keys().collect();
+        assert_eq!(types, ["docx", "mov", "zip"]);
+    }
+
+    #[test]
+    fn a_new_header_inside_a_declared_length_file_ends_it_unless_it_nests_files() {
+        // WAV 后半段被一张 PNG 覆盖：长度照文件头说的还长，但 PNG 的文件头出现在它的范围里
+        let wav = samples::riff(b"WAVE", &[(b"fmt ", 16), (b"data", 20_000)]);
+        let mut image = ImageBuilder::new();
+        image
+            .garbage(1)
+            .file("wav-cut", wav[..3000].to_vec())
+            .file("png", samples::png(&[400]))
+            .garbage(50);
+        let (_, saved) = run(&image.device(vec![]), None, &Recorder::default());
+        let found: Vec<_> = saved
+            .iter()
+            .map(|(file, _)| file.extension.as_str())
+            .collect();
+        assert_eq!(found, ["png"]);
+
+        // 数据库里存着一张图片，正好落在块边界上：数据库照样完整，图片不单独算
+        let mut database = samples::sqlite(4096, 4);
+        let png = samples::png(&[300]);
+        database[4096..4096 + png.len()].copy_from_slice(&png);
+        let mut image = ImageBuilder::new();
+        image.garbage(1).file("sqlite", database.clone()).garbage(1);
+        let (_, saved) = run(&image.device(vec![]), None, &Recorder::default());
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].0.extension, "sqlite");
+        assert!(saved[0].1 == database);
+    }
+
+    /// 从 `start` 起扫，返回报出的文件。
+    fn run_from(device: &MemoryDevice, start: u64, control: &Recorder) -> Option<CarveReport> {
+        let registry = Registry::builtin();
+        let options = CarveOptions {
+            block_size: BLOCK as u32,
+            enabled: vec![true; registry.formats().len()],
+            start,
+        };
+        carve(
+            device,
+            &registry,
+            &options,
+            &mut MemorySink::default(),
+            control,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn stopping_and_resuming_from_the_last_checkpoint_finds_every_file_once() {
+        let mut image = ImageBuilder::new();
+        for round in 0..8 {
+            image
+                .garbage(3)
+                .file("jpg", samples::jpg(20_000 + round * 1000))
+                .garbage(2)
+                .file("mp4", samples::mp4(700_000, false))
+                .file("png", samples::png(&[5000]));
+        }
+        image.garbage(4);
+        let device = image.device(vec![]);
+        let offsets =
+            |found: &[RecoveredFile]| found.iter().map(|file| file.offset).collect::<Vec<_>>();
+        let whole = Recorder::default();
+        run_from(&device, 0, &whole).unwrap();
+        let expected = offsets(&whole.found.borrow());
+        assert_eq!(expected.len(), 24);
+
+        for stop_after in [1, 2, 3, 5] {
+            let first = Recorder {
+                cancel_after_progress: Some(stop_after),
+                ..Recorder::default()
+            };
+            assert!(run_from(&device, 0, &first).is_none(), "应当被停下");
+            let checkpoints = first.checkpoints.borrow().clone();
+            assert!(
+                checkpoints.windows(2).all(|pair| pair[0].0 <= pair[1].0),
+                "检查点往回退：{checkpoints:?}"
+            );
+            // 最后一个检查点在全部文件报出之后给出，之前报出的文件都在它前面
+            let &(resume_at, reported) = checkpoints.last().unwrap();
+            assert_eq!(reported, first.found.borrow().len());
+            assert!(
+                first
+                    .found
+                    .borrow()
+                    .iter()
+                    .all(|file| file.offset < resume_at)
+            );
+
+            let second = Recorder::default();
+            run_from(&device, resume_at, &second).unwrap();
+            let mut both = offsets(&first.found.borrow());
+            both.extend(offsets(&second.found.borrow()));
+            assert_eq!(both, expected, "停在第 {stop_after} 段之后");
+        }
     }
 
     #[test]
@@ -1045,6 +1247,7 @@ mod tests {
         let options = CarveOptions {
             block_size: 300,
             enabled: vec![true; registry.formats().len()],
+            start: 0,
         };
         let result = carve(
             &image.device(vec![]),
@@ -1118,6 +1321,7 @@ mod tests {
         let options = CarveOptions {
             block_size: BLOCK as u32,
             enabled: vec![true; registry.formats().len()],
+            start: 0,
         };
         // 五个文件：写线程在第一个上出错后，扫描还要再交出后面几个，发送失败。
         // 一个文件：扫描先结束，错误要在等写线程时取回。

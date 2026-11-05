@@ -56,6 +56,11 @@ pub(crate) trait Structure: Send {
     fn finish(&self, _received: u64, _waiting_at: Option<u64>) -> Option<u64> {
         None
     }
+
+    /// 见 [`Recovering::extension`]。
+    fn extension(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 enum Mode {
@@ -80,18 +85,22 @@ pub(crate) struct Walker<S> {
     mode: Mode,
     /// 下一步允许的最小位置。
     cursor: u64,
+    /// 格式的最大尺寸：要的位置或给出的长度超过它时判为认错了（长度字段离谱）。
+    max_size: u64,
     /// 最近一次交付或匹配处起的字节，供下一步回看。
     recent_at: u64,
     recent: Vec<u8>,
 }
 
 impl<S: Structure> Walker<S> {
-    pub(crate) fn new(structure: S) -> Self {
+    /// `max_size` 是格式的 [`FormatInfo::max_size`](crate::FormatInfo)。
+    pub(crate) fn new(max_size: u64, structure: S) -> Self {
         let first = structure.first();
         let mut walker = Self {
             structure,
             mode: Mode::Invalid,
             cursor: 0,
+            max_size,
             recent_at: 0,
             recent: Vec::new(),
         };
@@ -112,13 +121,14 @@ impl<S: Structure> Walker<S> {
     }
 
     fn enter(&mut self, step: Step) -> Mode {
+        let within = |at: u64| at >= self.cursor && at <= self.max_size;
         match step {
-            Step::Need { at, len } if at >= self.cursor && (1..=MAX_NEED).contains(&len) => {
+            Step::Need { at, len } if within(at) && (1..=MAX_NEED).contains(&len) => {
                 let mut buffer = Vec::with_capacity(len);
                 buffer.extend_from_slice(self.recalled(at, len));
                 Mode::Need { at, len, buffer }
             }
-            Step::Scan { from, scanner } if from >= self.cursor => {
+            Step::Scan { from, scanner } if within(from) => {
                 let carry = self.recalled(from, usize::MAX).to_vec();
                 Mode::Scan {
                     from: from + carry.len() as u64,
@@ -126,7 +136,7 @@ impl<S: Structure> Walker<S> {
                     carry,
                 }
             }
-            Step::Done(length) if length >= self.cursor => Mode::Done(length),
+            Step::Done(length) if within(length) => Mode::Done(length),
             _ => Mode::Invalid,
         }
     }
@@ -235,6 +245,58 @@ impl<S: Structure> Recovering for Walker<S> {
             Mode::Scan { .. } | Mode::Invalid => None,
         }
     }
+
+    fn extension(&self) -> Option<&'static str> {
+        self.structure.extension()
+    }
+}
+
+/// 要读的东西分散在文件各处、位置是读到别处才知道的格式（TIFF 的 IFD 与数组、复合文档的 FAT 扇区）：
+/// 按位置从小到大排着，一样一样读。遍历器只能往后读，排到时位置已经过去的取不回来，由使用方决定怎么处理。
+pub(crate) struct ReadQueue<T> {
+    items: std::collections::BTreeMap<u64, Vec<T>>,
+}
+
+impl<T> Default for ReadQueue<T> {
+    fn default() -> Self {
+        Self {
+            items: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+impl<T> ReadQueue<T> {
+    pub(crate) fn push(&mut self, at: u64, item: T) {
+        self.items.entry(at).or_default().push(item);
+    }
+
+    /// 位置最小的一样。
+    pub(crate) fn pop(&mut self) -> Option<(u64, T)> {
+        let mut first = self.items.first_entry()?;
+        let at = *first.key();
+        let item = first.get_mut().pop();
+        if first.get().is_empty() {
+            first.remove();
+        }
+        item.map(|item| (at, item))
+    }
+
+    pub(crate) fn first_at(&self) -> Option<u64> {
+        self.items.keys().next().copied()
+    }
+}
+
+/// 文件头里就写明了总长度的格式（BMP、SQLite 等）：不用再看后面的内容，按这个长度取数据。
+pub(crate) struct KnownLength(pub u64);
+
+impl Structure for KnownLength {
+    fn first(&self) -> Step {
+        Step::Done(self.0)
+    }
+
+    fn step(&mut self, _event: Event<'_>) -> Step {
+        Step::Invalid
+    }
 }
 
 /// 在窗口里找一个固定字节串。
@@ -270,6 +332,15 @@ pub(crate) mod tests {
     /// 按块送入数据，返回判断出的文件长度；`None` 表示无效或不完整。
     pub(crate) fn run(
         mut recovering: Box<dyn Recovering>,
+        data: &[u8],
+        block_size: usize,
+    ) -> Option<u64> {
+        run_keeping(&mut recovering, data, block_size)
+    }
+
+    /// 同 [`run`]，读完后 `recovering` 留给调用方（再问它按内容定的扩展名）。
+    pub(crate) fn run_keeping(
+        recovering: &mut Box<dyn Recovering>,
         data: &[u8],
         block_size: usize,
     ) -> Option<u64> {
@@ -324,7 +395,7 @@ pub(crate) mod tests {
         data.extend_from_slice(b"tail");
         let expected = data.len() as u64 - 4;
         check_all_splits(
-            || Box::new(Walker::new(LengthThenMarker { phase: 0 })),
+            || Box::new(Walker::new(u64::MAX, LengthThenMarker { phase: 0 })),
             &data,
             Some(expected),
         );
@@ -334,7 +405,7 @@ pub(crate) mod tests {
     fn missing_marker_is_incomplete() {
         let data = [0, 0, 0, 1, b'x', b'E', b'N'];
         check_all_splits(
-            || Box::new(Walker::new(LengthThenMarker { phase: 0 })),
+            || Box::new(Walker::new(u64::MAX, LengthThenMarker { phase: 0 })),
             &data,
             None,
         );
@@ -369,7 +440,7 @@ pub(crate) mod tests {
     #[test]
     fn re_reading_just_delivered_bytes_works_across_blocks() {
         check_all_splits(
-            || Box::new(Walker::new(PeekThenRead { peeked: false })),
+            || Box::new(Walker::new(u64::MAX, PeekThenRead { peeked: false })),
             b"abcdefgh",
             Some(7),
         );
@@ -389,7 +460,11 @@ pub(crate) mod tests {
 
     #[test]
     fn stepping_backwards_or_oversized_needs_are_invalid() {
-        check_all_splits(|| Box::new(Walker::new(GoesBackwards)), &[0u8; 16], None);
+        check_all_splits(
+            || Box::new(Walker::new(u64::MAX, GoesBackwards)),
+            &[0u8; 16],
+            None,
+        );
 
         struct TooBig;
         impl Structure for TooBig {
@@ -403,7 +478,23 @@ pub(crate) mod tests {
                 Step::Invalid
             }
         }
-        let mut walker = Walker::new(TooBig);
+        let mut walker = Walker::new(u64::MAX, TooBig);
         assert_eq!(walker.data_check(0, &[0; 8]), DataCheck::Invalid);
+    }
+
+    #[test]
+    fn lengths_and_positions_beyond_the_format_maximum_are_invalid() {
+        let mut fits = Walker::new(100, KnownLength(100));
+        assert_eq!(fits.data_check(0, &[0; 8]), DataCheck::Complete(100));
+        let mut too_long = Walker::new(100, KnownLength(101));
+        assert_eq!(too_long.data_check(0, &[0; 8]), DataCheck::Invalid);
+        // 第一步就要读上限之外的位置
+        let far = Walker::new(3, LengthThenMarker { phase: 0 });
+        assert_eq!(far.waiting_at(), Some(0));
+        check_all_splits(
+            || Box::new(Walker::new(5, LengthThenMarker { phase: 0 })),
+            &[0, 0, 0, 9, 1, 2, 3],
+            None,
+        );
     }
 }

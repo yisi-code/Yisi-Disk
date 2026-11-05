@@ -4,11 +4,14 @@
 #![forbid(unsafe_code)]
 
 mod broker;
+mod carve_history;
 mod engines;
 mod image_history;
 mod record_file;
 mod shell;
 mod write_plans;
+
+use std::sync::Arc;
 
 use serde::Serialize;
 use tauri::webview::PageLoadEvent;
@@ -18,11 +21,12 @@ use yisi_engine::protocol::PartitionInfo;
 use yisi_engine::protocol::{BootCopy, BootDiagnosis, BootFix, ImageDescription, ImageInspection};
 use yisi_engine::protocol::{
     BrowseOpened, Capabilities, CopyItem, DiskList, ExtractItem, FileListPage, FilePreview,
-    FileTypeList, PartitionRef, ScanResult,
+    FileTypeList, FoundFile, PartitionRef, ScanResult,
 };
 use yisi_engine::protocol::{ClusterRun, FatRating, FsFix, MftFix, PartitionTableFix, SearchMode};
 
 use crate::broker::BrokerSession;
+use crate::carve_history::{CarveHistory, CarveRecord};
 use crate::engines::{
     Engines, HostError, ImagePlan, Target, refuse_executable, save_fs_check_report,
 };
@@ -77,17 +81,76 @@ fn job_start_read_scan(
 
 /// 深度恢复。源为物理磁盘时与读取扫描一样，第一次需要时提权启动磁盘代理。
 /// 不给输出目录时只扫描，之后用 `carve_preview_range` 预览、`job_start_extract` 保存选中的文件。
+/// 每次扫描记进扫描记录（`source_label` 是界面给的来源描述），停下后可以接着扫、关掉程序后还能接着挑选保存。
+#[expect(clippy::too_many_arguments, reason = "与界面命令的参数一一对应")]
 #[tauri::command(async)]
 fn job_start_carve(
     app: AppHandle,
     engines: State<'_, Engines>,
     broker: State<'_, BrokerSession>,
+    history: State<'_, Arc<CarveHistory>>,
     job_id: String,
     target: Target,
     output_dir: Option<String>,
     extensions: Vec<String>,
+    source_label: Option<String>,
 ) -> Result<(), HostError> {
-    engines.start_carve(app, &broker, job_id, target, output_dir, extensions)
+    engines.start_carve(
+        app,
+        &broker,
+        &history,
+        job_id,
+        target,
+        output_dir,
+        extensions,
+        source_label.unwrap_or_default(),
+    )
+}
+
+/// 接着扫一次停下的扫描（扫描记录 `record_id`），从最后一个检查点接着扫。
+#[tauri::command(async)]
+fn job_resume_carve(
+    app: AppHandle,
+    engines: State<'_, Engines>,
+    broker: State<'_, BrokerSession>,
+    history: State<'_, Arc<CarveHistory>>,
+    job_id: String,
+    record_id: String,
+) -> Result<(), HostError> {
+    engines.resume_carve(app, &broker, &history, job_id, &record_id)
+}
+
+/// 扫描记录，最近开始的在前。
+#[tauri::command(async)]
+fn carve_history_list(history: State<'_, Arc<CarveHistory>>) -> Vec<CarveRecord> {
+    history.records()
+}
+
+/// 打开一条扫描记录（之后按记录 ID 预览、另存、打开）：记录与找到的文件。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CarveRecordOpened {
+    record: CarveRecord,
+    files: Vec<FoundFile>,
+}
+
+#[tauri::command(async)]
+fn carve_history_open(
+    engines: State<'_, Engines>,
+    history: State<'_, Arc<CarveHistory>>,
+    record_id: String,
+) -> Result<CarveRecordOpened, HostError> {
+    let (record, files) = engines.open_carve_record(&history, &record_id)?;
+    Ok(CarveRecordOpened { record, files })
+}
+
+/// 从扫描记录里移除（只删记录与找到的文件清单，不碰恢复出的文件）。
+#[tauri::command(async)]
+fn carve_history_remove(
+    history: State<'_, Arc<CarveHistory>>,
+    record_id: String,
+) -> Result<(), HostError> {
+    history.remove(&record_id)
 }
 
 /// 预览只扫描、还没保存的文件：回到扫描任务的源上读。
@@ -632,6 +695,7 @@ fn main() -> anyhow::Result<()> {
                 }
             };
             app.manage(ImageHistory::new(data_dir.join("image-history.json")));
+            app.manage(Arc::new(CarveHistory::new(&data_dir)));
             app.manage(WritePlans::new(data_dir));
             // 主窗口不由配置自动创建（tauri.conf.json 里 create 为 false），在这里按配置建，数据目录指到 data 下
             let window = app
@@ -659,6 +723,10 @@ fn main() -> anyhow::Result<()> {
             carve_file_types,
             job_start_read_scan,
             job_start_carve,
+            job_resume_carve,
+            carve_history_list,
+            carve_history_open,
+            carve_history_remove,
             job_cancel,
             job_set_paused,
             recovered_preview,

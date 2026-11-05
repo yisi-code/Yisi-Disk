@@ -71,7 +71,8 @@ struct Node {
     /// 压缩的数据流记的压缩单元（[`NtfsImage::add_compressed`] 为 4；只 `mark_compressed` 时为 0，读不出）。
     compression_unit: u8,
     encrypted: bool,
-    reparse_tag: Option<u32>,
+    /// 重分析点的内容（开头 4 字节是标记）。
+    reparse: Option<Vec<u8>>,
     /// 备用数据流（有名字的 `$DATA`），放在基本记录里、无名数据流之后。
     streams: Vec<(String, Data)>,
     /// 数据流的第二段放进这条扩展记录，基本记录里加属性列表。
@@ -327,8 +328,36 @@ impl NtfsImage {
         self.nodes.get_mut(&record).unwrap().encrypted = true;
     }
 
+    /// 只带标记的重分析点（内容为空）。
     pub fn mark_reparse(&mut self, record: u64, tag: u32) {
-        self.nodes.get_mut(&record).unwrap().reparse_tag = Some(tag);
+        let mut value = vec![0u8; 8];
+        value[0..4].copy_from_slice(&tag.to_le_bytes());
+        self.nodes.get_mut(&record).unwrap().reparse = Some(value);
+    }
+
+    /// 系统压缩（WOF）的文件：无名数据流是 `size` 长的稀疏流，`packed` 放进 `WofCompressedData` 流，
+    /// 重分析点记 WOF 外部信息（提供者 2 = 单个文件）与算法（0 XPRESS4K、1 LZX、2 XPRESS8K、3 XPRESS16K）。
+    pub fn add_wof(
+        &mut self,
+        parent: u64,
+        name: &str,
+        size: usize,
+        algorithm: u32,
+        packed: &[u8],
+    ) -> u64 {
+        let record = self.new_node(parent, name, false);
+        self.nodes.get_mut(&record).unwrap().data = Data::NonResident {
+            runs: vec![(None, size.div_ceil(CLUSTER))],
+            size,
+        };
+        self.add_stream(record, "WofCompressedData", packed);
+        let mut value = vec![0u8; 24];
+        for (at, field) in [(0, TAG_WOF), (8, 1), (12, 2), (16, 1), (20, algorithm)] {
+            value[at..at + 4].copy_from_slice(&field.to_le_bytes());
+        }
+        value[4..6].copy_from_slice(&16u16.to_le_bytes());
+        self.nodes.get_mut(&record).unwrap().reparse = Some(value);
+        record
     }
 
     /// 删除：记录标为未使用、序号加 1，簇在位图里释放；目录索引在 `finish` 时不再列出它。
@@ -534,9 +563,12 @@ impl NtfsImage {
         if node.encrypted {
             flags |= 0x4000;
         }
-        if node.reparse_tag.is_some() {
+        if node.reparse.is_some() {
             flags |= 0x0400;
         }
+        let reparse_tag = node.reparse.as_ref().map_or(0, |value| {
+            u32::from_le_bytes(value[0..4].try_into().unwrap())
+        });
         let units: Vec<u16> = name.name.encode_utf16().collect();
         let mut value = vec![0u8; 0x42 + units.len() * 2];
         value[0..8]
@@ -547,7 +579,7 @@ impl NtfsImage {
         value[0x28..0x30].copy_from_slice(&size.next_multiple_of(CLUSTER as u64).to_le_bytes());
         value[0x30..0x38].copy_from_slice(&size.to_le_bytes());
         value[0x38..0x3C].copy_from_slice(&flags.to_le_bytes());
-        value[0x3C..0x40].copy_from_slice(&node.reparse_tag.unwrap_or(0).to_le_bytes());
+        value[0x3C..0x40].copy_from_slice(&reparse_tag.to_le_bytes());
         value[0x40] = units.len() as u8;
         value[0x41] = name.namespace;
         for (index, unit) in units.iter().enumerate() {
@@ -684,10 +716,8 @@ impl NtfsImage {
                 Data::None => continue,
             });
         }
-        if let Some(tag) = node.reparse_tag {
-            let mut value = vec![0u8; 8];
-            value[0..4].copy_from_slice(&tag.to_le_bytes());
-            attributes.push(resident(0xC0, "", 12, &value));
+        if let Some(value) = &node.reparse {
+            attributes.push(resident(0xC0, "", 12, value));
         }
         if let Some(index) = index {
             attributes.extend(index);

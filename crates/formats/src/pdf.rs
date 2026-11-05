@@ -16,9 +16,11 @@ pub struct Pdf;
 
 static INFO: FormatInfo = FormatInfo {
     extension: "pdf",
+    variants: &[],
     description: "Portable Document Format",
     max_size: 512 << 20,
     enabled_by_default: true,
+    nests_files: true,
 };
 
 static SIGNATURES: [Signature; 1] = [Signature {
@@ -41,10 +43,13 @@ impl FileFormat for Pdf {
         let plausible = block.starts_with(MAGIC)
             && matches!(version, [major, b'.', minor] if major.is_ascii_digit() && minor.is_ascii_digit());
         plausible.then(|| {
-            Box::new(Walker::new(PdfStructure {
-                last_end: None,
-                pending_eol: false,
-            })) as Box<dyn Recovering>
+            Box::new(Walker::new(
+                INFO.max_size,
+                PdfStructure {
+                    last_end: None,
+                    pending_eol: false,
+                },
+            )) as Box<dyn Recovering>
         })
     }
 }

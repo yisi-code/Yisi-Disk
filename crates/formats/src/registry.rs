@@ -2,8 +2,13 @@
 
 use std::collections::HashMap;
 
+use crate::mp4::{Cr3, Heic, Mp4};
 use crate::plugin::{FileFormat, Recovering};
-use crate::{jpg::Jpg, mp4::Mp4, pdf::Pdf, png::Png, zip::Zip};
+use crate::riff::{AVI, WAV, WEBP};
+use crate::{
+    bmp::Bmp, gif::Gif, jpg::Jpg, mkv::Mkv, mp3::Mp3, ole::Ole, pdf::Pdf, png::Png, rar::Rar,
+    sevenzip::SevenZip, sqlite::Sqlite, tiff::Tiff, zip::Zip,
+};
 
 /// 一块的开头命中了某个格式的文件头。
 pub struct HeaderMatch {
@@ -64,6 +69,20 @@ impl Registry {
             Box::new(Pdf),
             Box::new(Zip),
             Box::new(Mp4),
+            Box::new(Heic),
+            Box::new(Cr3),
+            Box::new(Gif),
+            Box::new(Bmp),
+            Box::new(Tiff),
+            Box::new(WEBP),
+            Box::new(AVI),
+            Box::new(Mkv),
+            Box::new(WAV),
+            Box::new(Mp3),
+            Box::new(Ole),
+            Box::new(SevenZip),
+            Box::new(Rar),
+            Box::new(Sqlite),
         ])
     }
 
@@ -71,11 +90,12 @@ impl Registry {
         &self.formats
     }
 
-    /// 按扩展名找格式序号。
+    /// 按扩展名找格式序号：格式本身的扩展名，或按内容改用的扩展名（[`FormatInfo::variants`](crate::FormatInfo)）。
     pub fn position(&self, extension: &str) -> Option<usize> {
-        self.formats
-            .iter()
-            .position(|format| format.info().extension == extension)
+        self.formats.iter().position(|format| {
+            let info = format.info();
+            info.extension == extension || info.variants.contains(&extension)
+        })
     }
 
     /// 检查一块的开头是不是某个已启用格式的文件头。`enabled` 按格式序号给出是否启用。
@@ -132,12 +152,21 @@ mod tests {
     #[test]
     fn builtin_extensions_are_unique_and_signatures_indexed() {
         let registry = Registry::builtin();
-        let extensions: HashSet<_> = registry
+        let all: Vec<&str> = registry
             .formats()
             .iter()
-            .map(|format| format.info().extension)
+            .flat_map(|format| {
+                let info = format.info();
+                std::iter::once(info.extension).chain(info.variants.iter().copied())
+            })
             .collect();
-        assert_eq!(extensions.len(), registry.formats().len());
+        let unique: HashSet<_> = all.iter().collect();
+        assert_eq!(unique.len(), all.len(), "{all:?}");
+        for (position, format) in registry.formats().iter().enumerate() {
+            for variant in format.info().variants {
+                assert_eq!(registry.position(variant), Some(position), "{variant}");
+            }
+        }
         assert!(registry.short.is_empty());
     }
 
@@ -151,6 +180,34 @@ mod tests {
             ("pdf", samples::pdf(1, false)),
             ("zip", samples::zip(&[("a", 10, false)], b"")),
             ("mp4", samples::mp4(100, false)),
+            (
+                "heic",
+                samples::iso_media(b"heic", &[(b"meta", 40), (b"mdat", 100)]),
+            ),
+            (
+                "cr3",
+                samples::iso_media(b"crx ", &[(b"moov", 40), (b"mdat", 100)]),
+            ),
+            ("gif", samples::gif(1, true)),
+            ("bmp", samples::bmp(4, 4, 24)),
+            ("tif", samples::tiff(&samples::TiffLayout::default())),
+            (
+                "tif",
+                samples::tiff(&samples::TiffLayout {
+                    big: true,
+                    ..samples::TiffLayout::default()
+                }),
+            ),
+            ("webp", samples::riff(b"WEBP", &[(b"VP8L", 30)])),
+            ("avi", samples::riff(b"AVI ", &[(b"LIST", 30)])),
+            ("mkv", samples::mkv("matroska", 50, false)),
+            ("wav", samples::riff(b"WAVE", &[(b"fmt ", 16)])),
+            ("mp3", samples::mp3(3, 1, 5, false, 0)),
+            ("doc", samples::ole(3, 10, "WordDocument", false)),
+            ("7z", samples::sevenzip(10, 10)),
+            ("rar", samples::rar5(&[10])),
+            ("rar", samples::rar4(&[10], true)),
+            ("sqlite", samples::sqlite(512, 1)),
         ];
         for (extension, sample) in cases {
             let position = registry.position(extension).unwrap();

@@ -29,9 +29,11 @@ pub struct Jpg;
 
 static INFO: FormatInfo = FormatInfo {
     extension: "jpg",
+    variants: &[],
     description: "JPEG image",
     max_size: 256 << 20,
     enabled_by_default: true,
+    nests_files: true,
 };
 
 static SIGNATURES: [Signature; 1] = [Signature {
@@ -51,10 +53,13 @@ impl FileFormat for Jpg {
     fn header_check(&self, block: &[u8]) -> Option<Box<dyn Recovering>> {
         let marker = *block.get(3)?;
         (block.starts_with(SOI) && FIRST_MARKERS.contains(&marker)).then(|| {
-            Box::new(Walker::new(JpgStructure {
-                phase: Phase::Marker,
-                seen_scan: false,
-            })) as Box<dyn Recovering>
+            Box::new(Walker::new(
+                INFO.max_size,
+                JpgStructure {
+                    phase: Phase::Marker,
+                    seen_scan: false,
+                },
+            )) as Box<dyn Recovering>
         })
     }
 }

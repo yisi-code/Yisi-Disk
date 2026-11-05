@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import CarveHistoryList from './CarveHistoryList.vue'
 import ContextMenu, { type MenuItem } from './ContextMenu.vue'
 import FileTypePicker from './FileTypePicker.vue'
 import RecoveredBrowser from './RecoveredBrowser.vue'
@@ -20,14 +21,17 @@ import { useSourceSelection } from '../composables/useSourceSelection'
 import {
   isDeviceKind,
   copyRecoveredFile,
+  listCarveHistory,
   listFileTypes,
   openOrReveal,
   openRecoveredFile,
   openRecoveredFileWith,
   pickSaveFile,
+  removeCarveRecord,
   revealRecoveredFile,
   startExtract,
   toHostError,
+  type CarveRecord,
   type ExtractItem,
   type FileType,
   type FoundFile,
@@ -56,9 +60,8 @@ const emit = defineEmits<{ exit: [] }>()
 const { t, locale } = useI18n()
 const { formatHostError } = useHostErrorText()
 const { sourceName } = usePartitionText()
-const { fileTypeName } = useFileTypeName()
+const { foundTypeName, formatName } = useFileTypeName()
 const {
-  jobId,
   status,
   targetKind,
   done,
@@ -67,6 +70,8 @@ const {
   foundCount,
   files,
   summary,
+  recordId,
+  record,
   failure,
   isUnresponsive,
   isPaused,
@@ -74,6 +79,8 @@ const {
   isBusy,
   readHealth,
   start,
+  open: openScanRecord,
+  resumeScan,
   cancel,
   pause,
   resume,
@@ -115,6 +122,10 @@ const fileActionNotice = ref('')
 /** 右键菜单：对哪个文件、弹在哪里 */
 const menu = ref<{ file: FoundFile; x: number; y: number } | null>(null)
 
+/** 扫描记录（来源这一步列出），以及打开、删除记录时的错误 */
+const history = ref<CarveRecord[]>([])
+const historyError = ref<HostError | null>(null)
+
 const stepIndex = computed(() => STEPS.indexOf(step.value))
 
 
@@ -137,22 +148,37 @@ const checkedFiles = computed(() =>
 /** 保存的结果按源上的偏移对回扫描到的文件 */
 const filesByOffset = computed(() => new Map(files.value.map((file) => [file.offset, file])))
 
-/** 扫描结束（完成或取消）、没有别的保存在进行时，才能从源上读出来保存：不和扫描抢同一块盘 */
+/** 扫描结束（完成、停下或出错）、或打开的是以前的扫描记录，没有别的保存在进行时，才能从源上读出来保存：不和扫描抢同一块盘 */
 const canExtract = computed(
   () =>
-    jobId.value !== null &&
-    (status.value === 'completed' || status.value === 'cancelled') &&
+    recordId.value !== null &&
+    (['completed', 'cancelled', 'failed'].includes(status.value) ||
+      (status.value === 'idle' && record.value !== null)) &&
     !save.isBusy.value,
 )
+
+/** 停下或出错的扫描可以从停下的地方接着扫 */
+const canResumeScan = computed(
+  () =>
+    recordId.value !== null &&
+    !isBusy.value &&
+    !save.isBusy.value &&
+    (status.value === 'cancelled' ||
+      status.value === 'failed' ||
+      (status.value === 'idle' &&
+        (record.value?.status === 'stopped' || record.value?.status === 'failed'))),
+)
+
+/** 打开的是以前的扫描记录、这次还没开始扫：进度与状态按记录显示 */
+const showsRecord = computed(() => status.value === 'idle' && record.value !== null)
+
+/** 找到的文件一共多大（含续扫之前的） */
+const foundBytes = computed(() => files.value.reduce((sum, file) => sum + file.length, 0))
 
 const canSaveChecked = computed(
   () => runScanOnly.value && checkedFiles.value.length > 0 && canExtract.value,
 )
 
-/** 只扫描的结果里还有没另存的文件：离开、重新扫描前要确认 */
-const hasUnsaved = computed(
-  () => runScanOnly.value && files.value.some((file) => !savedCopies.value.has(file.name)),
-)
 
 const saveStatusText = computed(() => {
   if (saveKind.value === 'openCopy') {
@@ -184,11 +210,13 @@ const isSaveStatusShown = computed(
 )
 
 const sourceText = computed(() => sourceName(target.value))
+/** 扫描这一步显示的来源：打开的扫描记录用记录里的描述（源可能没接上） */
+const scanSourceText = computed(() => record.value?.sourceLabel ?? sourceText.value)
 
 const selectedTypeNames = computed(() => {
   const names = fileTypes.value
     .filter((type) => selectedExtensions.value.includes(type.extension))
-    .map((type) => fileTypeName(type.extension, type.description))
+    .map(formatName)
   return new Intl.ListFormat(locale.value, { type: 'conjunction' }).format(names)
 })
 
@@ -202,13 +230,14 @@ const hasResults = computed(
     status.value === 'running' ||
     status.value === 'cancelling' ||
     foundCount.value > 0 ||
-    summary.value !== null,
+    summary.value !== null ||
+    record.value !== null,
 )
 
 const statusText = computed(() => {
   switch (status.value) {
     case 'idle':
-      return ''
+      return record.value === null ? '' : recordStatusText(record.value)
     case 'starting':
       return isDeviceKind(targetKind.value)
         ? t('common.startingDisk')
@@ -294,20 +323,84 @@ watch(save.status, async (current) => {
   }
 })
 
+// 回到来源这一步时刷新扫描记录（刚扫过、停下的会列出来）
+watch(step, (current) => {
+  if (current === 'source') {
+    void loadHistory()
+  }
+})
+
 onMounted(() => {
   // 从首页切过来，焦点放到向导标题上，读屏软件从这里开始读
   titleElement.value?.focus()
   void loadFileTypes()
+  void loadHistory()
 })
 
-/** 只扫描的结果还没全部另存时先确认：离开或重新扫描后，这些结果就没了 */
-function confirmDiscard(): boolean {
-  return !hasUnsaved.value || window.confirm(t('carve.save.discardConfirm'))
+function handleExit() {
+  if (!isBusy.value && !save.isBusy.value) {
+    emit('exit')
+  }
 }
 
-function handleExit() {
-  if (!isBusy.value && !save.isBusy.value && confirmDiscard()) {
-    emit('exit')
+async function loadHistory() {
+  try {
+    history.value = await listCarveHistory()
+  } catch (error) {
+    historyError.value = toHostError(error)
+  }
+}
+
+function recordStatusText(current: CarveRecord): string {
+  return t(`carve.history.status.${current.status}`, {
+    percent: current.size > 0 ? Math.floor((current.resumeAt / current.size) * 100) : 0,
+    position: formatBytes(current.resumeAt),
+    size: formatBytes(current.size),
+    count: current.files,
+  }, current.files)
+}
+
+/** 打开一条扫描记录，到扫描这一步看结果；打开失败时留在这一步说明原因 */
+async function openRecord(item: CarveRecord): Promise<boolean> {
+  historyError.value = null
+  try {
+    await openScanRecord(item.id)
+  } catch (error) {
+    historyError.value = toHostError(error)
+    return false
+  }
+  runScanOnly.value = item.outputDir === null
+  selectedExtensions.value = [...item.extensions]
+  selectedFile.value = null
+  checkedNames.value = new Set()
+  savedCopies.value = new Map()
+  openCopies.value = new Map()
+  step.value = 'scan'
+  return true
+}
+
+async function handleResumeRecord(item: CarveRecord) {
+  if (await openRecord(item)) {
+    void resumeScan()
+  }
+}
+
+async function handleRemoveRecord(item: CarveRecord) {
+  if (!window.confirm(t('carve.history.removeConfirm'))) {
+    return
+  }
+  historyError.value = null
+  try {
+    await removeCarveRecord(item.id)
+  } catch (error) {
+    historyError.value = toHostError(error)
+  }
+  await loadHistory()
+}
+
+function handleResumeScan() {
+  if (canResumeScan.value) {
+    void resumeScan()
   }
 }
 
@@ -332,7 +425,7 @@ function handleSubmit() {
 }
 
 function handleStart() {
-  if (!canStart.value || target.value === null || !confirmDiscard()) {
+  if (!canStart.value || target.value === null) {
     return
   }
   dialogError.value = null
@@ -342,9 +435,12 @@ function handleStart() {
   savedCopies.value = new Map()
   openCopies.value = new Map()
   step.value = 'scan'
-  void start(target.value, runScanOnly.value ? null : trimmedOutputDir.value, [
-    ...selectedExtensions.value,
-  ])
+  void start(
+    target.value,
+    runScanOnly.value ? null : trimmedOutputDir.value,
+    [...selectedExtensions.value],
+    sourceText.value,
+  )
 }
 
 function handleCancel() {
@@ -354,7 +450,7 @@ function handleCancel() {
 /** 已经保存好的一份：边扫边保存的都在扫描任务的输出目录里，只扫描的要另存过或存过副本才有 */
 function copyOf(file: FoundFile): SavedCopy | null {
   if (!runScanOnly.value) {
-    return jobId.value === null ? null : { jobId: jobId.value, name: file.name }
+    return recordId.value === null ? null : { jobId: recordId.value, name: file.name }
   }
   return savedCopies.value.get(file.name) ?? openCopies.value.get(file.name) ?? null
 }
@@ -461,7 +557,7 @@ async function saveFiles(
   kind: 'saveAs' | 'openCopy',
   name?: string,
 ) {
-  const scanJobId = jobId.value
+  const scanJobId = recordId.value
   if (scanJobId === null) {
     return
   }
@@ -512,8 +608,7 @@ function handleMenuSelect(key: string) {
 }
 
 function typeNameOf(file: FoundFile): string {
-  const description = fileTypes.value.find((type) => type.extension === file.extension)?.description
-  return fileTypeName(file.extension, description)
+  return foundTypeName(fileTypes.value, file.extension)
 }
 
 /** 拆成目录与文件名；目录是盘符根目录时保留结尾的分隔符（`F:` 指的是 F 盘的当前目录，不是根目录） */
@@ -602,9 +697,24 @@ function handleAdvancedToggle(event: Event) {
           >
             {{ t('carve.formats.start') }}
           </button>
-          <button v-else-if="!isBusy" class="wizard__button" type="submit" :disabled="!canStart">
-            {{ t('carve.run.restart') }}
-          </button>
+          <template v-else-if="!isBusy">
+            <button
+              v-if="canResumeScan"
+              class="wizard__button"
+              type="button"
+              @click="handleResumeScan"
+            >
+              {{ t('carve.run.resume') }}
+            </button>
+            <button
+              class="wizard__button"
+              :class="{ 'wizard__button--secondary': canResumeScan }"
+              type="submit"
+              :disabled="!canStart"
+            >
+              {{ t('carve.run.restart') }}
+            </button>
+          </template>
           <JobControls
             v-else
             :status="status"
@@ -623,6 +733,20 @@ function handleAdvancedToggle(event: Event) {
           v-model:device="device"
           :disk-hint="t('carve.source.diskHint')"
         />
+        <section v-if="history.length > 0" aria-labelledby="carve-history-title">
+          <h3 id="carve-history-title" class="wizard__section-title">{{ t('carve.history.title') }}</h3>
+          <p class="wizard__hint">{{ t('carve.history.hint') }}</p>
+          <CarveHistoryList
+            :items="history"
+            :disabled="isBusy || save.isBusy.value"
+            @open="openRecord"
+            @resume="handleResumeRecord"
+            @remove="handleRemoveRecord"
+          />
+        </section>
+        <p v-if="historyError" class="wizard__error" role="alert">
+          {{ formatHostError(historyError) }}
+        </p>
       </div>
 
       <div v-else-if="step === 'formats'" class="wizard__panel">
@@ -689,16 +813,20 @@ function handleAdvancedToggle(event: Event) {
       <div v-else class="wizard__panel wizard__fill">
         <dl class="wizard__details">
           <dt>{{ t('common.source') }}</dt>
-          <dd class="wizard__path-text">{{ sourceText }}</dd>
+          <dd class="wizard__path-text">{{ scanSourceText }}</dd>
           <dt>{{ t('carve.run.formats') }}</dt>
           <dd>{{ selectedTypeNames }}</dd>
           <dt>{{ t('carve.run.output') }}</dt>
           <dd v-if="runScanOnly">{{ t('carve.run.outputAfterScan') }}</dd>
-          <dd v-else class="wizard__path-text">{{ trimmedOutputDir }}</dd>
+          <dd v-else class="wizard__path-text">{{ record?.outputDir ?? trimmedOutputDir }}</dd>
         </dl>
 
-        <div v-if="status !== 'idle'" class="wizard__job wizard__fill" aria-live="polite">
-          <progress class="wizard__progress" :value="done" :max="total || 1"></progress>
+        <div v-if="status !== 'idle' || record !== null" class="wizard__job wizard__fill" aria-live="polite">
+          <progress
+            class="wizard__progress"
+            :value="showsRecord ? record?.resumeAt : done"
+            :max="(showsRecord ? record?.size : total) || 1"
+          ></progress>
           <p class="wizard__status">{{ statusText }}</p>
           <ReadHealthHint :health="readHealth" :source-is-disk="isDeviceKind(targetKind)" context="scan" />
           <p v-if="isUnresponsive" class="wizard__error" role="alert">
@@ -718,9 +846,9 @@ function handleAdvancedToggle(event: Event) {
                 <dd>
                   {{
                     t('common.filesValue', {
-                      count: summary.files,
-                      bytes: formatBytes(summary.bytes),
-                    }, summary.files)
+                      count: foundCount,
+                      bytes: formatBytes(foundBytes),
+                    }, foundCount)
                   }}
                 </dd>
               </div>
@@ -752,7 +880,7 @@ function handleAdvancedToggle(event: Event) {
                 class="wizard__pane"
                 :files="files"
                 :file-types="fileTypes"
-                :device-size="total"
+                :device-size="total || record?.size || 0"
                 :selectable="runScanOnly"
                 @open="performFileAction($event, 'open')"
                 @menu="openMenu"
@@ -775,7 +903,7 @@ function handleAdvancedToggle(event: Event) {
               </RecoveredBrowser>
               <RecoveredPreview
                 class="wizard__pane"
-                :job-id="jobId"
+                :job-id="recordId"
                 :file="selectedFile"
                 :type-name="selectedTypeName"
                 :action-error="fileActionError"

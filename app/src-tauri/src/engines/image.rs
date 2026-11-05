@@ -5,6 +5,7 @@ use tauri::AppHandle;
 use yisi_engine::protocol::{
     ByteRange, IMAGE_CREATE, IMAGE_DESCRIBE, IMAGE_INSPECT, IMAGE_RESUME, ImageDescribeParams,
     ImageDescriptions, ImageInspectParams, ImageInspection, ImageParams, ImageStarted,
+    ImagingTuning,
 };
 
 use super::{
@@ -23,6 +24,9 @@ pub struct ImagePlan {
     pub copy_only: bool,
     #[serde(default)]
     pub reset: Vec<ByteRange>,
+    /// 读取参数（界面的「高级选项」），不给的项用默认值；引擎核对范围。
+    #[serde(default)]
+    pub tuning: ImagingTuning,
 }
 
 impl Engines {
@@ -50,6 +54,7 @@ impl Engines {
                 ranges: plan.ranges,
                 copy_only: plan.copy_only,
                 reset: plan.reset,
+                tuning: plan.tuning,
             })
         })?;
         from_value(started)
@@ -64,7 +69,7 @@ impl Engines {
         image_path: String,
     ) -> Result<ImageInspection, HostError> {
         target.validate()?;
-        let process = EngineProcess::spawn(None, || {})?;
+        let process = EngineProcess::spawn(None, None, || {})?;
         let result = resolve_source(target, broker, process.pid)
             .and_then(|source| to_params(&ImageInspectParams { source, image_path }))
             .and_then(|params| process.request(IMAGE_INSPECT, params, BROWSE_TIMEOUT));
