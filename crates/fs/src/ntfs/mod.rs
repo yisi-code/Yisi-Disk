@@ -153,7 +153,7 @@ fn is_mft_self(record: &Record) -> bool {
 impl Ntfs {
     /// 按引导扇区 `boot`（主的或备份的）打开。
     pub fn open(region: Region, boot: &[u8]) -> Result<Self, FsError> {
-        let geometry = parse_boot(boot).ok_or(FsError::Invalid("NTFS 引导扇区的参数不自洽"))?;
+        let geometry = parse_boot(boot).ok_or(FsError::Invalid("新技术文件系统（NTFS）引导扇区的参数不自洽"))?;
         let cluster_size = geometry.cluster_size;
         let cluster_count = geometry.total_bytes().min(region.length()) / cluster_size;
         let record_size = geometry.record_size;
@@ -168,7 +168,7 @@ impl Ntfs {
         };
         let base = read_first(geometry.mft_lcn)
             .or_else(|| read_first(geometry.mirror_lcn))
-            .ok_or(FsError::Invalid("$MFT 的记录读不出"))?;
+            .ok_or(FsError::Invalid("主文件表（$MFT）的记录读不出"))?;
         // 先用基本记录里的第一段运行表读出扩展记录，再拼出完整的运行表（$MFT 碎片很多时才有扩展记录）
         let first = base
             .attributes()
@@ -178,7 +178,7 @@ impl Ntfs {
                 }
                 _ => None,
             })
-            .ok_or(FsError::Invalid("$MFT 没有数据流"))?;
+            .ok_or(FsError::Invalid("主文件表（$MFT）没有数据流"))?;
         let partial = Stream::new(region.clone(), cluster_size, first.0, first.1);
         let read_partial = |number: u64| -> Result<Option<Record>, FsError> {
             let mut bytes = vec![0u8; record_size as usize];
@@ -197,7 +197,7 @@ impl Ntfs {
             &read_partial,
         )?
         else {
-            return Err(FsError::Invalid("$MFT 的数据流不是非常驻的"));
+            return Err(FsError::Invalid("主文件表（$MFT）的数据流不是非常驻的"));
         };
         let mft = Stream::new(region.clone(), cluster_size, extents, size);
         let mut ntfs = Self {
@@ -215,7 +215,7 @@ impl Ntfs {
         let root = ntfs
             .record(ROOT_RECORD)?
             .filter(|root| root.in_use() && root.is_dir())
-            .ok_or(FsError::Invalid("NTFS 根目录的记录读不出"))?;
+            .ok_or(FsError::Invalid("新技术文件系统（NTFS）根目录的记录读不出"))?;
         ntfs.root_sequence = root.sequence;
         if let Ok(Some(volume)) = ntfs.record(VOLUME_RECORD)
             && let Some(name) = volume
@@ -382,9 +382,9 @@ impl Ntfs {
         if !dir.deleted {
             let base = self
                 .record(record)?
-                .ok_or(FsError::Invalid("目录的 MFT 记录读不出"))?;
+                .ok_or(FsError::Invalid("目录的主文件表（MFT）记录读不出"))?;
             if !base.in_use() || !base.is_dir() || base.sequence != sequence {
-                return Err(FsError::Invalid("目录已不在原处：它的 MFT 记录已被重用"));
+                return Err(FsError::Invalid("目录已不在原处：它的主文件表（MFT）记录已被重用"));
             }
             let (keys, partial) = index::read(self, record, &base)?;
             truncated = partial;
@@ -432,9 +432,9 @@ impl Ntfs {
         }
         let base = self
             .record(record)?
-            .ok_or(FsError::Invalid("文件的 MFT 记录读不出"))?;
+            .ok_or(FsError::Invalid("文件的主文件表（MFT）记录读不出"))?;
         if !base.is_base() || base.sequence != sequence || base.in_use() == file.deleted {
-            return Err(FsError::Invalid("MFT 记录已被重用，内容已不是这个文件"));
+            return Err(FsError::Invalid("主文件表（MFT）记录已被重用，内容已不是这个文件"));
         }
         let described = self.describe(record, &base)?;
         if let Some(reason) = described.unsupported {
@@ -442,7 +442,7 @@ impl Ntfs {
         }
         if truncated_on_delete(&base, described.data.as_ref()) {
             return Err(FsError::Invalid(
-                "删除时 NTFS 先把这个文件截成了 0 字节，它的数据位置已不在 MFT 里",
+                "删除时新技术文件系统（NTFS）先把这个文件截成了 0 字节，它的数据位置已不在主文件表（MFT）里",
             ));
         }
         Ok(match described.data {

@@ -50,12 +50,20 @@ pub(crate) fn read(
     for sector_size in sizes {
         let sector = u64::from(sector_size);
         let primary = header_at(device, sector, 1)?;
-        let found = match &primary {
+        let from_primary = match &primary {
             Some(header) => entries(device, sector, header)?,
             None => None,
         };
-        let found = match found {
-            Some(found) => Some(found),
+        let found = match from_primary {
+            Some(found) => {
+                // 主表完好时也看一眼备份：坏了另记一条，分区照主表列出
+                if let Some(header) = &primary
+                    && !copy_ok(device, sector, header.alternate_lba)?
+                {
+                    notes.push(Note::BackupGptInvalid);
+                }
+                Some(found)
+            }
             None => {
                 // 备份表头的位置：主表头里记着；主表头坏了就取设备最后一个扇区
                 let last = device.size() / sector;
@@ -89,6 +97,18 @@ pub(crate) fn read(
         }
     }
     Ok(None)
+}
+
+/// `lba` 处有一份完好的 GPT：表头与表项区的校验和都对。位置在设备之外时不算。
+fn copy_ok(device: &dyn BlockDevice, sector: u64, lba: u64) -> Result<bool, PartError> {
+    let last = device.size() / sector;
+    if lba <= 1 || lba >= last {
+        return Ok(false);
+    }
+    Ok(match header_at(device, sector, lba)? {
+        Some(header) => entries(device, sector, &header)?.is_some(),
+        None => false,
+    })
 }
 
 /// 读 `lba` 处的表头并校验：签名、表头大小、表头 CRC、表头记录的自身位置、表项大小。
@@ -195,8 +215,8 @@ pub(crate) fn put_entry(
     Some(())
 }
 
-/// 主 GPT（LBA 1 的表头与它的表项区），改写分区表时用。表头与表项的校验和都对才返回。
-pub(crate) struct Primary {
+/// 一份 GPT（表头与它的表项区），改写、修复分区表时用。表头与表项的校验和都对才返回。
+pub(crate) struct GptCopy {
     /// 表头那么长的字节（不含扇区里表头之后的部分）。
     pub header: Vec<u8>,
     pub entries: Vec<u8>,
@@ -208,9 +228,17 @@ pub(crate) struct Primary {
 }
 
 /// 按设备的扇区大小读主 GPT。读不出、校验和不对时为 `None`。
-pub(crate) fn read_primary(device: &dyn BlockDevice) -> Result<Option<Primary>, PartError> {
+pub(crate) fn read_primary(device: &dyn BlockDevice) -> Result<Option<GptCopy>, PartError> {
+    read_copy(device, 1)
+}
+
+/// 按设备的扇区大小读 `lba` 处的一份 GPT（主表在 LBA 1，备份在主表头记的 `AlternateLBA`）。
+pub(crate) fn read_copy(device: &dyn BlockDevice, lba: u64) -> Result<Option<GptCopy>, PartError> {
     let sector = u64::from(device.sector_size());
-    let Some(header) = header_at(device, sector, 1)? else {
+    if lba == 0 || lba >= device.size() / sector {
+        return Ok(None);
+    }
+    let Some(header) = header_at(device, sector, lba)? else {
         return Ok(None);
     };
     let total = u64::from(header.entry_count) * u64::from(header.entry_size);
@@ -218,7 +246,7 @@ pub(crate) fn read_primary(device: &dyn BlockDevice) -> Result<Option<Primary>, 
         return Ok(None);
     }
     let mut bytes = vec![0u8; sector as usize];
-    if device.read_at(sector, &mut bytes)? != bytes.len() {
+    if device.read_at(lba * sector, &mut bytes)? != bytes.len() {
         return Ok(None);
     }
     let size = le32(&bytes, HEADER_SIZE_AT).map_or(0, |size| size as usize);
@@ -239,7 +267,7 @@ pub(crate) fn read_primary(device: &dyn BlockDevice) -> Result<Option<Primary>, 
     {
         return Ok(None);
     }
-    Ok(Some(Primary {
+    Ok(Some(GptCopy {
         header: head,
         entries,
         entries_lba: header.entries_lba,

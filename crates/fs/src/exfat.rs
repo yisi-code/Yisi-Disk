@@ -43,10 +43,10 @@ pub(crate) struct Exfat {
 impl Exfat {
     /// 按引导扇区 `boot`（主的或备份的）打开。
     pub fn open(region: Region, boot: &[u8]) -> Result<Self, FsError> {
-        let geometry = parse_boot(boot).ok_or(FsError::Invalid("exFAT 引导扇区的参数不自洽"))?;
+        let geometry = parse_boot(boot).ok_or(FsError::Invalid("扩展文件分配表（exFAT）引导扇区的参数不自洽"))?;
         let heap_offset = geometry.heap_offset_bytes();
         if heap_offset >= region.length() {
-            return Err(FsError::Invalid("exFAT 的簇区在分区之外"));
+            return Err(FsError::Invalid("扩展文件分配表（exFAT）的簇区在分区之外"));
         }
         let count = u32::try_from(geometry.usable_clusters(region.length()))
             .map_err(|_| FsError::Invalid("簇数过大"))?;
@@ -63,7 +63,7 @@ impl Exfat {
             width: FatWidth::Exfat,
         };
         if !clusters.is_valid(geometry.root_cluster) {
-            return Err(FsError::Invalid("exFAT 根目录的簇号不合法"));
+            return Err(FsError::Invalid("扩展文件分配表（exFAT）根目录的簇号不合法"));
         }
         let mut volume = Self {
             clusters,
@@ -97,7 +97,7 @@ impl Exfat {
             }
         }
         if volume.bitmap_runs.is_empty() || volume.bitmap_length * 8 < u64::from(count) {
-            return Err(FsError::Invalid("exFAT 根目录里没有可用的分配位图"));
+            return Err(FsError::Invalid("扩展文件分配表（exFAT）根目录里没有可用的分配位图"));
         }
         Ok(volume)
     }
@@ -316,7 +316,7 @@ impl Exfat {
             runs if self.bitmap_length <= MAX_LOADED_BITMAP => {
                 Bitmap::Loaded(self.clusters.read_runs(runs, self.bitmap_length)?)
             }
-            _ => return Err(FsError::Invalid("exFAT 分配位图过大且不连续")),
+            _ => return Err(FsError::Invalid("扩展文件分配表（exFAT）分配位图过大且不连续")),
         };
         let bitmap = Arc::new(bitmap);
         *slot = Some(Arc::clone(&bitmap));

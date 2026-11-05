@@ -343,6 +343,23 @@ function hasTypeMismatch(partition: PartitionBoot): boolean {
   return partition.tableIssues.some((issue) => issue.code === 'typeMismatch')
 }
 
+/** 主 GPT 或备份 GPT 坏了（另一份完好）：可以用完好的那一份修好它 */
+const gptDamaged = computed(
+  () =>
+    diagnosis.value !== null &&
+    diagnosis.value.notes.some((note) => note === 'primaryGptInvalid' || note === 'backupGptInvalid'),
+)
+
+/** 生成修 GPT 的计划（方向由引擎按哪份完好定），之后显示确认内容 */
+async function proposeGptRepair() {
+  const source = diagnosedTarget.value
+  if (source === null || isBusy.value) {
+    return
+  }
+  await closeBrowse()
+  await writePlan.prepareTableFix(source, { kind: 'repairGpt' })
+}
+
 /** 生成改分区类型的计划（宿主先存好备份），之后显示确认内容 */
 async function proposeTypeFix(partition: PartitionBoot) {
   const source = diagnosedTarget.value
@@ -523,6 +540,19 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
         <ul v-if="diagnosis.notes.length" class="wizard__list">
           <li v-for="note in diagnosis.notes" :key="note">{{ tableNote(note) }}</li>
         </ul>
+        <div v-if="gptDamaged" class="repair-wizard__actions">
+          <button
+            v-if="canWrite"
+            class="wizard__button wizard__button--secondary"
+            type="button"
+            :disabled="isBusy"
+            @click="proposeGptRepair"
+          >
+            {{ t('repair.fix.repairGpt') }}
+          </button>
+          <span v-else class="wizard__hint">{{ t('repair.fix.volumeUnsupported') }}</span>
+          <span class="wizard__note">{{ t('repair.fix.repairGptHint') }}</span>
+        </div>
         <p v-if="diagnosis.partitions.length === 0" class="wizard__note">{{ t('repair.result.none') }}</p>
 
         <section

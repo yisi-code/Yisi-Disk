@@ -1175,8 +1175,10 @@ pub struct PlanPartitionTableParams {
 pub enum PartitionTableFix {
     /// 把搜索找到的丢失分区（起点与长度，字节）加进分区表。
     AddLost { offset: u64, length: u64 },
-    /// 把这个编号的分区的类型改成与文件系统相符的值。
+    /// 把这个编号的分区的类型改成与文件系统相符的值（主分区、逻辑分区、GPT 分区都行）。
     SetType { partition: u32 },
+    /// 主 GPT 或备份 GPT 坏了：用完好的那一份修好它（方向由引擎按哪份完好定）。
+    RepairGpt,
 }
 
 /// 改写分区表的写入计划，以及改完之后这个分区在表里的样子。
@@ -1197,6 +1199,10 @@ pub struct PartitionTablePlan {
     pub type_id: String,
     /// 改完之后的用途，同 [`PartitionInfo::role`]。
     pub role: Option<String>,
+    /// 修 GPT 时的方向：primaryFromBackup（按备份重写主表）、backupFromPrimary（按主表重写备份）；此时上面的
+    /// 分区编号、位置为 0，类型为空。
+    #[serde(default)]
+    pub gpt_repair: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

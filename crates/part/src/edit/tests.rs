@@ -120,9 +120,79 @@ fn additions_that_do_not_fit_are_refused() {
         ],
     );
     samples::ebr_chain(&mut extended, 512, 4000, &[(0x07, 64, 100)]);
+    // 压着扩展分区边界的不行（整个落在里面的加成逻辑分区，见下面）
     assert!(matches!(
-        plan(&extended, &add(6000, 100)),
+        plan(&extended, &add(6900, 200)),
         Err(EditError::OverlapsExtended)
+    ));
+}
+
+#[test]
+fn a_lost_partition_inside_the_extended_partition_becomes_logical() {
+    let mut image = samples::mbr_disk(
+        8192 * 512,
+        &[
+            MbrEntry::new(0x0C, 2048, 1000),
+            MbrEntry::new(0x0F, 4000, 3000),
+        ],
+    );
+    samples::ebr_chain(&mut image, 512, 4000, &[(0x07, 64, 100)]);
+    // 链尾的第 1 项只清了类型，起点与长度还是旧链接的
+    let link = 4000 * 512 + 462;
+    image[link + 8..link + 16].copy_from_slice(&[0xC0, 0x07, 0, 0, 0xE4, 0, 0, 0]);
+    // 接在第一个逻辑分区之后：没有旧 EBR 的残留，新 EBR 放在起点前 128 个扇区（前 2048 个已在扩展分区之外）
+    let writes = plan(&image, &add(6000, 100)).unwrap();
+    assert_eq!(
+        writes
+            .iter()
+            .map(|write| write.offset / SECTOR)
+            .collect::<Vec<_>>(),
+        [4000, 6000 - 128]
+    );
+    // 只改分区表项区与签名，引导代码区一个字节都不动
+    for write in &writes {
+        assert_eq!(write.before[..446], write.after[..446]);
+    }
+    apply(&mut image, &writes);
+    let after = table(&image);
+    assert!(after.notes.is_empty(), "{:?}", after.notes);
+    assert_eq!(
+        spans(&after.partitions),
+        [(1, 2048, 1000), (5, 4064, 100), (6, 6000, 100)]
+    );
+    // 新的链尾不带旧链接的残留
+    let tail = (6000 - 128) * 512 + 462;
+    assert!(image[tail..tail + 16].iter().all(|&byte| byte == 0));
+
+    // 再插在这两个逻辑分区之间：新 EBR 接上原来的下一个，后面的编号顺延
+    let writes = plan(&image, &add(5000, 300)).unwrap();
+    apply(&mut image, &writes);
+    let after = table(&image);
+    assert!(after.notes.is_empty(), "{:?}", after.notes);
+    assert_eq!(
+        spans(&after.partitions),
+        [
+            (1, 2048, 1000),
+            (5, 4064, 100),
+            (6, 5000, 300),
+            (7, 6000, 100)
+        ]
+    );
+
+    // 在第一个逻辑分区之前：不改链的开头
+    assert!(matches!(
+        plan(&image, &add(4010, 20)),
+        Err(EditError::Unsupported(_))
+    ));
+    // 前面没有空着的扇区：每个候选位置都压着别的东西
+    let mut image = samples::mbr_disk(8192 * 512, &[MbrEntry::new(0x0F, 1000, 6000)]);
+    samples::ebr_chain(&mut image, 512, 1000, &[(0x07, 64, 100)]);
+    for lba in [3000 - 2048, 3000 - 128, 3000 - 63, 2999] {
+        image[lba * 512] = 0x33;
+    }
+    assert!(matches!(
+        plan(&image, &add(3000, 100)),
+        Err(EditError::NoRoomForEbr)
     ));
 }
 
@@ -156,18 +226,30 @@ fn mbr_partition_type_is_changed_in_place() {
         Err(EditError::NoPartition(3))
     ));
 
+    // 逻辑分区：改它所在 EBR 的第 0 项
     let mut logical = samples::mbr_disk(8192 * 512, &[MbrEntry::new(0x0F, 1000, 3000)]);
-    samples::ebr_chain(&mut logical, 512, 1000, &[(0x83, 64, 100)]);
+    samples::ebr_chain(&mut logical, 512, 1000, &[(0x83, 64, 100), (0x83, 64, 100)]);
+    let set_logical = TableEdit::SetType {
+        number: 6,
+        mbr_type: 0x07,
+        gpt_type: BASIC_DATA,
+    };
+    let writes = plan(&logical, &set_logical).unwrap();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].offset / SECTOR, 1000 + 164);
+    apply(&mut logical, &writes);
+    let kinds: Vec<u8> = table(&logical)
+        .partitions
+        .iter()
+        .map(|partition| match partition.kind {
+            PartitionKind::Mbr { type_id, .. } => type_id,
+            _ => 0,
+        })
+        .collect();
+    assert_eq!(kinds, [0x83, 0x07]);
     assert!(matches!(
-        plan(
-            &logical,
-            &TableEdit::SetType {
-                number: 5,
-                mbr_type: 0x07,
-                gpt_type: BASIC_DATA
-            }
-        ),
-        Err(EditError::Unsupported(_))
+        plan(&logical, &set_logical),
+        Err(EditError::Unchanged)
     ));
 }
 
@@ -238,5 +320,71 @@ fn gpt_partition_type_is_changed_and_damaged_tables_are_left_alone() {
     assert!(matches!(
         plan(&whole, &add(4096, 100)),
         Err(EditError::NoTable)
+    ));
+}
+
+#[test]
+fn a_damaged_gpt_copy_is_rebuilt_from_the_other() {
+    let disk = |image: &[u8]| MemoryDisk::new(image.to_vec(), SECTOR as u32);
+    let good = gpt_sample();
+    let listed = spans(&table(&good).partitions);
+    assert!(matches!(
+        plan_gpt_repair(&disk(&good)),
+        Err(EditError::GptIntact)
+    ));
+
+    // 主表头坏了：按备份重写主表
+    let mut image = good.clone();
+    image[512 + 16] ^= 0xFF;
+    assert_eq!(table(&image).notes, [Note::PrimaryGptInvalid]);
+    // 主 GPT 坏了时不改写分区表，要先修 GPT
+    assert!(matches!(
+        plan(&image, &add(4096, 100)),
+        Err(EditError::Unsupported(_))
+    ));
+    let (repair, writes) = plan_gpt_repair(&disk(&image)).unwrap();
+    assert_eq!(repair, GptRepair::PrimaryFromBackup);
+    assert!(writes.iter().all(|write| write.offset < 64 * 1024));
+    apply(&mut image, &writes);
+    let after = table(&image);
+    assert!(after.notes.is_empty(), "{:?}", after.notes);
+    assert_eq!(spans(&after.partitions), listed);
+    assert_eq!(image, good);
+
+    // 备份表项坏了：读的时候照主表列出、另记一条；按主表重写备份
+    let mut image = good.clone();
+    let backup_entries = image.len() - 33 * 512;
+    image[backup_entries + 40] ^= 0x01;
+    assert_eq!(table(&image).notes, [Note::BackupGptInvalid]);
+    let (repair, writes) = plan_gpt_repair(&disk(&image)).unwrap();
+    assert_eq!(repair, GptRepair::BackupFromPrimary);
+    assert!(
+        writes
+            .iter()
+            .all(|write| write.offset >= image.len() as u64 - 64 * 1024)
+    );
+    apply(&mut image, &writes);
+    assert!(table(&image).notes.is_empty());
+    assert_eq!(image, good);
+
+    // 只是备份坏了不妨碍改写分区表：改写时备份按主表一起重写
+    let mut image = good.clone();
+    let header = image.len() - 512 + 16;
+    image[header] ^= 0xFF;
+    assert_eq!(table(&image).notes, [Note::BackupGptInvalid]);
+    let writes = plan(&image, &add(4096, 100)).unwrap();
+    apply(&mut image, &writes);
+    let after = table(&image);
+    assert!(after.notes.is_empty(), "{:?}", after.notes);
+    assert_eq!(after.partitions.len(), listed.len() + 1);
+
+    // 两份都坏了：读不出 GPT，修不了
+    let mut image = good.clone();
+    image[512] = b'X';
+    let last = image.len() - 512;
+    image[last] = b'X';
+    assert!(matches!(
+        plan_gpt_repair(&disk(&image)),
+        Err(EditError::Unsupported(_))
     ));
 }

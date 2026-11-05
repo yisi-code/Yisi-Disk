@@ -212,7 +212,7 @@ fn locate_volume(path: &Path) -> Result<(&Path, Vec<u16>), IoError> {
         let shown = String::from_utf16_lossy(&final_path);
         locate(
             existing,
-            invalid_data(format!("不是卷的 GUID 路径：{shown}")),
+            invalid_data(format!("不是卷的全局唯一标识符（GUID）路径：{shown}")),
         )
     })?;
     Ok((existing, volume.to_vec()))

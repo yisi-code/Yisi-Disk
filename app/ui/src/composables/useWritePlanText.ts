@@ -31,6 +31,9 @@ export function useWritePlanText() {
     if (table === null) {
       return t('writePlan.action.unknown')
     }
+    if (table.fix.kind === 'repairGpt') {
+      return t(`writePlan.action.repairGpt.${table.gptRepair ?? 'primaryFromBackup'}`)
+    }
     return table.fix.kind === 'addLost'
       ? t('writePlan.action.addLost', {
           filesystem: filesystemName(table.filesystem),

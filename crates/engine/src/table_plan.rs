@@ -6,6 +6,7 @@ use yisi_engine::protocol::{
     self, DeviceIdentity, PartitionTableFix, PartitionTablePlan, WritePlan,
 };
 use yisi_io::BlockDevice;
+use yisi_part::GptRepair;
 use yisi_repair::table_fix::{self, TableFix, TableFixError};
 use yisi_rpc::ErrorObject;
 
@@ -21,6 +22,7 @@ pub fn plan(
     let request = match fix {
         PartitionTableFix::AddLost { offset, length } => TableFix::AddLost { offset, length },
         PartitionTableFix::SetType { partition } => TableFix::SetType { partition },
+        PartitionTableFix::RepairGpt => TableFix::RepairGpt,
     };
     let planned = table_fix::plan_table_fix(device, request).map_err(|error| {
         let code = match error {
@@ -45,19 +47,25 @@ pub fn plan(
     plan.validate().map_err(|error| {
         ErrorObject::new(protocol::error_code::PLAN_UNAVAILABLE, error_chain(&error))
     })?;
-    let (type_id, ..) = table_kind(&planned.partition);
+    let partition = planned.partition.as_ref();
     Ok(PartitionTablePlan {
         plan,
         fix,
         scheme: scheme_name(planned.scheme).to_owned(),
         filesystem: fs_key(planned.filesystem).to_owned(),
-        partition: planned.partition.number,
-        offset: planned.partition.offset,
-        length: planned.partition.length,
-        type_id,
-        role: planned
-            .partition
-            .role()
+        partition: partition.map_or(0, |partition| partition.number),
+        offset: partition.map_or(0, |partition| partition.offset),
+        length: partition.map_or(0, |partition| partition.length),
+        type_id: partition.map_or_else(String::new, |partition| table_kind(partition).0),
+        role: partition
+            .and_then(|partition| partition.role())
             .map(|role| role_key(role).to_owned()),
+        gpt_repair: planned.gpt.map(|repair| {
+            match repair {
+                GptRepair::PrimaryFromBackup => "primaryFromBackup",
+                GptRepair::BackupFromPrimary => "backupFromPrimary",
+            }
+            .to_owned()
+        }),
     })
 }

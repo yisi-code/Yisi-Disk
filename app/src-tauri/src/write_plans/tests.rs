@@ -319,6 +319,7 @@ fn partition_table_plans_only_touch_the_table_areas() {
             length: 4096,
             type_id: "0x0C".to_owned(),
             role: None,
+            gpt_repair: None,
         }
     };
     // 8 KiB 的设备整个都在开头与末尾 64 KiB 之内
@@ -334,6 +335,46 @@ fn partition_table_plans_only_touch_the_table_areas() {
     );
     big.plan.writes[0].offset = (1 << 30) - 512;
     assert!(check_table_plan(&big, &big_expected).is_ok());
+
+    // 盘中间只许写 EBR：一个扇区、以 55 AA 结尾、只改分区表项区
+    let mut ebr = big.clone();
+    let mut after = vec![0u8; 512];
+    after[446..462].copy_from_slice(&[
+        0, 0xFE, 0xFF, 0xFF, 7, 0xFE, 0xFF, 0xFF, 63, 0, 0, 0, 100, 0, 0, 0,
+    ]);
+    after[510] = 0x55;
+    after[511] = 0xAA;
+    ebr.plan.writes[0] = yisi_engine::protocol::SectorWrite {
+        offset: 1 << 20,
+        before: vec![0u8; 512],
+        after: after.clone(),
+    };
+    assert!(check_table_plan(&ebr, &big_expected).is_ok());
+    // 动了引导代码区、没有签名、不止一个扇区：都不行
+    for broken in [
+        {
+            let mut bytes = after.clone();
+            bytes[10] = 1;
+            bytes
+        },
+        {
+            let mut bytes = after.clone();
+            bytes[511] = 0;
+            bytes
+        },
+    ] {
+        ebr.plan.writes[0].after = broken;
+        assert_eq!(
+            check_table_plan(&ebr, &big_expected).unwrap_err().code,
+            "planMismatch"
+        );
+    }
+    ebr.plan.writes[0].before = vec![0u8; 1024];
+    ebr.plan.writes[0].after = [after.clone(), vec![0u8; 512]].concat();
+    assert_eq!(
+        check_table_plan(&ebr, &big_expected).unwrap_err().code,
+        "planMismatch"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

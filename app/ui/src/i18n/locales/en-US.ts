@@ -704,6 +704,7 @@ const enUS: typeof zhCN = {
     },
     notes: {
       primaryGptInvalid: 'The primary GPT is damaged; partitions are listed from the backup GPT at the end of the disk.',
+      backupGptInvalid: 'The backup GPT at the end of the disk is damaged; partitions are listed from the primary GPT, which now has no fallback.',
       gptUnreadable: 'The disk is marked as GPT, but neither GPT copy can be read; listed as MBR below.',
       sectorSizeMismatch: 'The partition table was written with 4096-byte sectors, unlike the sector size the device reports.',
       extendedChainBroken: 'The extended partition chain is broken; only the logical partitions before the break are listed.',
@@ -1004,6 +1005,8 @@ const enUS: typeof zhCN = {
       preparing: 'Preparing the repair plan…',
       volumeUnsupported: 'A single drive letter cannot be repaired: choose the whole disk instead, or create an image and repair the image.',
       setType: 'Change the partition type…',
+      repairGpt: 'Repair the GPT…',
+      repairGptHint: 'The intact copy of the GPT is written over the damaged one; the partitions themselves are not changed.',
       outcome: '{action}: {outcome}',
     },
     issue: {
@@ -1044,6 +1047,10 @@ const enUS: typeof zhCN = {
     typeValue: '{role} ({type})',
     addLostValue: 'Adds a partition to the partition table: starting at {start}, {size}, type {type}',
     setTypeValue: 'Changes the type of this partition in the partition table to {type}',
+    repairGptValue: {
+      primaryFromBackup: 'Rewrites the primary GPT (header and entries) at the start of the disk from the backup at the end; the partitions do not change',
+      backupFromPrimary: 'Rewrites the backup GPT (entries and header) at the end of the disk from the primary at the start; the partitions do not change',
+    },
     tableRollbackValue: 'Restores the partition table to what it was before the last change',
     mftValue: 'Copies record(s) {records} of the {source} to the same place in the {target}; the {source} starts at {from}, the {target} at {to}',
     mftRollbackValue: 'Restores record(s) {records} of the {target} to what they were before the last change; the {target} starts at {to}',
@@ -1108,6 +1115,10 @@ const enUS: typeof zhCN = {
       rebuild: 'Partition {number}: rebuild the boot sector',
       addLost: 'Write the found {filesystem} partition (starting at {start}, {size}) back to the partition table',
       setType: 'Partition {number}: change the partition type to {type}',
+      repairGpt: {
+        primaryFromBackup: 'Repair the primary GPT from the backup',
+        backupFromPrimary: 'Rewrite the backup GPT from the primary',
+      },
       mirrorFromMft: 'Partition {number}: update the master file table copy from the master file table',
       mftFromMirror: 'Partition {number}: repair the master file table from its copy',
       fsFix: 'Partition {number}: repair the file system',
