@@ -5,7 +5,7 @@
 //! - 深度搜索从头到尾读一遍设备，逐个 512 字节看；
 //! - 快速搜索只看分区通常开始的位置（[`next_start`]），找到一个分区就跳到它的末尾接着找。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -26,6 +26,10 @@ const ALIGNMENT: u64 = 1 << 20;
 /// 按柱面分区的旧盘（Windows XP 年代）：分区从柱面边界开始，第一个分区与逻辑分区在柱面之后 63 个扇区。
 const CYLINDER: u64 = 255 * 63 * 512;
 const TRACK: u64 = 63 * 512;
+/// 小容量盘按 64 KiB 排分区（实测 diskpart 在 400 MB 的盘上）：第一个分区从 64 KiB 开始，逻辑分区在 EBR 之后 64 KiB。
+const SMALL_ALIGNMENT: u64 = 64 << 10;
+/// 一个分区结束之后，下一个分区常在这几处开始：紧接着、隔一个磁道（旧式的 EBR 与空隙）、隔 64 KiB、隔 1 MiB。
+const FOLLOW_GAPS: [u64; 4] = [0, TRACK, SMALL_ALIGNMENT, ALIGNMENT];
 /// 快速搜索在每个起点读的范围（按扇区数）：起点前一个扇区（到这里结束的 NTFS 卷的备份）、起点上的主引导扇区、
 /// FAT32 第 6 扇区的备份、exFAT 第 12 扇区起的备份引导区。
 const WINDOW_BEFORE: u64 = 1;
@@ -34,7 +38,8 @@ const WINDOW_AFTER: u64 = 13;
 /// 怎么搜。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchMode {
-    /// 只看分区通常开始的位置，找到一个分区就跳到它的末尾。起点不对齐、两份引导扇区所在的位置都不在这些地方的分区找不到。
+    /// 只看分区通常开始的位置，找到一个分区就跳到它的末尾。起点不对齐、又不紧跟在别的分区之后，两份引导扇区所在的位置
+    /// 都不在这些地方的分区找不到。
     Quick,
     /// 从头到尾读一遍。
     Deep,
@@ -168,23 +173,32 @@ impl Search {
 
     /// 只看可能的起点（[`next_start`]），每处读起点附近的几个扇区；找到的分区跳过，最后看一眼设备的最后一个扇区
     /// （到设备末尾结束的 NTFS 卷的备份）。被停下时返回停在的起点。
+    ///
+    /// 对齐的起点之外另看：分区表里各分区的起点、64 KiB 处（小容量盘的第一个分区），以及分区表里的分区与找到的分区
+    /// 结束之后的几处（[`FOLLOW_GAPS`]）：不按 1 MiB 对齐的盘上，后面的分区与逻辑分区就从那里接着排。
     fn quick(&mut self, control: &dyn SearchControl) -> Option<u64> {
         let size = self.device.size();
         let sector = u64::from(self.device.sector_size()).max(SECTOR as u64);
-        let mut table_starts: Vec<u64> = self
-            .table
-            .iter()
-            .flat_map(|table| table.partitions.iter().map(|partition| partition.offset))
-            .collect();
-        table_starts.sort_unstable();
+        let mut starts = BTreeSet::from([SMALL_ALIGNMENT]);
+        for partition in self.table.iter().flat_map(|table| &table.partitions) {
+            starts.insert(partition.offset);
+            follow(&mut starts, partition.offset.saturating_add(partition.length));
+        }
+        let mut followed = 0;
         control.progress(0, size);
         let mut from = 0u64;
-        while let Some(at) = next_start(from, size, &table_starts) {
+        while let Some(at) = next_start(from, size, &starts) {
             if control.is_cancelled() {
                 return Some(at);
             }
             let start = at.saturating_sub(WINDOW_BEFORE * sector);
             self.examine_range(start, at.saturating_add(WINDOW_AFTER * sector).min(size));
+            if self.finder.found.len() != followed {
+                followed = self.finder.found.len();
+                for key in self.finder.found.keys() {
+                    follow(&mut starts, key.offset.saturating_add(key.volume_bytes));
+                }
+            }
             from = self.end_of_found_at(at).unwrap_or(0).max(at + 1);
             self.report_changes(control);
             control.progress(from.min(size), size);
@@ -288,10 +302,15 @@ impl Search {
     }
 }
 
+/// 在 `end`（一个分区的末尾）之后的几处接着看。
+fn follow(starts: &mut BTreeSet<u64>, end: u64) {
+    starts.extend(FOLLOW_GAPS.iter().filter_map(|&gap| end.checked_add(gap)));
+}
+
 /// 快速搜索的下一个起点：不小于 `from`、在设备之内的最小一个，取自 1 MiB 边界、柱面边界与柱面之后 63 个扇区
-/// （含第 63 扇区）、现有分区表里各分区的起点（表项还在、只是引导扇区坏了时）。第 0 扇区是 1 MiB 边界之一
-/// （不分区直接格式化的 U 盘）。
-fn next_start(from: u64, size: u64, table_starts: &[u64]) -> Option<u64> {
+/// （含第 63 扇区）与另外记下的起点 `starts`（分区表里的起点、分区结束之后的几处等，见 [`Search::quick`]）。
+/// 第 0 扇区是 1 MiB 边界之一（不分区直接格式化的 U 盘）。
+fn next_start(from: u64, size: u64, starts: &BTreeSet<u64>) -> Option<u64> {
     // 不小于 from 的 base + k * unit
     let up = |unit: u64, base: u64| {
         if from <= base {
@@ -307,7 +326,7 @@ fn next_start(from: u64, size: u64, table_starts: &[u64]) -> Option<u64> {
         up(ALIGNMENT, 0),
         up(CYLINDER, 0),
         up(CYLINDER, TRACK),
-        table_starts.iter().copied().find(|&start| start >= from),
+        starts.range(from..).next().copied(),
     ]
     .into_iter()
     .flatten()
@@ -898,15 +917,64 @@ mod tests {
     }
 
     #[test]
+    fn quick_search_follows_partitions_laid_out_every_64_kib() {
+        // 小容量盘的排法：第一个分区在 64 KiB，后面的各在前一个结束之后 64 KiB（逻辑分区前面是 EBR），都不在 1 MiB 边界上
+        let volume = ExfatImage::new().finish();
+        let length = volume.len() as u64;
+        let starts = [
+            SMALL_ALIGNMENT,
+            2 * SMALL_ALIGNMENT + length,
+            3 * SMALL_ALIGNMENT + 2 * length,
+        ];
+        let mut image = vec![0u8; (starts[2] + length + ALIGNMENT) as usize];
+        for &at in &starts {
+            image[at as usize..(at + length) as usize].copy_from_slice(&volume);
+        }
+        let device = counting(image);
+        let quick = run_on(
+            &(Arc::clone(&device) as Arc<dyn BlockDevice>),
+            SearchMode::Quick,
+        );
+        let offsets: Vec<u64> = quick.candidates.iter().map(|c| c.offset).collect();
+        assert_eq!(offsets, starts);
+        assert!(quick.candidates.iter().all(|c| c.length == length));
+        let read = device.bytes.load(Ordering::Relaxed);
+        assert!(read < quick.size / 8, "读了 {read} 字节");
+    }
+
+    #[test]
+    fn quick_search_looks_right_after_the_partitions_in_the_table() {
+        // 表里的分区认不出（引导区全没了），丢失的分区在它结束之后 64 KiB：按表里分区的末尾接着看
+        let volume = ExfatImage::new().finish();
+        let length = volume.len() as u64;
+        let listed = SMALL_ALIGNMENT;
+        let lost = listed + length + SMALL_ALIGNMENT;
+        let mut image = yisi_part::samples::mbr_disk(
+            (lost + length + ALIGNMENT) as usize,
+            &[yisi_part::samples::MbrEntry::new(
+                0x07,
+                (listed / 512) as u32,
+                (length / 512) as u32,
+            )],
+        );
+        image[lost as usize..(lost + length) as usize].copy_from_slice(&volume);
+        let device: Arc<dyn BlockDevice> = Arc::new(MemoryDisk::new(image, 512));
+        let quick = run_on(&device, SearchMode::Quick);
+        let offsets: Vec<u64> = quick.candidates.iter().map(|c| c.offset).collect();
+        assert_eq!(offsets, [lost]);
+        assert_eq!(quick.candidates[0].relation, Relation::Lost);
+    }
+
+    #[test]
     fn quick_search_starts_are_aligned_old_style_or_from_the_table() {
         let size = 1 << 40;
-        let after = |from: u64| next_start(from, size, &[1000 * 512]).unwrap();
+        let after = |from: u64| next_start(from, size, &BTreeSet::from([1000 * 512])).unwrap();
         assert_eq!(after(0), 0);
         assert_eq!(after(1), TRACK);
         assert_eq!(after(TRACK + 1), 1000 * 512);
         assert_eq!(after(1000 * 512 + 1), ALIGNMENT);
         assert_eq!(after(7 * ALIGNMENT + 1), CYLINDER);
         assert_eq!(after(CYLINDER + 1), CYLINDER + TRACK);
-        assert_eq!(next_start(size - 511, size, &[]), None);
+        assert_eq!(next_start(size - 511, size, &BTreeSet::new()), None);
     }
 }
