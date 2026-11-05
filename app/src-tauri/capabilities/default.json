@@ -34,6 +34,7 @@
     "allow-image-history-list",
     "allow-image-history-remove",
     "allow-image-history-relocate",
+    "allow-image-reveal",
     "allow-boot-diagnose",
     "allow-write-plan-boot-sector",
     "allow-write-plan-partition-table",

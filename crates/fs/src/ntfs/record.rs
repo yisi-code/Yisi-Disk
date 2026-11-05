@@ -1,6 +1,6 @@
 //! MFT 记录：更新序列修正、记录头、属性遍历；`$FILE_NAME` 与运行表的解码。
 
-use yisi_part::bytes::{le16, le32, le64};
+use yisi_part::bytes::{le16, le16_units, le32, le64};
 
 /// 属性类型。
 pub(crate) const STANDARD_INFORMATION: u32 = 0x10;
@@ -178,6 +178,13 @@ pub(crate) struct NonResident<'a> {
     pub runs: &'a [u8],
     pub size: u64,
     pub initialized: u64,
+    /// 压缩单元：2 的这么多次方个簇（压缩的属性才有，Windows 一律是 4，即 16 个簇）。
+    pub compression_unit: u8,
+}
+
+/// 压缩单元有多少个簇；NTFS 只在簇不大于 4 KiB 的卷上压缩，单元最多 2^8 个簇。不认得时为 `None`。
+pub(crate) fn compression_unit_clusters(unit: u8, cluster_size: u64) -> Option<u64> {
+    ((1..=8).contains(&unit) && cluster_size <= 4096).then(|| 1u64 << unit)
 }
 
 impl<'a> Attribute<'a> {
@@ -194,6 +201,7 @@ impl<'a> Attribute<'a> {
                 runs: raw.get(runs_offset..)?,
                 size: le64(raw, 0x30)?,
                 initialized: le64(raw, 0x38)?,
+                compression_unit: *raw.get(0x22)?,
             })
         } else {
             let length = le32(raw, 0x10)? as usize;
@@ -210,6 +218,11 @@ impl<'a> Attribute<'a> {
             name,
             body,
         })
+    }
+
+    /// 属性名（UTF-16）；无名属性为空。
+    pub fn name_units(&self) -> Vec<u16> {
+        le16_units(self.name)
     }
 
     pub fn name_is(&self, name: &[u16]) -> bool {
@@ -229,6 +242,17 @@ impl<'a> Attribute<'a> {
 
     pub fn encrypted(&self) -> bool {
         self.flags & ATTR_ENCRYPTED != 0
+    }
+
+    /// 压缩了、又解不开（压缩单元不认得，见 [`compression_unit_clusters`]）。常驻的内容不压缩，照样能读。
+    pub fn undecodable_compression(&self, cluster_size: u64) -> bool {
+        self.compressed()
+            && match &self.body {
+                Body::Resident { .. } => false,
+                Body::NonResident(body) => {
+                    compression_unit_clusters(body.compression_unit, cluster_size).is_none()
+                }
+            }
     }
 
     pub fn resident_value(&self) -> Option<&'a [u8]> {
@@ -263,13 +287,7 @@ pub(crate) struct FileName {
 pub(crate) fn parse_file_name(value: &[u8]) -> Option<FileName> {
     let (parent, parent_sequence) = split_ref(le64(value, 0)?);
     let length = usize::from(*value.get(0x40)?);
-    let units: Vec<u16> = value
-        .get(0x42..0x42 + length * 2)?
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|unit| u16::from_le_bytes(*unit))
-        .collect();
+    let units = le16_units(value.get(0x42..0x42 + length * 2)?);
     if units.is_empty() {
         return None;
     }

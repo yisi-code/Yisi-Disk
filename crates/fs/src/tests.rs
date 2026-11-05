@@ -9,7 +9,9 @@ use crate::samples::{
     ExfatImage, FatImage, FatType, Layout, MemoryDisk, NTFS_ROOT, Noise, NtfsImage, SAMPLE_TIME,
     TAG_WOF, pattern,
 };
-use crate::{Entry, FileRef, FsError, FsKind, ScanSummary, State, Unsupported, Volume, detect};
+use crate::{
+    Entry, FileRef, FsError, FsKind, NamedStream, ScanSummary, State, Unsupported, Volume, detect,
+};
 
 fn open(image: Vec<u8>) -> Volume {
     let length = image.len() as u64;
@@ -673,6 +675,112 @@ fn ntfs_volume_is_browsed_and_deleted_files_are_found() {
         ..reused.file
     };
     assert!(volume.open_file(&stale).is_err());
+}
+
+#[test]
+fn ntfs_compressed_files_are_decompressed() {
+    use crate::samples::{CompressedUnit, LZNT1_PACKED, LZNT1_PLAIN};
+    let mut sample = NtfsImage::new();
+    let stored = pattern(21, 64 * 1024);
+    let units = [
+        CompressedUnit::Packed {
+            packed: LZNT1_PACKED,
+            length: LZNT1_PLAIN.len(),
+        },
+        CompressedUnit::Stored(&stored),
+        CompressedUnit::Hole,
+        // 文件末尾不足一个压缩单元
+        CompressedUnit::Packed {
+            packed: LZNT1_PACKED,
+            length: 5000,
+        },
+    ];
+    let mut expected = LZNT1_PLAIN.to_vec();
+    expected.extend(&stored);
+    expected.extend(vec![0u8; 64 * 1024]);
+    expected.extend(&LZNT1_PLAIN[..5000]);
+    sample.add_compressed(NTFS_ROOT, "lz.bin", &units);
+    let gone = sample.add_compressed(NTFS_ROOT, "lz gone.bin", &units);
+    sample.delete(gone);
+    let volume = open(sample.finish());
+
+    // 扫描 MFT 之前按目录索引列出：能读
+    let entries = volume.list(&volume.root()).unwrap().entries;
+    let live = find(&entries, "lz.bin");
+    assert_eq!((live.unsupported, live.size), (None, expected.len() as u64));
+    assert!(read_all(&volume, &live.file) == expected);
+    // 每次读 7777 字节，跨过压缩单元的边界
+    let mut reader = volume.open_file(&live.file).unwrap();
+    let mut pieces = Vec::new();
+    let mut buffer = vec![0u8; 7777];
+    loop {
+        let read = reader.read(&mut buffer).unwrap();
+        if read == 0 {
+            break;
+        }
+        pieces.extend_from_slice(&buffer[..read]);
+    }
+    assert!(pieces == expected);
+
+    // 扫描之后：现存的照样能读，已删除的压缩文件也能找回
+    volume.scan(&mut |_, _| true).unwrap();
+    let entries = volume.list(&volume.root()).unwrap().entries;
+    assert_eq!(find(&entries, "lz.bin").unsupported, None);
+    let deleted = find(&entries, "lz gone.bin");
+    assert_eq!((deleted.unsupported, deleted.state), (None, State::Intact));
+    assert!(read_all(&volume, &deleted.file) == expected);
+}
+
+#[test]
+fn ntfs_alternate_data_streams_are_listed_and_read() {
+    let mut sample = NtfsImage::new();
+    let zone = b"[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=https://example.com/a.zip\r\n".to_vec();
+    let big = pattern(31, 9000);
+    let file = sample.add_file(NTFS_ROOT, "download.zip", &pattern(30, 5000));
+    sample.add_stream(file, "Zone.Identifier", &zone);
+    sample.add_stream(file, "缩略图", &big);
+    let plain = sample.add_file(NTFS_ROOT, "plain.txt", &pattern(32, 100));
+    let volume = open(sample.finish());
+    let entries = volume.list(&volume.root()).unwrap().entries;
+    let download = find(&entries, "download.zip");
+    let streams = volume.streams(&download.file).unwrap();
+    assert_eq!(
+        streams,
+        [
+            NamedStream {
+                name: "Zone.Identifier".to_owned(),
+                size: zone.len() as u64
+            },
+            NamedStream {
+                name: "缩略图".to_owned(),
+                size: big.len() as u64
+            },
+        ]
+    );
+    let mut read = Vec::new();
+    volume
+        .open_stream(&download.file, "Zone.Identifier")
+        .unwrap()
+        .read_to_end(&mut read)
+        .unwrap();
+    assert_eq!(read, zone);
+    let mut read = Vec::new();
+    volume
+        .open_stream(&download.file, "缩略图")
+        .unwrap()
+        .read_to_end(&mut read)
+        .unwrap();
+    assert!(read == big);
+    // 主数据流不受影响；没有备用数据流的文件为空；没有的名字报错
+    assert_eq!(read_all(&volume, &download.file), pattern(30, 5000));
+    let _ = plain;
+    assert!(
+        volume
+            .streams(&find(&entries, "plain.txt").file)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(volume.open_stream(&download.file, "nope").is_err());
 }
 
 #[test]

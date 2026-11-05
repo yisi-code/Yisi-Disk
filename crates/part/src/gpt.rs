@@ -2,7 +2,7 @@
 
 use yisi_io::BlockDevice;
 
-use crate::bytes::{le32, le64};
+use crate::bytes::{le16_units, le32, le64};
 use crate::crc32::crc32;
 use crate::{Guid, Note, PartError, Partition, PartitionKind};
 
@@ -286,14 +286,10 @@ fn entry_partition(index: usize, entry: &[u8], sector: u64) -> Option<Partition>
     let first = le64(entry, 32)?;
     let last = le64(entry, 40)?;
     let sectors = last.checked_sub(first)?.checked_add(1)?;
-    let name_units: Vec<u16> = entry
-        .get(NAME_OFFSET..NAME_OFFSET + NAME_BYTES)?
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|&pair| u16::from_le_bytes(pair))
-        .take_while(|&unit| unit != 0)
-        .collect();
+    let mut name_units = le16_units(entry.get(NAME_OFFSET..NAME_OFFSET + NAME_BYTES)?);
+    if let Some(end) = name_units.iter().position(|&unit| unit == 0) {
+        name_units.truncate(end);
+    }
     Some(Partition {
         number: u32::try_from(index).ok()?.checked_add(1)?,
         offset: first.checked_mul(sector)?,

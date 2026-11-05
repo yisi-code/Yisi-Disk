@@ -1,7 +1,7 @@
 //! 程序文件夹下 `data` 里的一份记录清单（JSON 数组）：读不到、读不懂时按空处理（读不懂的那份在下次保存时被替换）；
 //! 保存时先写临时文件再改名替换。做过的镜像与写盘记录都存成这样。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -30,11 +30,7 @@ pub fn save<T: Serialize>(file: &Path, records: &[T]) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|error| failed(&error))?;
     }
     let text = serde_json::to_string_pretty(records).map_err(|error| failed(&error))?;
-    let mut temp = file.as_os_str().to_owned();
-    temp.push(".tmp");
-    let temp = PathBuf::from(temp);
-    std::fs::write(&temp, text).map_err(|error| failed(&error))?;
-    std::fs::rename(&temp, file).map_err(|error| failed(&error))
+    yisi_io::write_then_replace(file, text.as_bytes()).map_err(|error| failed(&error))
 }
 
 /// 现在的时间（毫秒，Unix 纪元起）。

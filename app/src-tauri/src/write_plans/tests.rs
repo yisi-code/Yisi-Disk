@@ -2,6 +2,7 @@ use yisi_broker::execute::Step;
 use yisi_engine::protocol::{DeviceIdentity, SectorWrite};
 
 use super::*;
+use crate::engines::IMAGE_SECTOR_SIZE;
 
 /// 每个测试一个数据目录（代替程序文件夹下的 `data`）与一个 8 KiB 的镜像（全 0）。
 fn setup(name: &str) -> (WritePlans, PathBuf, PathBuf) {
@@ -424,6 +425,27 @@ fn fs_fix_plans_stay_inside_the_partition() {
             "{name}"
         );
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn images_made_from_4k_disks_open_with_the_recorded_sector_size() {
+    let (_plans, dir, image) = setup("sector");
+    let target = image_target(&image);
+    // 旁边没有坏区图：按 512
+    assert_eq!(device_of(&target).unwrap().sector_size, IMAGE_SECTOR_SIZE);
+    // 坏区图记着 4096：按 4096（读源与写入计划同一个函数）
+    let map = yisi_io::map_path(&image);
+    std::fs::write(
+        &map,
+        "version 2\nsize 8192\nsector 4096\nsource fake\n0 8192 done\n",
+    )
+    .unwrap();
+    assert_eq!(device_of(&target).unwrap().sector_size, 4096);
+    assert_eq!(crate::engines::image_sector_size(&image), 4096);
+    // 记的不合法：按 512
+    std::fs::write(&map, "version 2\nsector 1000\n").unwrap();
+    assert_eq!(crate::engines::image_sector_size(&image), IMAGE_SECTOR_SIZE);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

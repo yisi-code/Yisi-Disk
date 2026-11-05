@@ -326,7 +326,7 @@
   border-radius: var(--radius-control);
 }
 
-/* 树列表（分区文件的目录树、深度恢复的结果树）共用的外观；行的样式各组件自己写 */
+/* 树列表（分区文件的目录树、深度恢复的结果树）共用的外观；行距与缩进各组件自己写 */
 
 .tree-list {
   display: flex;
@@ -376,6 +376,70 @@
   margin: 0;
   color: var(--color-text-muted);
   font-size: var(--font-size-small);
+}
+
+/* 一行：绝对定位铺满视口，行高与位置由各组件按虚拟滚动算 */
+.tree-list__spacer {
+  position: relative;
+}
+
+.tree-list__row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  cursor: default;
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.tree-list__row--selected {
+  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+}
+
+/* 键盘焦点所在的行；只在列表有焦点时画出来 */
+.tree-list__viewport:focus-visible .tree-list__row--active {
+  box-shadow: inset 0 0 0 1px var(--color-accent);
+}
+
+.tree-list__chevron {
+  flex: none;
+  width: var(--space-md);
+  color: var(--color-text-muted);
+  text-align: center;
+}
+
+.tree-list__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-list__size,
+.tree-list__time {
+  flex: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-small);
+  text-align: right;
+}
+
+.tree-list__size {
+  min-width: 72px;
+}
+
+.tree-list__time {
+  min-width: 132px;
+}
+
+.tree-list__footer {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-md);
 }
 
 /* 详情卡片（分区文件的详情、深度恢复的预览）共用的外观 */
@@ -448,6 +512,14 @@
   grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
   grid-template-rows: auto 1fr auto;
   gap: var(--space-sm) var(--space-lg);
+}
+
+/* 两栏里的一栏：与父网格的三行（标题、框体、底部）逐行对齐 */
+.wizard__pane {
+  display: grid;
+  grid-row: span 3;
+  grid-template-rows: subgrid;
+  min-width: 0;
 }
 
 .wizard__list {

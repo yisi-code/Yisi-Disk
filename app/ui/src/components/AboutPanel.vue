@@ -1,14 +1,9 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useEngineCapabilities } from '../composables/useEngineCapabilities'
 import { useHostErrorText } from '../composables/useHostErrorText'
-import {
-  getAppInfo,
-  getEngineCapabilities,
-  toHostError,
-  type EngineCapabilities,
-  type HostError,
-} from '../services/host'
+import { getAppInfo, toHostError, type HostError } from '../services/host'
 
 /** 项目主页与作者的联系方式：是事实，不随界面语言变 */
 const REPOSITORY = 'https://github.com/yisi-code/Yisi-Disk'
@@ -24,13 +19,12 @@ const { formatHostError } = useHostErrorText()
 
 const appVersion = ref<string | null>(null)
 const appError = ref<HostError | null>(null)
-const capabilities = ref<EngineCapabilities | null>(null)
-const engineError = ref<HostError | null>(null)
+const { capabilities, failure: engineError, load: loadEngine } = useEngineCapabilities()
 
-// 每次打开都现查一次：引擎是否可用以这一刻为准
+// 每次打开都现查一次：引擎是否可用以这一刻为准（各功能卡片也跟着更新）
 onMounted(() => {
   void loadAppVersion()
-  void loadEngineStatus()
+  void loadEngine(true)
 })
 
 async function loadAppVersion() {
@@ -38,14 +32,6 @@ async function loadAppVersion() {
     appVersion.value = (await getAppInfo()).version
   } catch (error) {
     appError.value = toHostError(error)
-  }
-}
-
-async function loadEngineStatus() {
-  try {
-    capabilities.value = await getEngineCapabilities()
-  } catch (error) {
-    engineError.value = toHostError(error)
   }
 }
 </script>
@@ -60,14 +46,14 @@ async function loadEngineStatus() {
     <dl class="about__facts">
       <dt>{{ t('about.version') }}</dt>
       <dd>
-        <span v-if="appError" class="about__error" role="alert">{{ formatHostError(appError) }}</span>
+        <span v-if="appError" class="wizard__error" role="alert">{{ formatHostError(appError) }}</span>
         <template v-else>{{ appVersion ?? t('about.checking') }}</template>
       </dd>
       <dt>{{ t('about.engine') }}</dt>
       <dd aria-live="polite">
         <template v-if="capabilities">{{ t('about.engineReady') }}</template>
         <template v-else-if="engineError">
-          <span class="about__error" role="alert">{{ t('about.engineFailed') }}</span>
+          <span class="wizard__error" role="alert">{{ t('about.engineFailed') }}</span>
           <span class="about__hint">{{ formatHostError(engineError) }}</span>
         </template>
         <template v-else>{{ t('about.checking') }}</template>
@@ -78,10 +64,10 @@ async function loadEngineStatus() {
       <dt>{{ t('about.techStack') }}</dt>
       <dd>{{ t('about.techStackValue') }}</dd>
       <dt>{{ t('about.repository') }}</dt>
-      <dd class="about__selectable">{{ REPOSITORY }}</dd>
+      <dd class="wizard__path-text">{{ REPOSITORY }}</dd>
       <template v-for="contact in CONTACTS" :key="contact.key">
         <dt>{{ t(`about.contact.${contact.key}`) }}</dt>
-        <dd class="about__selectable">{{ contact.value }}</dd>
+        <dd class="wizard__path-text">{{ contact.value }}</dd>
       </template>
     </dl>
 
@@ -122,15 +108,6 @@ async function loadEngineStatus() {
   display: flex;
   flex-direction: column;
   margin: 0;
-}
-
-.about__error {
-  color: var(--color-danger);
-}
-
-.about__selectable {
-  overflow-wrap: anywhere;
-  user-select: text;
 }
 
 .about__note {

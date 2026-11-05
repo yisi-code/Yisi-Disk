@@ -94,13 +94,24 @@ pub fn fat_boot(params: &FatBoot) -> Vec<u8> {
     boot
 }
 
+/// FSInfo 扇区的三处签名（偏移与值）：写出与核对同一份。
+const FS_INFO_SIGNATURES: [(usize, u32); 3] =
+    [(0, 0x4161_5252), (484, 0x6141_7272), (508, 0xAA55_0000)];
+
+/// FSInfo 扇区的三处签名都对。
+pub fn fat32_fs_info_ok(sector: &[u8]) -> bool {
+    FS_INFO_SIGNATURES
+        .iter()
+        .all(|&(at, value)| yisi_part::bytes::le32(sector, at) == Some(value))
+}
+
 /// FAT32 的 FSInfo 扇区：三处签名，空闲簇数与下一个空闲簇记为「未知」（Windows 挂载时会重新统计）。
 pub fn fat32_fs_info(bytes_per_sector: u16) -> Vec<u8> {
     let mut buf = vec![0u8; usize::from(bytes_per_sector).max(512)];
-    put(&mut buf, 0, &0x4161_5252u32.to_le_bytes());
-    put(&mut buf, 484, &0x6141_7272u32.to_le_bytes());
+    for (at, value) in FS_INFO_SIGNATURES {
+        put(&mut buf, at, &value.to_le_bytes());
+    }
     put(&mut buf, 488, &[0xFF; 8]);
-    put(&mut buf, 508, &0xAA55_0000u32.to_le_bytes());
     buf
 }
 

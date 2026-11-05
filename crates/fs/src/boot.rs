@@ -9,6 +9,7 @@
 use yisi_io::{BlockDevice, IoError};
 use yisi_part::bytes::{le16, le32, le64};
 
+use crate::boot_write::EXFAT_BOOT_REGION_SECTORS;
 use crate::format::FatWidth;
 use crate::{FsKind, bpb, exfat, fat, ntfs};
 
@@ -62,7 +63,7 @@ pub struct Candidate {
 pub const FAT32_BACKUP_SECTOR: u64 = 6;
 /// exFAT 的备份引导区从第 12 扇区起，与主引导区一样占 12 个扇区。
 pub const EXFAT_BACKUP_SECTOR: u64 = 12;
-const SECTOR_SIZES: [u64; 4] = [512, 4096, 1024, 2048];
+use yisi_part::boot_sector::BYTES_PER_SECTOR as SECTOR_SIZES;
 
 /// 备份引导扇区可能在的位置，按优先次序：主引导扇区标识的文件系统在前；
 /// 扇区大小先用主引导扇区里还认得出的，再用设备的逻辑扇区大小与其他常见值；
@@ -254,6 +255,23 @@ pub fn exfat_stored_checksum(sector: &[u8]) -> Option<u32> {
         .iter()
         .all(|word| u32::from_le_bytes(*word) == first)
         .then_some(first)
+}
+
+/// exFAT 引导区（[`EXFAT_BOOT_REGION_SECTORS`] 个扇区）的第 12 个扇区里记的校验和，与按前 11 个扇区算出的。
+/// 区域不够长时为 `None`；记的那个扇区里各处不一致时记的为 `None`。诊断、文件系统检查、丢失分区搜索都按它核对。
+pub fn exfat_region_checksums(region: &[u8], bytes_per_sector: u64) -> Option<(Option<u32>, u32)> {
+    let sector = usize::try_from(bytes_per_sector).ok()?;
+    let split = sector.checked_mul(usize::try_from(EXFAT_BOOT_REGION_SECTORS - 1).ok()?)?;
+    let stored = region.get(split..split.checked_add(sector)?)?;
+    Some((
+        exfat_stored_checksum(stored),
+        exfat_boot_checksum(region.get(..split)?),
+    ))
+}
+
+/// [`exfat_region_checksums`] 记的与算的一致。
+pub fn exfat_region_checksum_ok(region: &[u8], bytes_per_sector: u64) -> bool {
+    matches!(exfat_region_checksums(region, bytes_per_sector), Some((Some(stored), computed)) if stored == computed)
 }
 
 /// 一个参数自洽的引导扇区。偏移都以分区开头为 0，单位是字节。

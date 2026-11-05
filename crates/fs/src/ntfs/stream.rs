@@ -1,16 +1,9 @@
 //! 非常驻属性的内容：按运行表把虚拟簇换成分区里的位置来读，稀疏的部分读作 0。
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, PoisonError};
-
 use super::record::Extent;
 use crate::FsError;
 use crate::reader::Piece;
-use crate::region::Region;
-
-/// 缓存按 64 KiB 一块，最多 512 块（32 MiB），满了整个清空。
-const CHUNK: u64 = 64 * 1024;
-const MAX_CHUNKS: usize = 512;
+use crate::region::{Chunks, Region};
 
 pub(crate) struct Stream {
     region: Region,
@@ -18,7 +11,8 @@ pub(crate) struct Stream {
     extents: Vec<Extent>,
     /// 内容的长度（属性记的数据长度）。
     size: u64,
-    chunks: Mutex<HashMap<u64, Arc<[u8]>>>,
+    /// [`read_cached`](Self::read_cached) 的分块缓存。
+    cache: Chunks,
 }
 
 impl Stream {
@@ -28,7 +22,7 @@ impl Stream {
             cluster_size,
             extents,
             size,
-            chunks: Mutex::new(HashMap::new()),
+            cache: Chunks::new(size),
         }
     }
 
@@ -92,52 +86,82 @@ impl Stream {
 
     /// 与 [`read_at`](Self::read_at) 相同，经分块缓存读：适合反复读附近的小块（MFT 记录、分配位图）。
     pub fn read_cached(&self, offset: u64, buf: &mut [u8]) -> Result<(), FsError> {
-        let end = offset
-            .checked_add(buf.len() as u64)
-            .filter(|&end| end <= self.size)
-            .ok_or(FsError::OutOfRange { offset })?;
-        let mut position = offset;
-        while position < end {
-            let index = position / CHUNK;
-            let chunk = self.chunk(index)?;
-            let inside = (position - index * CHUNK) as usize;
-            let take = ((end - position) as usize).min(chunk.len().saturating_sub(inside));
-            let filled = (position - offset) as usize;
-            let (Some(source), Some(target)) = (
-                chunk.get(inside..inside + take),
-                buf.get_mut(filled..filled + take),
-            ) else {
-                return Err(FsError::OutOfRange { offset: position });
-            };
-            if take == 0 {
-                return Err(FsError::OutOfRange { offset: position });
-            }
-            target.copy_from_slice(source);
-            position += take as u64;
+        if self
+            .cache
+            .read(offset, buf, |begin, data| self.read_at(begin, data))?
+        {
+            Ok(())
+        } else {
+            Err(FsError::OutOfRange { offset })
         }
-        Ok(())
     }
 
-    fn chunk(&self, index: u64) -> Result<Arc<[u8]>, FsError> {
-        if let Some(chunk) = self
-            .chunks
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&index)
-        {
-            return Ok(Arc::clone(chunk));
+    /// 压缩的属性：每 `unit` 个簇是一个压缩单元。单元里的簇全分配了是原样存放；全是稀疏的读作 0；
+    /// 分配了一部分、后面是稀疏的，分配的那几个簇里是 LZNT1 压缩的内容，读时解开。
+    /// 运行表覆盖不到的单元不给，读到那里时报簇链中断。
+    pub fn compressed_pieces(&self, size: u64, unit: u64) -> Vec<Piece> {
+        let mut pieces = Vec::new();
+        let Some(unit_bytes) = unit.checked_mul(self.cluster_size) else {
+            return pieces;
+        };
+        let mut covered = 0u64;
+        while covered < size {
+            let length = unit_bytes.min(size - covered);
+            let first = covered / self.cluster_size;
+            let end = first + unit;
+            // 这个单元里分配了的簇（按分区里的位置合并相邻的）、有没有稀疏的
+            let mut sources: Vec<(u64, u64)> = Vec::new();
+            let mut allocated = 0u64;
+            let mut sparse = false;
+            let mut vcn = first;
+            while vcn < end {
+                let Some(extent) = self.extent_at(vcn) else {
+                    break;
+                };
+                let take = (extent.vcn + extent.length - vcn).min(end - vcn);
+                match extent.lcn {
+                    Some(lcn) => {
+                        let Some(offset) = lcn
+                            .checked_add(vcn - extent.vcn)
+                            .and_then(|cluster| cluster.checked_mul(self.cluster_size))
+                        else {
+                            return pieces;
+                        };
+                        let bytes = take * self.cluster_size;
+                        match sources.last_mut() {
+                            Some((at, len)) if *at + *len == offset => *len += bytes,
+                            _ => sources.push((offset, bytes)),
+                        }
+                        allocated += take;
+                    }
+                    None => sparse = true,
+                }
+                vcn += take;
+            }
+            if sparse && allocated == 0 {
+                pieces.push(Piece::Zeros(length));
+            } else if sparse {
+                pieces.push(Piece::Lznt1 { sources, length });
+            } else if allocated * self.cluster_size >= length {
+                // 原样存放：按分区里的位置逐段给出，截到这个单元的长度
+                let mut left = length;
+                for (offset, bytes) in sources {
+                    let take = bytes.min(left);
+                    pieces.push(Piece::Disk {
+                        offset,
+                        length: take,
+                    });
+                    left -= take;
+                    if left == 0 {
+                        break;
+                    }
+                }
+            } else {
+                break;
+            }
+            covered += length;
         }
-        let begin = index * CHUNK;
-        let len = CHUNK.min(self.size.saturating_sub(begin));
-        let mut data = vec![0u8; len as usize];
-        self.read_at(begin, &mut data)?;
-        let chunk: Arc<[u8]> = data.into();
-        let mut chunks = self.chunks.lock().unwrap_or_else(PoisonError::into_inner);
-        if chunks.len() >= MAX_CHUNKS {
-            chunks.clear();
-        }
-        chunks.insert(index, Arc::clone(&chunk));
-        Ok(chunk)
+        pieces
     }
 
     /// 把前 `size` 字节换成文件读取用的片段。运行表覆盖不到的部分不给，读到那里时报簇链中断。

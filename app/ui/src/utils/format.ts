@@ -1,5 +1,9 @@
 const BYTE_UNITS = ['B', 'KiB', 'MiB', 'GiB', 'TiB'] as const
 
+function pad(value: number): string {
+  return String(value).padStart(2, '0')
+}
+
 /** 用时的秒数，保留一位小数（文案是 `common.seconds`） */
 export function formatSeconds(milliseconds: number): string {
   return (milliseconds / 1000).toFixed(1)
@@ -7,8 +11,12 @@ export function formatSeconds(milliseconds: number): string {
 
 /** 本地时间 yyyy-MM-dd HH:mm:ss */
 export function formatDateTime(date: Date): string {
-  const pad = (value: number) => String(value).padStart(2, '0')
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+/** 文件名里的本地时间 yyyyMMdd-HHmmss */
+export function formatStamp(date: Date): string {
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`
 }
 
 /** 十六进制，例如 0x0F；`digits` 是至少几位 */
@@ -25,4 +33,9 @@ export function formatBytes(bytes: number): string {
     unitIndex += 1
   }
   return `${value.toFixed(unitIndex === 0 ? 0 : 1)} ${BYTE_UNITS[unitIndex]}`
+}
+
+/** 整数按当前语言加千分位；未知（null）显示空串 */
+export function formatCount(value: number | null, locale: string): string {
+  return value === null ? '' : value.toLocaleString(locale)
 }

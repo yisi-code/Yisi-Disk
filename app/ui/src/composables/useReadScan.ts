@@ -31,6 +31,7 @@ export function useReadScan() {
     total: job.total,
     percent: job.percent,
     bytesPerSecond: job.bytesPerSecond,
+    progressParams: job.progressParams,
     report,
     failure: job.failure,
     isUnresponsive: job.isUnresponsive,

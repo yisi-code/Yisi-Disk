@@ -14,8 +14,7 @@ pub(crate) struct Span {
 impl Span {
     /// 与 `[start, start + length)` 是否有重叠。
     pub fn overlaps(&self, start: u64, length: u64) -> bool {
-        self.offset < start.saturating_add(length)
-            && start < self.offset.saturating_add(self.length)
+        yisi_io::ranges_overlap(self.offset, self.length, start, length)
     }
 }
 

@@ -8,11 +8,14 @@ mod device;
 mod disk_list;
 mod disk_path;
 mod error;
+mod file;
 mod imaging;
 #[cfg(windows)]
 mod ioctl;
+mod local_time;
 mod metered;
 mod plan;
+mod range;
 mod raw;
 mod read;
 mod scan;
@@ -34,17 +37,21 @@ pub use disk_path::{
     volume_root,
 };
 pub use error::IoError;
+pub use file::{temp_path, with_suffix, write_then_replace};
 pub use imaging::{
     BadMap, ImageStore, ImagingControl, ImagingOptions, ImagingOutcome, MapError, MapHeader,
-    RecordedPartition, Round, Scope, Segment, SegmentState, run_imaging,
+    RecordedPartition, Round, Scope, Segment, SegmentState, map_path, recorded_sector_size,
+    run_imaging,
 };
 #[cfg(windows)]
 pub use ioctl::device_io_control;
+pub use local_time::{NT_UNIX_EPOCH_SECONDS, local_to_utc};
 pub use metered::{MeteredDevice, ReadMeter, ReadStats, SLOW_READ};
 pub use plan::{
     DeviceIdentity, MAX_PLAN_BYTES, MAX_WRITES, Overlay, PlanError, SectorWrite, WritePlan,
-    image_identity,
+    image_identity, merge_writes,
 };
+pub use range::ranges_overlap;
 pub use raw::RawImage;
 pub use scan::{SCAN_BLOCK, ScanControl, scan_device};
 #[cfg(windows)]

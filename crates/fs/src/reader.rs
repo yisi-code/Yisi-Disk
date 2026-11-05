@@ -1,9 +1,11 @@
-//! 读出一个文件：按簇（FAT、exFAT）或按 NTFS 的运行表，也可以是存放在 MFT 记录里的小文件。
+//! 读出一个文件：按簇（FAT、exFAT）或按 NTFS 的运行表，也可以是存放在 MFT 记录里的小文件；
+//! NTFS 压缩的部分读到时按压缩单元解开。
 
 use std::io::{self, Read};
 
 use crate::FsError;
 use crate::clusters::{Clusters, Run};
+use crate::ntfs::lznt1;
 use crate::region::Region;
 
 /// 文件内容的一段。
@@ -15,12 +17,17 @@ pub(crate) enum Piece {
     Zeros(u64),
     /// 已经读进内存的内容（NTFS 存放在 MFT 记录里的小文件）。
     Bytes(Vec<u8>),
+    /// NTFS 压缩单元：分区里这几段依次拼起来是 LZNT1 压缩的内容，解开后是 `length` 字节。
+    Lznt1 {
+        sources: Vec<(u64, u64)>,
+        length: u64,
+    },
 }
 
 impl Piece {
     fn len(&self) -> u64 {
         match self {
-            Self::Disk { length, .. } | Self::Zeros(length) => *length,
+            Self::Disk { length, .. } | Self::Zeros(length) | Self::Lznt1 { length, .. } => *length,
             Self::Bytes(bytes) => bytes.len() as u64,
         }
     }
@@ -38,6 +45,8 @@ pub struct FileReader {
     /// 当前位置所在的段，以及这一段在文件里的起点。
     cursor: usize,
     cursor_start: u64,
+    /// 最近解开的压缩单元：第几段与解出的内容。
+    unpacked: Option<(usize, Vec<u8>)>,
 }
 
 impl FileReader {
@@ -73,6 +82,7 @@ impl FileReader {
             position: 0,
             cursor: 0,
             cursor_start: 0,
+            unpacked: None,
         }
     }
 
@@ -84,6 +94,7 @@ impl FileReader {
     pub fn first_offset(&self) -> Option<u64> {
         match self.pieces.first() {
             Some(Piece::Disk { offset, .. }) => Some(*offset),
+            Some(Piece::Lznt1 { sources, .. }) => sources.first().map(|&(offset, _)| offset),
             _ => None,
         }
     }
@@ -143,10 +154,49 @@ impl FileReader {
                     })?;
                     target.copy_from_slice(source);
                 }
+                Piece::Lznt1 { sources, length } => {
+                    let (sources, length) = (sources.clone(), *length);
+                    let broken = FsError::ChainBroken {
+                        offset: self.position,
+                    };
+                    let unit = self.unpack(sources, length)?;
+                    let start = inside as usize;
+                    let source = unit.get(start..start + take).ok_or(broken)?;
+                    target.copy_from_slice(source);
+                }
             }
             self.position += take as u64;
             return Ok(take);
         }
+    }
+}
+
+impl FileReader {
+    /// 当前这一段（压缩单元）解开后的内容；连着读同一个单元时只解一次。
+    fn unpack(&mut self, sources: Vec<(u64, u64)>, length: u64) -> Result<&[u8], FsError> {
+        if self.unpacked.as_ref().map(|(index, _)| *index) != Some(self.cursor) {
+            let total = sources.iter().map(|&(_, bytes)| bytes).sum::<u64>();
+            let mut packed =
+                vec![0u8; usize::try_from(total).map_err(|_| FsError::OutOfRange { offset: 0 })?];
+            let mut filled = 0usize;
+            for (offset, bytes) in sources {
+                let bytes = bytes as usize;
+                let target = packed
+                    .get_mut(filled..filled + bytes)
+                    .ok_or(FsError::OutOfRange { offset })?;
+                self.region.read_exact(offset, target)?;
+                filled += bytes;
+            }
+            let mut unit = vec![0u8; length as usize];
+            lznt1::decompress(&packed, &mut unit)
+                .ok_or(FsError::Invalid("压缩的内容解不开（LZNT1 格式不对）"))?;
+            self.unpacked = Some((self.cursor, unit));
+        }
+        Ok(self
+            .unpacked
+            .as_ref()
+            .map(|(_, unit)| unit.as_slice())
+            .unwrap_or_default())
     }
 }
 

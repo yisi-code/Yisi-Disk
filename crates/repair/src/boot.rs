@@ -7,18 +7,16 @@
 use std::sync::Arc;
 
 use yisi_fs::boot::{
-    BackupFamily, Candidate, backup_candidates, backup_kind, exfat_boot_checksum,
-    exfat_stored_checksum, remnant_kind,
+    BackupFamily, Candidate, backup_candidates, backup_kind, exfat_region_checksums, remnant_kind,
 };
+use yisi_fs::boot_write::EXFAT_BOOT_REGION_SECTORS;
 use yisi_fs::bpb::{self, Problem, Rule};
-use yisi_fs::{BootCopy, FsKind, Volume};
+use yisi_fs::{BootCopy, FsKind, Region, Volume};
 use yisi_io::BlockDevice;
 use yisi_part::{PartError, Partition, PartitionKind, PartitionTable, Role};
 
 /// 分区比引导扇区记的卷大这么多以上，才算长度不符（对齐、分区工具留的零头不算）。
 const SLACK: u64 = 1 << 20;
-/// exFAT 的引导区：引导扇区、8 个扩展引导扇区、OEM 参数、保留、校验和扇区。
-const EXFAT_BOOT_REGION_SECTORS: u64 = 12;
 
 /// 一个分区的结论。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -298,14 +296,14 @@ struct Reader<'a> {
 impl Reader<'_> {
     /// 读分区里 `at` 起的 `len` 字节；超出分区或读不出时为 `None`。
     fn read(&self, at: u64, len: usize) -> Option<Vec<u8>> {
-        let end = at.checked_add(len as u64)?;
-        if end > self.partition.length {
-            return None;
-        }
         let mut buf = vec![0u8; len];
-        self.device
-            .read_exact_at(self.partition.offset.checked_add(at)?, &mut buf)
-            .ok()?;
+        Region::new(
+            Arc::clone(self.device),
+            self.partition.offset,
+            self.partition.length,
+        )
+        .read_exact(at, &mut buf)
+        .ok()?;
         Some(buf)
     }
 
@@ -355,11 +353,7 @@ impl Reader<'_> {
         let Some(region) = self.read(offset, len) else {
             return Some(Issue::Unreadable);
         };
-        let split =
-            usize::try_from(sector_size.checked_mul(EXFAT_BOOT_REGION_SECTORS - 1)?).ok()?;
-        let (body, checksum_sector) = region.split_at_checked(split)?;
-        let computed = exfat_boot_checksum(body);
-        let stored = exfat_stored_checksum(checksum_sector);
+        let (stored, computed) = exfat_region_checksums(&region, sector_size)?;
         (stored != Some(computed)).then_some(Issue::ChecksumMismatch { stored, computed })
     }
 

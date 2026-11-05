@@ -31,23 +31,20 @@ use std::sync::Arc;
 use yisi_fs::FsKind;
 use yisi_fs::boot_write::fat32_fs_info;
 use yisi_fs::format::{
-    EXFAT_TYPE_BITMAP, EXFAT_TYPE_UPCASE, EXFAT_UPCASE_CHECKSUM, EXFAT_UPCASE_TABLE, FatWidth, Run,
+    ATTR_DIRECTORY, DIR_ENTRY_SIZE, EXFAT_FLAG_DIRTY, EXFAT_TYPE_BITMAP, EXFAT_TYPE_UPCASE,
+    EXFAT_UPCASE_CHECKSUM, EXFAT_UPCASE_TABLE, EXFAT_VOLUME_FLAGS_AT, FAT_DELETED, FatWidth, Run,
     exfat_set_checksum, fat_entry_raw, fat_entry_span, put_fat_entry,
 };
-use yisi_io::{BlockDevice, MAX_PLAN_BYTES, MAX_WRITES, Overlay, SectorWrite};
+use yisi_io::{BlockDevice, MAX_PLAN_BYTES, MAX_WRITES, Overlay, SectorWrite, merge_writes};
 
 use crate::check::{
     Control, EntryAt, EntryChange, FatLayout, Findings, IssueKind, Report, Stage, Totals,
     check_for_repair,
 };
 
-/// exFAT 引导扇区里卷标志的位置，第 1 位是「未正常卸下」。
-const EXFAT_FLAGS: u64 = 106;
-const EXFAT_FLAG_DIRTY: u8 = 0x02;
-/// 目录项的大小；FAT 已删除项的首字节。
-const ENTRY: u64 = 32;
-const FAT_DELETED: u8 = 0xE5;
-const ATTR_DIRECTORY: u8 = 0x10;
+/// 改的是扇区里的字节：位置换成 u64、标志换成那一个字节。
+const EXFAT_FLAGS: u64 = EXFAT_VOLUME_FLAGS_AT as u64;
+const ENTRY: u64 = DIR_ENTRY_SIZE as u64;
 
 /// 修哪一类问题。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -188,7 +185,9 @@ pub struct FatRating {
 
 #[derive(Debug, thiserror::Error)]
 pub enum FsFixError {
-    #[error("这个分区是 {0:?}，不是文件分配表（FAT）或扩展文件分配表（exFAT），这一版只修 FAT 与 exFAT")]
+    #[error(
+        "这个分区是 {0:?}，不是文件分配表（FAT）或扩展文件分配表（exFAT），这一版只修 FAT 与 exFAT"
+    )]
     NotFat(FsKind),
     #[error("主引导扇区不能用，检查是按备份做的：先修复引导扇区")]
     FromBackup,
@@ -1326,16 +1325,11 @@ impl<'a> Patch<'a> {
         match layout.width {
             FatWidth::Exfat => {
                 let flags = self.get(EXFAT_FLAGS)?;
-                self.set(EXFAT_FLAGS, flags & !EXFAT_FLAG_DIRTY)
+                self.set(EXFAT_FLAGS, flags & !(EXFAT_FLAG_DIRTY as u8))
             }
             FatWidth::Fat16 | FatWidth::Fat32 => {
-                let bit = if layout.width == FatWidth::Fat16 {
-                    0x8000
-                } else {
-                    0x0800_0000
-                };
                 let entry1 = self.fat_value(layout, 1)?;
-                self.fat(layout, 1, entry1 | bit)
+                self.fat(layout, 1, entry1 | layout.width.clean_shutdown_bit())
             }
             // FAT12 没有这个标志
             FatWidth::Fat12 => Err(FsFixError::NothingToFix(FsFix::Dirty)),
@@ -1344,24 +1338,15 @@ impl<'a> Patch<'a> {
 
     /// 改过的扇区按设备上的位置合并成连续的段；内容没变的扇区不写。
     fn writes(self) -> Vec<SectorWrite> {
-        let mut writes: Vec<SectorWrite> = Vec::new();
-        for (start, (before, after)) in self.sectors {
-            if before == after {
-                continue;
-            }
-            match writes.last_mut() {
-                Some(last) if last.offset + last.after.len() as u64 == start => {
-                    last.before.extend(before);
-                    last.after.extend(after);
-                }
-                _ => writes.push(SectorWrite {
-                    offset: start,
+        merge_writes(
+            self.sectors
+                .into_iter()
+                .map(|(offset, (before, after))| SectorWrite {
+                    offset,
                     before,
                     after,
                 }),
-            }
-        }
-        writes
+        )
     }
 }
 

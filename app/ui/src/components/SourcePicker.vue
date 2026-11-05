@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import DiskPicker from './DiskPicker.vue'
+import { useEngineCapabilities } from '../composables/useEngineCapabilities'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import type { DeviceTarget, SourceKind } from '../composables/useSourceSelection'
 import { pickDirectory, pickFile, toHostError, type HostError } from '../services/host'
 
 /**
  * 选来源：镜像文件、物理磁盘（整块盘或其中一个卷），给了 folderHint 时还可以选文件夹。状态由 useSourceSelection 提供。
+ * 引擎打不开物理磁盘的平台上只能选镜像文件（`useEngineCapabilities` 的 `canOpenDevices`）。
  * diskHint 显示在磁盘列表下方，imageHint、folderHint 显示在路径下方，各向导自己给
  */
 const props = defineProps<{ diskHint: string; imageHint?: string; folderHint?: string }>()
@@ -20,6 +22,22 @@ const { t } = useI18n()
 const { formatHostError } = useHostErrorText()
 
 const dialogError = ref<HostError | null>(null)
+const { canOpenDevices, load: loadEngine } = useEngineCapabilities()
+
+onMounted(() => {
+  void loadEngine()
+})
+
+// 打不开物理磁盘时，选着磁盘或文件夹的回到镜像文件
+watch(
+  canOpenDevices,
+  (canOpen) => {
+    if (!canOpen && sourceKind.value !== 'image') {
+      sourceKind.value = 'image'
+    }
+  },
+  { immediate: true },
+)
 
 /** 系统的选择文件对话框；用户取消时什么也不改 */
 async function browseImage() {
@@ -56,11 +74,11 @@ async function browseFolder() {
         <input v-model="sourceKind" type="radio" name="source-kind" value="image" />
         {{ t('source.image') }}
       </label>
-      <label class="source-picker__option">
+      <label v-if="canOpenDevices" class="source-picker__option">
         <input v-model="sourceKind" type="radio" name="source-kind" value="disk" />
         {{ t('source.disk') }}
       </label>
-      <label v-if="props.folderHint" class="source-picker__option">
+      <label v-if="props.folderHint && canOpenDevices" class="source-picker__option">
         <input v-model="sourceKind" type="radio" name="source-kind" value="folder" />
         {{ t('source.folder') }}
       </label>
@@ -77,14 +95,14 @@ async function browseFolder() {
         autocomplete="off"
         :placeholder="t('source.imagePathPlaceholder')"
       />
-      <button class="source-picker__button" type="button" @click="browseImage">
+      <button class="wizard__button wizard__button--secondary" type="button" @click="browseImage">
         {{ t('source.browse') }}
       </button>
     </div>
-    <p v-if="sourceKind === 'image' && imageHint" class="source-picker__hint">{{ imageHint }}</p>
+    <p v-if="sourceKind === 'image' && imageHint" class="wizard__note">{{ imageHint }}</p>
     <template v-else-if="sourceKind === 'disk'">
       <DiskPicker v-model="device" :disabled="false" />
-      <p class="source-picker__hint">{{ diskHint }}</p>
+      <p class="wizard__note">{{ diskHint }}</p>
     </template>
     <template v-else-if="sourceKind === 'folder'">
       <div class="source-picker__path">
@@ -98,14 +116,14 @@ async function browseFolder() {
           autocomplete="off"
           :placeholder="t('source.folderPathPlaceholder')"
         />
-        <button class="source-picker__button" type="button" @click="browseFolder">
+        <button class="wizard__button wizard__button--secondary" type="button" @click="browseFolder">
           {{ t('common.browseFolder') }}
         </button>
       </div>
-      <p class="source-picker__hint">{{ folderHint }}</p>
+      <p class="wizard__note">{{ folderHint }}</p>
     </template>
 
-    <p v-if="dialogError" class="source-picker__error" role="alert">
+    <p v-if="dialogError" class="wizard__error" role="alert">
       {{ formatHostError(dialogError) }}
     </p>
   </div>
@@ -159,27 +177,5 @@ async function browseFolder() {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-control);
   font: inherit;
-}
-
-.source-picker__button {
-  flex: none;
-  padding: var(--space-xs) var(--space-md);
-  color: var(--color-text);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-control);
-  font: inherit;
-  cursor: pointer;
-}
-
-.source-picker__hint {
-  margin: 0;
-  color: var(--color-text-muted);
-  font-size: var(--font-size-small);
-}
-
-.source-picker__error {
-  margin: 0;
-  color: var(--color-danger);
 }
 </style>

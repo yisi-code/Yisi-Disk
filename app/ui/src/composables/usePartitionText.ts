@@ -18,13 +18,22 @@ export function usePartitionText() {
     return te(key) ? t(key) : filesystem
   }
 
-  /** 分区的用途：常见的给本地化名称，否则显示类型（MBR 类型字节或 GPT 类型 GUID），都没有时为 - */
-  function roleName(partition: { role: string | null; typeId: string }): string {
+  /**
+   * 分区的用途：常见的给本地化名称，否则显示类型（MBR 类型字节或 GPT 类型 GUID），都没有时为 -。
+   * `withType` 时名称后面括上类型：`byte` 只括 MBR 的类型字节（GPT 的 GUID 太长），`always` 都括
+   */
+  function roleName(
+    partition: { role: string | null; typeId: string },
+    withType?: 'byte' | 'always',
+  ): string {
     const key = `partition.role.${partition.role ?? ''}`
-    if (partition.role !== null && te(key)) {
-      return t(key)
+    if (partition.role === null || !te(key)) {
+      return partition.typeId === '' ? '-' : partition.typeId
     }
-    return partition.typeId === '' ? '-' : partition.typeId
+    const showType =
+      partition.typeId !== '' &&
+      (withType === 'always' || (withType === 'byte' && partition.typeId.startsWith('0x')))
+    return showType ? t('partition.roleWithType', { role: t(key), type: partition.typeId }) : t(key)
   }
 
   /** 读分区表时发现的问题 */

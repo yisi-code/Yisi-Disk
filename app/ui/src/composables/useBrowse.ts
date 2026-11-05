@@ -158,6 +158,7 @@ export function useBrowse() {
     scanDone: job.done,
     scanTotal: job.total,
     scanPercent: job.percent,
+    scanProgressParams: job.progressParams,
     open,
     close,
     openRange,

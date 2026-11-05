@@ -35,9 +35,7 @@ pub const PARTIAL_SUFFIX: &str = ".part";
 
 /// `path` 写入中途用的名字：后面加 [`PARTIAL_SUFFIX`]。
 pub fn partial_path(path: &Path) -> PathBuf {
-    let mut partial = path.as_os_str().to_owned();
-    partial.push(PARTIAL_SUFFIX);
-    PathBuf::from(partial)
+    yisi_io::with_suffix(path, PARTIAL_SUFFIX)
 }
 
 /// 把写好的文件改成正式名字；`to` 已存在时不覆盖，答复 `AlreadyExists`（Windows 上 `fs::rename` 会覆盖）。

@@ -24,6 +24,17 @@ export const FEATURE_VIEWS: Record<FeatureKey, FeatureView | null> = {
   fsCheck: 'fsCheck',
 }
 
+/** 每个功能要用的引擎方法：引擎不支持（`engine.capabilities` 里没有）时这个功能不能进入 */
+export const FEATURE_METHODS: Record<FeatureKey, string> = {
+  undelete: 'repair.open',
+  carve: 'carve.start',
+  badSectors: 'disk.readScan',
+  image: 'image.create',
+  findPartitions: 'repair.search',
+  repairPartition: 'repair.diagnoseBoot',
+  fsCheck: 'fs.check',
+}
+
 /** 「全部功能」页的顺序：能用的在前 */
 export const ALL_FEATURES: FeatureKey[] = [
   'undelete',

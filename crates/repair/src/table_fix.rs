@@ -147,7 +147,9 @@ pub fn plan_table_fix(
                     .iter()
                     .any(|note| matches!(note, Note::PrimaryGptInvalid | Note::BackupGptInvalid))
             {
-                return Err(TableFixError::Rehearsal("仍有一份 GUID 分区表（GPT）是坏的"));
+                return Err(TableFixError::Rehearsal(
+                    "仍有一份 GUID 分区表（GPT）是坏的",
+                ));
             }
             keeps_partitions(&table.partitions, &after.partitions)?;
             Ok(TableFixPlan {

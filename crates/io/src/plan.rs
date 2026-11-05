@@ -53,6 +53,24 @@ impl SectorWrite {
     }
 }
 
+/// 按偏移排好的写入段：内容没变的段去掉，首尾相接的合并成一段。改写分区表与修文件系统生成计划时都按它收尾。
+pub fn merge_writes(writes: impl IntoIterator<Item = SectorWrite>) -> Vec<SectorWrite> {
+    let mut merged: Vec<SectorWrite> = Vec::new();
+    for write in writes {
+        if write.before == write.after {
+            continue;
+        }
+        match merged.last_mut() {
+            Some(last) if last.end() == Some(write.offset) => {
+                last.before.extend_from_slice(&write.before);
+                last.after.extend_from_slice(&write.after);
+            }
+            _ => merged.push(write),
+        }
+    }
+    merged
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WritePlan {

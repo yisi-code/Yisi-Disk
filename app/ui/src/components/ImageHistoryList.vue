@@ -5,7 +5,7 @@ import { formatBytes, formatDateTime } from '../utils/format'
 
 /**
  * 做过的镜像：位置、来源、现在的状态（做到哪了、上次保存的时间；被删除或移走时说明），
- * 以及「选用」「重新指定位置…」「从列表移除」。只有制作镜像页用
+ * 以及「选用」「在文件夹中显示」「重新指定位置…」「从列表移除」。只有制作镜像页用
  */
 defineProps<{
   items: ImageHistoryItem[]
@@ -15,6 +15,7 @@ defineProps<{
 }>()
 const emit = defineEmits<{
   use: [item: ImageHistoryItem]
+  reveal: [item: ImageHistoryItem]
   relocate: [item: ImageHistoryItem]
   remove: [item: ImageHistoryItem]
 }>()
@@ -83,6 +84,14 @@ function canRelocate(item: ImageHistoryItem): boolean {
           @click="emit('use', item)"
         >
           {{ t('diskImage.history.use') }}
+        </button>
+        <button
+          v-if="canUse(item)"
+          class="wizard__button wizard__button--secondary"
+          type="button"
+          @click="emit('reveal', item)"
+        >
+          {{ t('common.reveal') }}
         </button>
         <button
           v-if="canRelocate(item)"

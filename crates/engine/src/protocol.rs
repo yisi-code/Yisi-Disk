@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+/// 宿主核对改写分区表的计划时用（与分区表的读写同一份）。
+pub use yisi_part::boot_sector::{MBR_TABLE_OFFSET, SIGNATURE_OFFSET, has_signature};
 
 /// 输出目录里写入中途的文件名后缀（写完才改成正式名字）：宿主不打开以它结尾的文件。
 pub use yisi_carve::PARTIAL_SUFFIX;
@@ -301,9 +303,35 @@ pub struct ReadScanReport {
     /// 读不出的区段超过上限、没有全部列出。
     pub unreadable_ranges_truncated: bool,
     pub elapsed_ms: u64,
+    /// 扇区图：把设备按 `map_cell_bytes` 一格分开（最多 [`READ_MAP_CELLS`] 格），每格一个状态（[`ReadMapCell`]）。
+    #[serde(default)]
+    pub map: Vec<ReadMapCell>,
+    #[serde(default)]
+    pub map_cell_bytes: u64,
+    /// 细读过的 1 MiB 块数；细读到了上限（之后读不出的只按整块或 64 KiB 记）。
+    #[serde(default)]
+    pub fine_read_blocks: u64,
+    #[serde(default)]
+    pub fine_read_truncated: bool,
 }
 
 pub const MAX_UNREADABLE_RANGES: usize = 1000;
+/// 扇区图最多这么多格；设备小于这么多 MiB 时一格 1 MiB。
+pub const READ_MAP_CELLS: usize = 1024;
+
+/// 扇区图一格的状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReadMapCell {
+    /// 都读出了。
+    Good,
+    /// 都读出了，但有一次读超过 2 秒（盘在内部反复重试）。
+    Slow,
+    /// 有读不出的扇区。
+    Partly,
+    /// 整格都读不出。
+    Unreadable,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -433,6 +461,22 @@ pub struct FilePreview {
     pub image: Option<ImagePreview>,
     /// 内容是 JPEG 或 PNG 但解码失败时的原因。
     pub image_error: Option<String>,
+    /// NTFS 文件的备用数据流（有名字的 `$DATA`，最多 [`MAX_STREAM_PREVIEWS`] 个）；其他情况为空。
+    #[serde(default)]
+    pub streams: Vec<StreamPreview>,
+}
+
+/// 备用数据流每个给出开头这么多字节、最多列这么多个。
+pub const STREAM_HEAD_BYTES: usize = 1024;
+pub const MAX_STREAM_PREVIEWS: usize = 16;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamPreview {
+    pub name: String,
+    pub length: u64,
+    /// 开头最多 [`STREAM_HEAD_BYTES`] 字节，Base64 编码；读不出（加密、解不开的压缩）时为空。
+    pub head: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -816,7 +860,16 @@ pub struct JobImaging {
     pub bytes_per_second: Option<u64>,
     /// 只做复制这一轮。
     pub copy_only: bool,
+    /// 到现在为止连续读错了几次（读成功一次就回到 0）。
+    #[serde(default)]
+    pub errors_in_a_row: u32,
+    /// 连续读错到了要提示检查连接的次数（[`ERRORS_IN_A_ROW_NOTICE`]）。
+    #[serde(default)]
+    pub check_connection: bool,
 }
+
+/// 制作镜像时连续读错这么多次，提示检查数据线与供电。
+pub const ERRORS_IN_A_ROW_NOTICE: u32 = 16;
 
 /// 制作镜像的结果。字节数只算本次的范围（`device_*` 是整个源的）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1119,7 +1172,8 @@ pub enum BootFix {
     PrimaryFromBackup,
     /// 主引导扇区正常、备份坏了：把主引导扇区复制到它记的备份位置。
     BackupFromPrimary,
-    /// 主备都坏了（或两处都认不出）：按分区里的结构推算出引导扇区，主引导扇区与备份都写（FAT32、exFAT、NTFS）。
+    /// 主备都坏了（或两处都认不出）：按分区里的结构推算出引导扇区，主引导扇区与备份都写（FAT32、exFAT、NTFS；
+    /// FAT12/16 没有备份，只写主引导扇区）。
     /// 卷序列号推不出来，换一个新的。
     Rebuild,
 }

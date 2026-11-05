@@ -1,8 +1,6 @@
 //! 深度恢复任务：把 `yisi-carve` 的进度、找到的文件转成任务通知，找到的文件分批发出。
 
-use std::cell::{Cell, RefCell};
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 use yisi_carve::{CarveControl, CarveOptions, RecoveredFile, Sink, carve};
 use yisi_engine::protocol::{
@@ -11,12 +9,8 @@ use yisi_engine::protocol::{
 use yisi_formats::Registry;
 use yisi_io::BlockDevice;
 
-use crate::job::{JobContext, JobOutcome};
+use crate::job::{Batcher, JobContext, JobOutcome};
 use crate::runtime::error_chain;
-
-/// 一批找到的文件最多这么多个，或距上一批这么久，就发出去。
-const FOUND_BATCH: usize = 100;
-const FOUND_INTERVAL: Duration = Duration::from_millis(250);
 
 pub fn file_types(registry: &Registry) -> FileTypeList {
     let types = registry
@@ -69,8 +63,7 @@ pub fn run(
 ) -> Result<JobOutcome, String> {
     let control = Reporter {
         context,
-        pending: RefCell::new(Vec::new()),
-        last_flush: Cell::new(Instant::now()),
+        batch: Batcher::new(),
     };
     let options = CarveOptions {
         block_size: device.sector_size(),
@@ -115,17 +108,11 @@ pub fn run(
 
 struct Reporter<'a> {
     context: &'a JobContext,
-    pending: RefCell<Vec<FoundFile>>,
-    last_flush: Cell<Instant>,
+    batch: Batcher<FoundFile>,
 }
 
 impl Reporter<'_> {
-    fn flush(&self) {
-        let files = std::mem::take(&mut *self.pending.borrow_mut());
-        self.last_flush.set(Instant::now());
-        if files.is_empty() {
-            return;
-        }
+    fn send(&self, files: Vec<FoundFile>) {
         self.context.notify(
             FOUND,
             JobFound {
@@ -135,12 +122,8 @@ impl Reporter<'_> {
         );
     }
 
-    fn flush_if_due(&self) {
-        let due = self.pending.borrow().len() >= FOUND_BATCH
-            || self.last_flush.get().elapsed() >= FOUND_INTERVAL;
-        if due {
-            self.flush();
-        }
+    fn flush(&self) {
+        self.batch.flush(|files| self.send(files));
     }
 }
 
@@ -153,16 +136,16 @@ impl CarveControl for Reporter<'_> {
 
     fn progress(&self, done: u64, total: u64) {
         self.context.progress(done, total);
-        self.flush_if_due();
+        self.batch.tick(|files| self.send(files));
     }
 
     fn found(&self, file: &RecoveredFile) {
-        self.pending.borrow_mut().push(FoundFile {
+        let found = FoundFile {
             name: file.name.clone(),
             extension: file.extension.clone(),
             offset: file.offset,
             length: file.length,
-        });
-        self.flush_if_due();
+        };
+        self.batch.push(found, |files| self.send(files));
     }
 }

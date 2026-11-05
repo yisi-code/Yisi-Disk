@@ -17,9 +17,9 @@ import { useSourceSelection } from '../composables/useSourceSelection'
 import { useWritePlan } from '../composables/useWritePlan'
 import { useWritePlanText } from '../composables/useWritePlanText'
 import {
+  canWritePlan,
   isDeviceKind,
   pickSaveFile,
-  sameTarget,
   saveFsCheckReport,
   toHostError,
   type ClusterRun,
@@ -34,7 +34,7 @@ import {
   type PartitionInfo,
   type WriteRecord,
 } from '../services/host'
-import { formatBytes, formatDateTime, formatHex, formatSeconds } from '../utils/format'
+import { formatBytes, formatCount, formatDateTime, formatHex, formatSeconds, formatStamp } from '../utils/format'
 
 const STEPS = ['source', 'partition', 'check', 'result'] as const
 type WizardStep = (typeof STEPS)[number]
@@ -116,19 +116,13 @@ const canRecheck = computed(
 const sourceText = computed(() => sourceName(browse.target.value ?? fsCheck.target.value))
 
 /** 镜像文件与整块磁盘可以写入计划修复；卷上的偏移不是盘上的偏移 */
-const canWrite = computed(() => {
-  const kind = fsCheck.target.value?.kind
-  return kind === 'image' || kind === 'disk'
-})
+const canWrite = computed(() => canWritePlan(fsCheck.target.value))
 /** 结果页上正在确认一份写入计划 */
 const isConfirming = computed(() => step.value === 'result' && writePlan.plan.value !== null)
 /** 源的扇区大小，确认页按它换算扇区号；读分区表时得到 */
 const sectorSize = computed(() => browse.opened.value?.sectorSize ?? 512)
 /** 刚执行的那次写入（同一个源时才显示结果；回滚在写盘记录里） */
-const lastRecord = computed(() => {
-  const record = writePlan.lastRecord.value
-  return record !== null && sameTarget(record.target, fsCheck.target.value) ? record : null
-})
+const lastRecord = writePlan.lastRecordFor(() => fsCheck.target.value)
 /** 这个源的写盘记录（宿主按认盘标识筛好）：换了页面再回来也能回滚以前的修复 */
 const targetRecords = computed(() => writePlan.records.value)
 
@@ -360,10 +354,6 @@ function partitionNote(partition: PartitionInfo): string {
   return isCheckable(partition) ? '' : t('fsCheck.partition.note.other')
 }
 
-function number(value: number | null): string {
-  return value === null ? '' : value.toLocaleString(locale.value)
-}
-
 
 /** `$Bitmap`、`$UpCase` 是 exFAT 的系统结构，换成本地化的名字 */
 function displayPath(path: string | null): string {
@@ -386,16 +376,16 @@ function issueParams(issue: FsIssue): Record<string, string> {
       return formatBytes(value)
     }
     const digits = HEX_DIGITS[issue.kind]
-    return digits === undefined ? number(value) : formatHex(value, digits)
+    return digits === undefined ? formatCount(value, locale.value) : formatHex(value, digits)
   }
   const areaKey = `fsCheck.areas.${issue.area ?? ''}`
   return {
     path: displayPath(issue.path),
     otherPath: displayPath(issue.otherPath),
-    cluster: number(issue.cluster),
-    count: number(issue.count),
+    cluster: formatCount(issue.cluster, locale.value),
+    count: formatCount(issue.count, locale.value),
     bytes: issue.count === null ? '' : formatBytes(issue.count),
-    offset: number(issue.offset),
+    offset: formatCount(issue.offset, locale.value),
     expected: valueText(issue.expected),
     actual: valueText(issue.actual),
     area: issue.area !== null && te(areaKey) ? t(areaKey) : (issue.area ?? ''),
@@ -435,13 +425,9 @@ function issueFacts(issue: FsIssue): { label: string; value: string }[] {
   return facts
 }
 
-function pad(value: number): string {
-  return String(value).padStart(2, '0')
-}
-
 function defaultFileName(): string {
   const date = finishedAt.value ?? new Date()
-  const stamp = `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`
+  const stamp = formatStamp(date)
   return `fs-check-${checkedPartition.value?.number ?? 0}-${stamp}.txt`
 }
 
@@ -453,9 +439,9 @@ function summaryText(): string {
   return t('fsCheck.result.volumeValue', {
     filesystem: filesystemName(current.filesystem),
     clusterSize: formatBytes(current.clusterSize),
-    clusters: number(current.clusterCount),
-    files: number(current.files),
-    directories: number(current.directories),
+    clusters: formatCount(current.clusterCount, locale.value),
+    files: formatCount(current.files, locale.value),
+    directories: formatCount(current.directories, locale.value),
   })
 }
 
@@ -468,9 +454,9 @@ function totalsText(): string {
     return t('fsCheck.result.clean')
   }
   return t('fsCheck.result.totalsValue', {
-    dataLoss: number(current.totals.dataLoss),
-    structure: number(current.totals.structure),
-    minor: number(current.totals.minor),
+    dataLoss: formatCount(current.totals.dataLoss, locale.value),
+    structure: formatCount(current.totals.structure, locale.value),
+    minor: formatCount(current.totals.minor, locale.value),
   })
 }
 
@@ -481,7 +467,7 @@ function checksText(keys: string[]): string {
 }
 
 function groupTitle(severity: FsIssueSeverity, total: number): string {
-  return t('fsCheck.result.groupTitle', { name: t(`fsCheck.severity.${severity}`), count: number(total) })
+  return t('fsCheck.result.groupTitle', { name: t(`fsCheck.severity.${severity}`), count: formatCount(total, locale.value) })
 }
 
 /** 导出的问题清单：概况、各组问题（标题、说明、位置、以后的修法）、说明 */
@@ -527,7 +513,7 @@ function buildReportText(): string {
     })
   }
   if (current.omittedIssues > 0) {
-    lines.push('', t('fsCheck.result.omitted', { count: number(current.omittedIssues) }, current.omittedIssues))
+    lines.push('', t('fsCheck.result.omitted', { count: formatCount(current.omittedIssues, locale.value) }, current.omittedIssues))
   }
   lines.push('', t('fsCheck.notes.readOnly'), t('fsCheck.notes.imageFirst'))
   return `${lines.join('\n')}\n`
@@ -774,7 +760,7 @@ function buildReportText(): string {
             </ul>
           </section>
           <p v-if="report.omittedIssues > 0" class="wizard__note">
-            {{ t('fsCheck.result.omitted', { count: number(report.omittedIssues) }, report.omittedIssues) }}
+            {{ t('fsCheck.result.omitted', { count: formatCount(report.omittedIssues, locale) }, report.omittedIssues) }}
           </p>
         </div>
 

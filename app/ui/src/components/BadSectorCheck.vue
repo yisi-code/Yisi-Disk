@@ -5,6 +5,7 @@ import SourcePicker from './SourcePicker.vue'
 import UnreadableRanges from './UnreadableRanges.vue'
 import JobControls from './JobControls.vue'
 import ReadHealthHint from './ReadHealthHint.vue'
+import ReadMap from './ReadMap.vue'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { useReadScan } from '../composables/useReadScan'
 import { useSourceSelection } from '../composables/useSourceSelection'
@@ -23,8 +24,7 @@ const {
   targetKind,
   done,
   total,
-  percent,
-  bytesPerSecond,
+  progressParams,
   report,
   failure,
   isUnresponsive,
@@ -55,12 +55,7 @@ const statusText = computed(() => {
         : t('common.startingEngine')
     case 'running':
     case 'cancelling':
-      return t('badSectors.status.running', {
-        done: formatBytes(done.value),
-        total: formatBytes(total.value),
-        percent: percent.value,
-        rate: bytesPerSecond.value === null ? '-' : formatBytes(bytesPerSecond.value),
-      })
+      return t('badSectors.status.running', progressParams.value)
     case 'completed':
       return t('badSectors.status.completed')
     case 'failed':
@@ -192,6 +187,22 @@ function handleCancel() {
             }}
           </dd>
         </dl>
+
+        <ReadMap
+          v-if="completedReport.map.length > 0"
+          :cells="completedReport.map"
+          :cell-bytes="completedReport.mapCellBytes"
+          :size="completedReport.size"
+        />
+        <p v-if="completedReport.fineReadBlocks > 0" class="wizard__note">
+          {{
+            t(
+              completedReport.fineReadTruncated ? 'badSectors.result.fineTruncated' : 'badSectors.result.fine',
+              { count: completedReport.fineReadBlocks },
+              completedReport.fineReadBlocks,
+            )
+          }}
+        </p>
 
         <UnreadableRanges v-if="listedRanges.length > 0" :ranges="listedRanges" />
         <p v-if="completedReport.unreadable.length > MAX_LISTED_RANGES" class="wizard__note">

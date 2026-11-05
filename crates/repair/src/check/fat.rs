@@ -2,9 +2,12 @@
 //! 目录树（长文件名的校验和与序号、`.` 与 `..`）、每个文件的 FAT 链、丢失簇。依据微软公开的 FAT 规范。
 
 use yisi_fs::FsKind;
+use yisi_fs::boot_write::fat32_fs_info_ok;
 use yisi_fs::bpb::{self, FatBpb, Problem};
 use yisi_fs::format::{
-    FatWidth, LfnPart, fat_first_cluster, fat_media_ok, lfn_name, lfn_ordered, lfn_part,
+    ATTR_DIRECTORY, ATTR_LONG_NAME as ATTR_LFN, ATTR_VOLUME_ID, DIR_ENTRY_SIZE as ENTRY,
+    FAT_DELETED as DELETED, LfnPart, fat_first_cluster, fat_media_ok, lfn_name, lfn_ordered,
+    lfn_part,
 };
 use yisi_fs::{fat_short_checksum as short_checksum, fat_short_display};
 use yisi_part::bytes::le32;
@@ -18,11 +21,6 @@ use crate::check::{
     Stage, Summary, check_backup,
 };
 
-const ENTRY: usize = 32;
-const ATTR_LFN: u8 = 0x0F;
-const ATTR_VOLUME_ID: u8 = 0x08;
-const ATTR_DIRECTORY: u8 = 0x10;
-const DELETED: u8 = 0xE5;
 /// 比对两份 FAT 时每次读这么多。
 const COMPARE_BLOCK: u64 = 1 << 20;
 
@@ -176,10 +174,7 @@ fn check_fs_info(ctx: &mut Ctx, geometry: &FatBpb) -> Option<()> {
     if !bad.is_empty() {
         return None;
     }
-    if le32(&sector, 0) != Some(0x4161_5252)
-        || le32(&sector, 484) != Some(0x6141_7272)
-        || le32(&sector, 508) != Some(0xAA55_0000)
-    {
+    if !fat32_fs_info_ok(&sector) {
         ctx.issues
             .push(Issue::new(IssueKind::FsInfoInvalid).area(Area::FsInfo));
         ctx.findings.fs_info_invalid = true;
@@ -274,12 +269,7 @@ fn scan_table(ctx: &mut Ctx, volume: &mut Volume, geometry: &FatBpb) -> Option<(
         );
     }
     if let Some(entry1) = fat.raw(ctx, 1) {
-        // FAT16 第 15 位、FAT32 第 27 位为 1 表示正常卸下；FAT16 第 14 位、FAT32 第 26 位为 0 表示出过读写错误
-        let (clean, no_error) = match fat.width {
-            FatWidth::Fat16 => (0x8000, 0x4000),
-            FatWidth::Fat32 => (0x0800_0000, 0x0400_0000),
-            FatWidth::Fat12 | FatWidth::Exfat => (0, 0),
-        };
+        let (clean, no_error) = (fat.width.clean_shutdown_bit(), fat.width.no_error_bit());
         if clean != 0 && entry1 & clean == 0 {
             ctx.issues
                 .push(Issue::new(IssueKind::VolumeDirty).area(Area::Fat));

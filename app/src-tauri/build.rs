@@ -31,6 +31,7 @@ fn main() {
         "image_history_list",
         "image_history_remove",
         "image_history_relocate",
+        "image_reveal",
         "boot_diagnose",
         "write_plan_boot_sector",
         "write_plan_partition_table",

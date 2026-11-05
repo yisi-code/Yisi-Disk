@@ -49,6 +49,16 @@ pub fn le64(bytes: &[u8], at: usize) -> Option<u64> {
         .map(u64::from_le_bytes)
 }
 
+/// UTF-16 小端的字节换成码元（名字、卷标）；末尾多出的半个码元不要。
+pub fn le16_units(bytes: &[u8]) -> Vec<u16> {
+    bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|unit| u16::from_le_bytes(*unit))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

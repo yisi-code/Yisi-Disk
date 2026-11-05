@@ -5,8 +5,8 @@ import { formatBytes } from '../utils/format'
 
 /** 写入计划与写盘记录的文字：做了什么、结果怎样。确认页、写盘记录、执行后的提示共用 */
 export function useWritePlanText() {
-  const { t, te } = useI18n()
-  const { filesystemName, sourceName } = usePartitionText()
+  const { t } = useI18n()
+  const { filesystemName, sourceName, roleName } = usePartitionText()
 
   /** 「分区 N：用备份修复主引导扇区」「把找到的分区写回分区表…」；回滚时套上「回滚（…）」 */
   function writeActionText(summary: PlanSummary): string {
@@ -45,10 +45,7 @@ export function useWritePlanText() {
 
   /** 改完之后的分区类型：常见的给出用途，后面附类型字节或 GUID */
   function tableTypeText(table: PartitionTableDetail): string {
-    const key = `partition.role.${table.role ?? ''}`
-    return table.role !== null && te(key)
-      ? t('writePlan.typeValue', { role: t(key), type: table.typeId })
-      : table.typeId
+    return roleName(table, 'always')
   }
 
   /**

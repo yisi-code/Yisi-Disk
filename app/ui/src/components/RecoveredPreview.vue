@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import FilePreviewView from './FilePreviewView.vue'
 import { useDelayedPreview } from '../composables/useDelayedPreview'
 import { useHostErrorText } from '../composables/useHostErrorText'
+import { usePositionText } from '../composables/usePositionText'
 import {
   previewCarveRange,
   previewRecoveredFile,
@@ -35,7 +36,8 @@ const emit = defineEmits<{
   reveal: [file: FoundFile]
 }>()
 
-const { t, locale } = useI18n()
+const { t } = useI18n()
+const { bytePosition } = usePositionText()
 const { formatHostError } = useHostErrorText()
 const titleId = useId()
 
@@ -54,16 +56,11 @@ const extent = computed(() => {
   if (file === null) {
     return null
   }
-  return { start: locate(file.offset), end: locate(file.offset + Math.max(file.length, 1) - 1) }
-})
-
-function locate(offset: number) {
   return {
-    position: formatBytes(offset),
-    offset: offset.toLocaleString(locale.value),
-    sector: Math.floor(offset / NAME_SECTOR_SIZE),
+    start: bytePosition(file.offset, NAME_SECTOR_SIZE),
+    end: bytePosition(file.offset + Math.max(file.length, 1) - 1, NAME_SECTOR_SIZE),
   }
-}
+})
 </script>
 
 <template>
@@ -87,15 +84,15 @@ function locate(offset: number) {
           </dd>
           <template v-if="extent">
             <dt>{{ t('carve.preview.start') }}</dt>
-            <dd>{{ t('common.positionValue', extent.start) }}</dd>
+            <dd>{{ extent.start }}</dd>
             <dt>{{ t('carve.preview.end') }}</dt>
-            <dd>{{ t('common.positionValue', extent.end) }}</dd>
+            <dd>{{ extent.end }}</dd>
           </template>
         </dl>
 
         <div class="detail-card__actions">
           <button
-            class="recovered-preview__button"
+            class="wizard__button"
             type="button"
             :disabled="jobId === null || !canOpen"
             @click="emit('open', file)"
@@ -103,7 +100,7 @@ function locate(offset: number) {
             {{ t('carve.preview.open') }}
           </button>
           <button
-            class="recovered-preview__button recovered-preview__button--secondary"
+            class="wizard__button wizard__button--secondary"
             type="button"
             :disabled="jobId === null || !canSaveAs"
             @click="emit('saveAs', file)"
@@ -111,7 +108,7 @@ function locate(offset: number) {
             {{ t('carve.preview.saveAs') }}
           </button>
           <button
-            class="recovered-preview__button recovered-preview__button--secondary"
+            class="wizard__button wizard__button--secondary"
             type="button"
             :disabled="jobId === null || !isSaved"
             @click="emit('reveal', file)"
@@ -119,7 +116,7 @@ function locate(offset: number) {
             {{ t('common.reveal') }}
           </button>
         </div>
-        <p v-if="actionError" class="recovered-preview__error" role="alert">
+        <p v-if="actionError" class="wizard__error" role="alert">
           {{ formatHostError(actionError) }}
         </p>
 
@@ -131,7 +128,7 @@ function locate(offset: number) {
         />
       </template>
     </div>
-    <p v-if="file !== null && !isSaved" class="recovered-preview__note">
+    <p v-if="file !== null && !isSaved" class="wizard__note">
       {{ t('carve.preview.notSavedHint') }}
     </p>
   </section>
@@ -139,8 +136,7 @@ function locate(offset: number) {
 
 <style scoped>
 
-.recovered-preview__placeholder,
-.recovered-preview__note {
+.recovered-preview__placeholder {
   margin: 0;
   color: var(--color-text-muted);
   font-size: var(--font-size-small);
@@ -148,31 +144,5 @@ function locate(offset: number) {
 
 .recovered-preview__selectable {
   user-select: text;
-}
-
-.recovered-preview__button {
-  padding: var(--space-xs) var(--space-md);
-  color: var(--color-on-accent);
-  background: var(--color-accent);
-  border: 1px solid var(--color-accent);
-  border-radius: var(--radius-control);
-  font: inherit;
-  cursor: pointer;
-}
-
-.recovered-preview__button--secondary {
-  color: var(--color-text);
-  background: var(--color-surface);
-  border-color: var(--color-border);
-}
-
-.recovered-preview__button:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.recovered-preview__error {
-  margin: 0;
-  color: var(--color-danger);
 }
 </style>

@@ -5,6 +5,7 @@ import FilePreviewView from './FilePreviewView.vue'
 import type { TreeItem } from './FsBrowser.vue'
 import { useDelayedPreview } from '../composables/useDelayedPreview'
 import { useHostErrorText } from '../composables/useHostErrorText'
+import { usePositionText } from '../composables/usePositionText'
 import { previewFsFile, type HostError } from '../services/host'
 import { formatBytes } from '../utils/format'
 
@@ -26,6 +27,7 @@ const props = defineProps<{
 const emit = defineEmits<{ open: [item: TreeItem] }>()
 
 const { t, locale } = useI18n()
+const { bytePosition } = usePositionText()
 const titleId = useId()
 const { formatHostError } = useHostErrorText()
 
@@ -59,11 +61,7 @@ const position = computed(() => {
   if (value === null || value === undefined) {
     return null
   }
-  return t('common.positionValue', {
-    position: formatBytes(value),
-    offset: value.toLocaleString(locale.value),
-    sector: Math.floor(value / props.sectorSize),
-  })
+  return bytePosition(value, props.sectorSize)
 })
 </script>
 
@@ -71,13 +69,13 @@ const position = computed(() => {
   <section class="detail-card" :aria-labelledby="titleId">
     <h3 :id="titleId" class="detail-card__title">{{ t('partitionFiles.details.title') }}</h3>
     <div class="detail-card__card">
-      <p v-if="item === null" class="fs-entry-details__note">{{ t('partitionFiles.details.placeholder') }}</p>
+      <p v-if="item === null" class="wizard__note">{{ t('partitionFiles.details.placeholder') }}</p>
       <template v-else>
         <dl class="detail-card__list">
           <dt>{{ t('partitionFiles.details.name') }}</dt>
-          <dd class="fs-entry-details__selectable">
+          <dd class="wizard__path-text">
             {{ item.entry.name }}
-            <span v-if="item.entry.nameUncertain" class="fs-entry-details__note">
+            <span v-if="item.entry.nameUncertain" class="wizard__note">
               {{ t('partitionFiles.browser.nameUncertain') }}
             </span>
           </dd>
@@ -86,7 +84,7 @@ const position = computed(() => {
             <dd>{{ item.entry.shortName }}</dd>
           </template>
           <dt>{{ t('partitionFiles.details.path') }}</dt>
-          <dd class="fs-entry-details__selectable">/{{ item.path.join('/') }}</dd>
+          <dd class="wizard__path-text">/{{ item.path.join('/') }}</dd>
           <dt>{{ t('partitionFiles.details.state') }}</dt>
           <dd>{{ stateText }}</dd>
           <template v-if="item.entry.unsupported">
@@ -133,9 +131,9 @@ const position = computed(() => {
               {{ t('partitionFiles.details.open') }}
             </button>
           </div>
-          <p class="fs-entry-details__note">{{ t('partitionFiles.details.openHint') }}</p>
-          <p v-if="actionNote" class="fs-entry-details__note">{{ actionNote }}</p>
-          <p v-if="actionError" class="fs-entry-details__error" role="alert">
+          <p class="wizard__note">{{ t('partitionFiles.details.openHint') }}</p>
+          <p v-if="actionNote" class="wizard__note">{{ actionNote }}</p>
+          <p v-if="actionError" class="wizard__error" role="alert">
             {{ formatHostError(actionError) }}
           </p>
           <FilePreviewView
@@ -151,22 +149,3 @@ const position = computed(() => {
     <slot name="footer"></slot>
   </section>
 </template>
-
-<style scoped>
-
-.fs-entry-details__note {
-  margin: 0;
-  color: var(--color-text-muted);
-  font-size: var(--font-size-small);
-}
-
-.fs-entry-details__error {
-  margin: 0;
-  color: var(--color-danger);
-}
-
-.fs-entry-details__selectable {
-  user-select: text;
-}
-
-</style>

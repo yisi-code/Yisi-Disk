@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { usePartitionText } from '../composables/usePartitionText'
+import { usePositionText } from '../composables/usePositionText'
 import { useWritePlanText } from '../composables/useWritePlanText'
 import type { HostError, PlanView } from '../services/host'
 import { formatBytes } from '../utils/format'
@@ -22,6 +23,7 @@ const emit = defineEmits<{ confirm: []; cancel: [] }>()
 
 const { t, locale } = useI18n()
 const { formatHostError } = useHostErrorText()
+const { sectorPosition } = usePositionText()
 const { filesystemName, bootFieldName, bootFieldValue } = usePartitionText()
 const { writeActionText, writeTargetText, tableTypeText } = useWritePlanText()
 
@@ -133,10 +135,7 @@ onMounted(() => {
 })
 
 function position(offset: number): string {
-  return t('writePlan.position', {
-    sector: Math.floor(offset / props.sectorSize).toLocaleString(locale.value),
-    offset: offset.toLocaleString(locale.value),
-  })
+  return sectorPosition(offset, props.sectorSize)
 }
 </script>
 

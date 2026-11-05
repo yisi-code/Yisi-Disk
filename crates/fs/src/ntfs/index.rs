@@ -42,7 +42,7 @@ pub(crate) fn read(ntfs: &Ntfs, number: u64, record: &Record) -> Result<(Vec<Key
     else {
         return Ok((keys, false));
     };
-    if !block_size.is_power_of_two() || !(512..=65536).contains(&block_size) {
+    if !crate::bpb::ntfs_size_ok(block_size) {
         return Err(FsError::Invalid("目录索引块的大小不合法"));
     }
     let bitmap = match ntfs.value(number, record, BITMAP, &i30)? {

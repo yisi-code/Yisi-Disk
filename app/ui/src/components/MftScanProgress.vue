@@ -3,7 +3,6 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import ReadHealthHint from './ReadHealthHint.vue'
 import type { useBrowse } from '../composables/useBrowse'
-import { formatBytes } from '../utils/format'
 import { isDeviceKind } from '../services/host'
 
 /**
@@ -17,11 +16,7 @@ const { t } = useI18n()
 
 const statusText = computed(() =>
   props.browse.scanTotal.value > 0
-    ? t('partitionFiles.scan.running', {
-        done: formatBytes(props.browse.scanDone.value),
-        total: formatBytes(props.browse.scanTotal.value),
-        percent: props.browse.scanPercent.value,
-      })
+    ? t('partitionFiles.scan.running', props.browse.scanProgressParams.value)
     : t('partitionFiles.scan.starting'),
 )
 </script>

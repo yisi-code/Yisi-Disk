@@ -2,12 +2,14 @@
 //! 每个文件的簇（FAT 链或连续存放）与分配位图是否一致、丢失簇。依据微软公开的 exFAT 规范。
 
 use yisi_fs::FsKind;
-use yisi_fs::boot::{exfat_boot_checksum, exfat_stored_checksum};
+use yisi_fs::boot::exfat_region_checksum_ok;
 use yisi_fs::bpb::{self, ExfatBpb as Geometry, Problem};
 use yisi_fs::format::{
-    EXFAT_IN_USE, EXFAT_TYPE_BITMAP, EXFAT_TYPE_FILE, EXFAT_TYPE_NAME, EXFAT_TYPE_STREAM,
-    EXFAT_TYPE_UPCASE, EXFAT_UPCASE_CHECKSUM, EXFAT_UPCASE_TABLE, ExfatSet, SetProblem,
-    exfat_entry_set, exfat_set_checksum, exfat_table_checksum,
+    ATTR_DIRECTORY, DIR_ENTRY_SIZE as ENTRY, EXFAT_FLAG_DIRTY as FLAG_DIRTY,
+    EXFAT_FLAG_MEDIA_FAILURE as FLAG_MEDIA_FAILURE, EXFAT_IN_USE, EXFAT_TYPE_BITMAP,
+    EXFAT_TYPE_FILE, EXFAT_TYPE_NAME, EXFAT_TYPE_STREAM, EXFAT_TYPE_UPCASE, EXFAT_UPCASE_CHECKSUM,
+    EXFAT_UPCASE_TABLE, ExfatSet, SetProblem, exfat_entry_set, exfat_set_checksum,
+    exfat_table_checksum,
 };
 use yisi_part::bytes::{le32, le64};
 
@@ -21,11 +23,6 @@ use crate::check::{
     Summary, UpcaseFix, check_backup,
 };
 
-const ENTRY: usize = 32;
-const ATTR_DIRECTORY: u16 = 0x10;
-/// VolumeFlags：第 1 位未正常卸下，第 2 位出过介质故障（第 0 位用哪份 FAT 见 `ExfatBpb::use_second_fat`）。
-const FLAG_DIRTY: u16 = 0x02;
-const FLAG_MEDIA_FAILURE: u16 = 0x04;
 /// 大写表最多读这么多（规范里的完整大写表不到 6 KiB）。
 const MAX_UPCASE_BYTES: u64 = 1 << 20;
 /// 一组目录项最多 1 个文件项加 18 个次项。
@@ -35,18 +32,6 @@ const MAX_SET_ENTRIES: usize = 19;
 fn parse(sector: &[u8]) -> (Option<Geometry>, Vec<Problem>) {
     let checked = bpb::check_exfat(sector);
     (checked.geometry, checked.problems)
-}
-
-/// 第 12 个扇区里每 4 个字节都应等于前 11 个扇区的校验和（[`exfat_boot_checksum`]）。
-fn checksum_matches(region: &[u8], bytes_per_sector: usize) -> bool {
-    let covered = region.get(..11 * bytes_per_sector);
-    let stored = region.get(11 * bytes_per_sector..12 * bytes_per_sector);
-    match (covered, stored) {
-        (Some(covered), Some(stored)) => {
-            exfat_stored_checksum(stored) == Some(exfat_boot_checksum(covered))
-        }
-        _ => false,
-    }
 }
 
 /// 检查一个 exFAT 卷。`region` 是认出来的引导区（12 个扇区，`from_backup` 时来自备份）。被取消时返回 `None`。
@@ -66,7 +51,7 @@ pub(crate) fn check(ctx: &mut Ctx, region: &[u8], from_backup: bool) -> Option<S
     let cluster_size = geometry.cluster_size();
     let length = ctx.disk.length();
 
-    if !checksum_matches(region, bps as usize) {
+    if !exfat_region_checksum_ok(region, bps) {
         ctx.issues
             .push(Issue::new(IssueKind::BootChecksum).area(area));
     }
@@ -77,7 +62,7 @@ pub(crate) fn check(ctx: &mut Ctx, region: &[u8], from_backup: bool) -> Option<S
         if ctx
             .read(at, &mut backup, Area::BackupBoot, None)
             .is_some_and(|bad| bad.is_empty())
-            && !checksum_matches(&backup, bps as usize)
+            && !exfat_region_checksum_ok(&backup, bps)
         {
             ctx.issues
                 .push(Issue::new(IssueKind::BootChecksum).area(Area::BackupBoot));
@@ -629,7 +614,7 @@ impl ExfatChecker {
                 },
             });
         }
-        let directory = set.attributes & ATTR_DIRECTORY != 0;
+        let directory = set.attributes & u16::from(ATTR_DIRECTORY) != 0;
         let entry = EntryRef {
             at: EntryAt::Exfat(at),
             size: Some(set.data_length),
@@ -643,7 +628,7 @@ impl ExfatChecker {
                 needed: Some(needed),
             }
         };
-        if set.attributes & ATTR_DIRECTORY != 0 {
+        if set.attributes & u16::from(ATTR_DIRECTORY) != 0 {
             self.volume.directories += 1;
             if set.first_cluster == 0 && needed == 0 {
                 return Some(());

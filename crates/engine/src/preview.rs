@@ -6,7 +6,9 @@ use std::io::{self, Cursor, Read};
 use std::path::Path;
 
 use image::{ImageFormat, ImageReader, Limits};
-use yisi_engine::protocol::{FilePreview, ImagePreview, PREVIEW_HEAD_BYTES, THUMBNAIL_EDGE};
+use yisi_engine::protocol::{
+    FilePreview, ImagePreview, PREVIEW_HEAD_BYTES, STREAM_HEAD_BYTES, StreamPreview, THUMBNAIL_EDGE,
+};
 use yisi_io::{BlockDevice, Window};
 
 /// 超过这个大小的图片不解码，只给十六进制视图。
@@ -82,7 +84,26 @@ pub fn preview_from(mut file: impl Read, length: u64) -> io::Result<FilePreview>
         head: base64(&head),
         image,
         image_error,
+        streams: Vec::new(),
     })
+}
+
+/// 一个备用数据流的名字、长度与开头几个字节；`content` 读不出时为 `None`，开头就空着。
+pub fn stream_preview(name: String, length: u64, content: Option<impl Read>) -> StreamPreview {
+    let mut head = Vec::new();
+    if let Some(content) = content
+        && let Err(error) = content
+            .take(STREAM_HEAD_BYTES as u64)
+            .read_to_end(&mut head)
+    {
+        tracing::warn!(%name, %error, "备用数据流读不出");
+        head.clear();
+    }
+    StreamPreview {
+        name,
+        length,
+        head: base64(&head),
+    }
 }
 
 /// 按内容判断，只认 JPEG 和 PNG。

@@ -10,8 +10,9 @@ use std::{io, ptr};
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
 use windows_sys::Win32::System::Ioctl::{
-    DISK_GEOMETRY, GET_LENGTH_INFORMATION, IOCTL_DISK_GET_DRIVE_GEOMETRY,
-    IOCTL_DISK_GET_LENGTH_INFO, IOCTL_STORAGE_GET_DEVICE_NUMBER, STORAGE_DEVICE_NUMBER,
+    DISK_GEOMETRY, FSCTL_ALLOW_EXTENDED_DASD_IO, GET_LENGTH_INFORMATION,
+    IOCTL_DISK_GET_DRIVE_GEOMETRY, IOCTL_DISK_GET_LENGTH_INFO, IOCTL_STORAGE_GET_DEVICE_NUMBER,
+    STORAGE_DEVICE_NUMBER,
 };
 
 use crate::device::validate_sector_size;
@@ -44,6 +45,12 @@ impl WindowsDisk {
                 path: path.to_path_buf(),
                 source,
             })?;
+        // 卷（`\\.\C:`）：文件系统自己记的大小可能比分区短（NTFS 的备份引导扇区在分区最后一个扇区、在卷之外），
+        // 不说一声的话读到那里会出错、被当成坏区。这个句柄（连同复制给引擎的）因此可以读满整个分区；
+        // 不支持时照常只读文件系统的范围。
+        if crate::volume_letter(&path.to_string_lossy()).is_some() {
+            let _ = crate::device_io_control(&file, FSCTL_ALLOW_EXTENDED_DASD_IO, &[], &mut []);
+        }
         let size = query_size(file.as_raw_handle()).map_err(|source| IoError::Query {
             what: "容量",
             source,

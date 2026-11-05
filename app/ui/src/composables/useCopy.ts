@@ -40,6 +40,7 @@ export function useCopy() {
     total: job.total,
     stage: job.stage,
     percent: job.percent,
+    progressParams: job.progressParams,
     bytesPerSecond: job.bytesPerSecond,
     copied,
     failures,

@@ -1,6 +1,23 @@
 //! 坏区图：把设备从头到尾分成首尾相接的区段，每段一个读取状态。纯文本，与镜像放在一起，中断后据此续做。
 
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+
+use crate::device::validate_sector_size;
+
+/// 镜像的坏区图放在镜像旁边：镜像的文件名后面加 `.map`。制作镜像、查看镜像、打开镜像时取扇区大小都按这一条。
+pub fn map_path(image: &Path) -> PathBuf {
+    crate::with_suffix(image, ".map")
+}
+
+/// 坏区图里记的源的扇区大小（`sector` 那一行），只找这一行、不解析区段；没有或不合法时为 `None`。
+/// 镜像文件本身不记扇区大小，4 KiB 扇区的盘做出的镜像要按它打开。
+pub fn recorded_sector_size(text: &str) -> Option<u32> {
+    text.lines()
+        .find_map(|line| line.trim_end_matches('\r').strip_prefix("sector "))
+        .and_then(|value| value.parse::<u32>().ok())
+        .and_then(|value| validate_sector_size(value).ok())
+}
 
 /// 坏区图文本的格式版本。2 起多记做镜像时的分区表（`part` 行）；1 没有这些行，照样能读。
 const VERSION: u32 = 2;
