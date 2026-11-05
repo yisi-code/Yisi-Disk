@@ -48,7 +48,7 @@ pub fn run(
                 context.stage_progress(STAGE_SCAN_MFT, done, total);
                 !context.is_cancelled()
             })
-            .map_err(|error| format!("扫描 MFT 失败：{}", error_chain(&error)))?;
+            .map_err(|error| format!("扫描主文件表（MFT）失败：{}", error_chain(&error)))?;
         if scanned.is_none() {
             return Ok(JobOutcome::Cancelled);
         }

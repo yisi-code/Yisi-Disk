@@ -64,6 +64,8 @@ pub enum PartitionKind {
 pub enum Note {
     /// 主 GPT 损坏（签名、校验和或表项校验和不对），改用磁盘末尾的备份 GPT。
     PrimaryGptInvalid,
+    /// 主 GPT 完好，备份 GPT（主表头记的位置）读不出或校验和不对；分区照主表列出。
+    BackupGptInvalid,
     /// 有保护性 MBR，但主备 GPT 都读不出，按 MBR 列出。
     GptUnreadable,
     /// 分区表按 4096 字节扇区写成，与设备报告的扇区大小不同（常见于 USB 硬盘盒换过的盘或镜像）。

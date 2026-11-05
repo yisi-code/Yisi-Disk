@@ -232,7 +232,7 @@ pub fn create(
         .and_then(|()| {
             store.image.set_len(size).map_err(|error| {
                 format!(
-                    "无法为镜像预留 {size} 字节（输出盘空间不足，或者文件系统不支持这么大的文件，例如 FAT32 单个文件最大 4 GiB）：{error}"
+                    "无法为镜像预留 {size} 字节：输出盘空间不足，或者它的文件系统不支持这么大的文件，例如 32 位文件分配表（FAT32）单个文件最大 4 GiB。原因：{error}"
                 )
             })
         })
@@ -352,7 +352,7 @@ fn plan_scope(
     }
     if !sparse {
         return Err(invalid(
-            "这个镜像只能整盘做：它不是稀疏文件（输出盘不支持稀疏文件，例如 FAT32、exFAT，或者镜像是旧版本建的）".to_owned(),
+            "这个镜像只能整盘做：它不是稀疏文件，可能是输出盘不支持稀疏文件，例如 32 位文件分配表（FAT32）、扩展文件分配表（exFAT），也可能是旧版本建的".to_owned(),
         ));
     }
     ranges.extend(

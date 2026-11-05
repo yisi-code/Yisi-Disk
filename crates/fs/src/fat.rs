@@ -37,10 +37,10 @@ pub(crate) struct Fat {
 impl Fat {
     /// 按引导扇区 `boot`（主的或备份的）打开。
     pub fn open(region: Region, boot: &[u8]) -> Result<Self, FsError> {
-        let geometry = parse_boot(boot).ok_or(FsError::Invalid("FAT 引导扇区的参数不自洽"))?;
+        let geometry = parse_boot(boot).ok_or(FsError::Invalid("文件分配表（FAT）引导扇区的参数不自洽"))?;
         let heap_offset = geometry.heap_offset();
         if heap_offset >= region.length() {
-            return Err(FsError::Invalid("FAT 的数据区在分区之外"));
+            return Err(FsError::Invalid("文件分配表（FAT）的数据区在分区之外"));
         }
         // 分区被截短时，簇区只算到分区末尾
         let count = u32::try_from(geometry.usable_clusters(region.length()))
@@ -65,7 +65,7 @@ impl Fat {
             width: geometry.width(),
         };
         if kind == FsKind::Fat32 && !clusters.is_valid(geometry.root_cluster) {
-            return Err(FsError::Invalid("FAT32 根目录的簇号不合法"));
+            return Err(FsError::Invalid("32 位文件分配表（FAT32）根目录的簇号不合法"));
         }
         let mut fat = Self {
             kind,

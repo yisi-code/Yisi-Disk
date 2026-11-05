@@ -109,9 +109,9 @@ pub fn rebuild(
             let mut found = found.into_iter();
             match (found.next(), found.next()) {
                 (Some(rebuilt), None) => Ok(rebuilt),
-                (None, _) => Err(RebuildError::NotFound("认不出是 FAT32、exFAT 还是 NTFS")),
+                (None, _) => Err(RebuildError::NotFound("认不出是 32 位文件分配表（FAT32）、扩展文件分配表（exFAT）还是新技术文件系统（NTFS）")),
                 (Some(_), Some(_)) => Err(RebuildError::Ambiguous(
-                    "FAT32、exFAT、NTFS 中不止一种推得出",
+                    "32 位文件分配表（FAT32）、扩展文件分配表（exFAT）、新技术文件系统（NTFS）中不止一种推得出",
                 )),
             }
         }
@@ -251,10 +251,10 @@ impl<'a> Source<'a> {
             .scan(sector, MAX_RESERVED * sector, sector, 12, |_, bytes| {
                 head(bytes).is_some()
             })?
-            .ok_or(RebuildError::NotFound("找不到 FAT 表头"))?;
+            .ok_or(RebuildError::NotFound("找不到文件分配表（FAT）表头"))?;
         let reserved = reserved_at / sector;
         let first = self.read_sector(reserved)?;
-        let media = head(&first).ok_or(RebuildError::NotFound("找不到 FAT 表头"))?;
+        let media = head(&first).ok_or(RebuildError::NotFound("找不到文件分配表（FAT）表头"))?;
         let total = self.sectors;
         let room = total
             .checked_sub(reserved)
@@ -282,9 +282,9 @@ impl<'a> Source<'a> {
             }
         }
         let fat_sectors = match sizes.as_slice() {
-            [] => return Err(RebuildError::NotFound("找不到与第一份内容相同的第二份 FAT")),
+            [] => return Err(RebuildError::NotFound("找不到与第一份内容相同的第二份文件分配表（FAT）")),
             [size] => *size,
-            _ => return Err(RebuildError::Ambiguous("第二份 FAT 可能在不止一处")),
+            _ => return Err(RebuildError::Ambiguous("第二份文件分配表（FAT）可能在不止一处")),
         };
         let data_start = reserved + 2 * fat_sectors;
         let capacity = fat_sectors * entries_per_sector;
@@ -292,10 +292,10 @@ impl<'a> Source<'a> {
         let spc = (0..=7u32)
             .map(|shift| 1u64 << shift)
             .find(|&spc| (total - data_start) / spc + 2 <= capacity)
-            .ok_or(RebuildError::Ambiguous("FAT 大小与分区大小对不上"))?;
+            .ok_or(RebuildError::Ambiguous("文件分配表（FAT）大小与分区大小对不上"))?;
         let clusters = (total - data_start) / spc;
         if !(FAT32_MIN_CLUSTERS..=FAT32_MAX_CLUSTERS).contains(&clusters) {
-            return Err(RebuildError::NotFound("簇数不在 FAT32 的范围里"));
+            return Err(RebuildError::NotFound("簇数不在 32 位文件分配表（FAT32）的范围里"));
         }
 
         // 根目录在 2 号簇：核对每个子目录的首簇处是 `.` 目录项，顺便取卷标
@@ -396,7 +396,7 @@ impl<'a> Source<'a> {
             .scan(region_bytes, EXFAT_FAT_SEARCH, sector, 8, |_, bytes| {
                 bytes.get(..8) == Some(FAT_HEAD.as_slice())
             })?
-            .ok_or(RebuildError::NotFound("找不到 exFAT 的 FAT 表头"))?;
+            .ok_or(RebuildError::NotFound("找不到扩展文件分配表（exFAT）的文件分配表（FAT）表头"))?;
         let fat_offset = fat_at / sector;
 
         // 根目录：开头几项里有分配位图项与大写表项，之前只有卷标、卷 GUID 这类系统项
@@ -415,9 +415,9 @@ impl<'a> Source<'a> {
                     None => false,
                 },
             )?
-            .ok_or(RebuildError::NotFound("找不到 exFAT 的根目录"))?;
+            .ok_or(RebuildError::NotFound("找不到扩展文件分配表（exFAT）的根目录"))?;
         let (Some(bitmap), Some(upcase), label) = entries else {
-            return Err(RebuildError::NotFound("找不到 exFAT 的根目录"));
+            return Err(RebuildError::NotFound("找不到扩展文件分配表（exFAT）的根目录"));
         };
         let root_sector = root_at / sector;
         let bitmap_first = u64::from(le32(&bitmap, 20).unwrap_or(0));
@@ -557,10 +557,10 @@ impl<'a> Source<'a> {
             mirror_lcn.is_some() || hits.len() >= 2
         })?;
         let Some(&(at, mft_lcn, mirror_hint, record_size)) = hits.first() else {
-            return Err(RebuildError::NotFound("找不到 $MFT 的第一条记录"));
+            return Err(RebuildError::NotFound("找不到主文件表（$MFT）的第一条记录"));
         };
         if !record_size.is_power_of_two() || !(1024..=4096).contains(&record_size) {
-            return Err(RebuildError::NotFound("$MFT 记录头里的记录大小不合法"));
+            return Err(RebuildError::NotFound("主文件表（$MFT）记录头里的记录大小不合法"));
         }
         let plausible = |size: u64| size.is_power_of_two() && size >= sector && size <= 2 << 20;
         let copy_ok = |cluster_size: u64, lcn: u64| -> bool {
@@ -586,7 +586,7 @@ impl<'a> Source<'a> {
                 let other = hits
                     .get(1)
                     .map(|hit| hit.0)
-                    .ok_or(RebuildError::NotFound("找不到 $MFTMirr"))?;
+                    .ok_or(RebuildError::NotFound("找不到主文件表副本（$MFTMirr）"))?;
                 for (mft_at, mirror_at) in [(at, other), (other, at)] {
                     if mft_lcn == 0 || mft_at % mft_lcn != 0 {
                         continue;
@@ -602,7 +602,7 @@ impl<'a> Source<'a> {
         let (cluster_size, mirror_lcn) = match solutions.as_slice() {
             [] => {
                 return Err(RebuildError::NotFound(
-                    "$MFT 与 $MFTMirr 的位置算不出簇大小",
+                    "主文件表（$MFT）与主文件表副本（$MFTMirr）的位置算不出簇大小",
                 ));
             }
             [solution] => *solution,

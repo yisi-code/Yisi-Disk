@@ -743,6 +743,8 @@ export interface BootSectorDetail {
 export type PartitionTableFix =
   | { kind: 'addLost'; offset: number; length: number }
   | { kind: 'setType'; partition: number }
+  /** 主 GPT 或备份 GPT 坏了：用完好的那一份修好它（方向由引擎定） */
+  | { kind: 'repairGpt' }
 
 /** 改写分区表的细节：改完之后这个分区的编号、位置与类型（MBR 为 0x07 这样的类型字节，GPT 为类型 GUID） */
 export interface PartitionTableDetail {
@@ -755,6 +757,8 @@ export interface PartitionTableDetail {
   typeId: string
   /** 改完之后的用途，界面按 partition.role.* 显示 */
   role: string | null
+  /** 修 GPT 的方向；此时上面的分区编号、位置为 0 */
+  gptRepair: 'primaryFromBackup' | 'backupFromPrimary' | null
 }
 
 /** NTFS `$MFT` 与 `$MFTMirr` 互相修复的方向 */

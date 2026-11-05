@@ -13,7 +13,7 @@ mod role;
 pub mod samples;
 mod table;
 
-pub use edit::{EditError, GPT_DATA_NAME, TableEdit, plan_table_edit};
+pub use edit::{EditError, GPT_DATA_NAME, GptRepair, TableEdit, plan_gpt_repair, plan_table_edit};
 pub use guid::Guid;
 pub use role::{BASIC_DATA, Role};
 pub use table::{Note, PartError, Partition, PartitionKind, PartitionTable, Scheme, read_table};

@@ -207,7 +207,7 @@ impl Scan {
     ) -> Result<Option<Self>, FsError> {
         let record_count = ntfs.record_count;
         if record_count > MAX_RECORDS {
-            return Err(FsError::Invalid("MFT 记录超过 1600 万条，暂不支持扫描"));
+            return Err(FsError::Invalid("主文件表（MFT）记录超过 1600 万条，暂不支持扫描"));
         }
         let record_size = ntfs.record_size;
         let bitmap_record = ntfs

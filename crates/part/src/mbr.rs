@@ -63,6 +63,21 @@ pub(crate) fn put_entry(
     Some(())
 }
 
+/// 第 `slot` 个表项的起始扇区与扇区数（空的表项为 `None`）。
+pub(crate) fn entry_start_and_sectors(sector: &[u8], slot: usize) -> Option<(u32, u32)> {
+    entry(sector, slot).map(|entry| (entry.start, entry.sectors))
+}
+
+/// 把 `from` 的第 `slot` 个表项原样（16 字节）抄到 `to` 的第 `into` 个表项。
+pub(crate) fn copy_entry(from: &[u8], slot: usize, to: &mut [u8], into: usize) -> Option<()> {
+    let source = TABLE_OFFSET.checked_add(slot.checked_mul(ENTRY_SIZE)?)?;
+    let target = TABLE_OFFSET.checked_add(into.checked_mul(ENTRY_SIZE)?)?;
+    let bytes: [u8; ENTRY_SIZE] = from.get(source..source + ENTRY_SIZE)?.try_into().ok()?;
+    to.get_mut(target..target + ENTRY_SIZE)?
+        .copy_from_slice(&bytes);
+    Some(())
+}
+
 /// 改第 `slot` 个表项的类型字节。
 pub(crate) fn set_type(sector: &mut [u8], slot: usize, type_id: u8) -> Option<()> {
     let at = TABLE_OFFSET
@@ -118,7 +133,66 @@ pub(crate) fn read(
     Ok(partitions)
 }
 
-/// 沿 EBR 链读出逻辑分区。链断了（读不出、没有签名、成环、过长）时停在断点，记一条说明。
+/// 扩展分区链上的一个 EBR：位置（扇区）与内容。
+pub(crate) struct Ebr {
+    pub lba: u64,
+    pub sector: Vec<u8>,
+}
+
+impl Ebr {
+    /// 这个 EBR 描述的逻辑分区（第 0 项），起点相对这个 EBR。
+    pub fn logical(&self) -> Option<Entry> {
+        entry(&self.sector, 0)
+    }
+
+    /// 指向下一个 EBR 的第 1 项（类型是扩展分区），起点相对扩展分区开头。
+    pub fn next(&self) -> Option<Entry> {
+        entry(&self.sector, 1).filter(|next| EXTENDED.contains(&next.type_id))
+    }
+}
+
+/// 第 0 扇区里的扩展分区表项（只认第一个，多个扩展分区本身就不合规范）。
+pub(crate) fn extended_entry(first: &[u8]) -> Option<Entry> {
+    primary_entries(first)
+        .into_iter()
+        .find(|entry| EXTENDED.contains(&entry.type_id))
+}
+
+/// 从扩展分区开头起沿 EBR 链读出各个 EBR。链断了（读不出、没有签名、成环、过长）时停在断点，第二项为 `true`。
+pub(crate) fn ebr_chain(
+    device: &dyn BlockDevice,
+    extended_start: u64,
+    sector_size: u64,
+) -> (Vec<Ebr>, bool) {
+    let mut chain = Vec::new();
+    let mut lba = extended_start;
+    let mut visited = BTreeSet::new();
+    loop {
+        let mut sector = vec![0u8; sector_size as usize];
+        let readable = lba
+            .checked_mul(sector_size)
+            .is_some_and(|offset| device.read_exact_at(offset, &mut sector).is_ok());
+        if !visited.insert(lba)
+            || chain.len() as u32 >= MAX_LOGICAL
+            || !readable
+            || le16(&sector, SIGNATURE_OFFSET) != Some(BOOT_SIGNATURE)
+        {
+            return (chain, true);
+        }
+        let ebr = Ebr { lba, sector };
+        let next = ebr.next();
+        chain.push(ebr);
+        match next {
+            Some(next) => match extended_start.checked_add(u64::from(next.start)) {
+                Some(next_lba) => lba = next_lba,
+                None => return (chain, true),
+            },
+            None => return (chain, false),
+        }
+    }
+}
+
+/// 沿 EBR 链读出逻辑分区。链断了时只列断点之前的，记一条说明。
 fn read_logical(
     device: &dyn BlockDevice,
     extended_start: u64,
@@ -126,41 +200,19 @@ fn read_logical(
     partitions: &mut Vec<Partition>,
     notes: &mut Vec<Note>,
 ) {
-    let mut ebr = extended_start;
-    let mut visited = BTreeSet::new();
+    let (chain, broken) = ebr_chain(device, extended_start, sector_size);
     let mut number = 5u32;
-    let mut sector = vec![0u8; sector_size as usize];
-    loop {
-        let readable = ebr
-            .checked_mul(sector_size)
-            .is_some_and(|offset| device.read_exact_at(offset, &mut sector).is_ok());
-        if !visited.insert(ebr)
-            || number > 4 + MAX_LOGICAL
-            || !readable
-            || le16(&sector, SIGNATURE_OFFSET) != Some(BOOT_SIGNATURE)
-        {
-            notes.push(Note::ExtendedChainBroken);
-            return;
-        }
-        if let Some(logical) = entry(&sector, 0)
-            && let Some(start) = ebr.checked_add(u64::from(logical.start))
+    for ebr in &chain {
+        if let Some(logical) = ebr.logical()
+            && let Some(start) = ebr.lba.checked_add(u64::from(logical.start))
             && let Some(partition) = partition(number, start, logical, sector_size, true)
         {
             partitions.push(partition);
             number += 1;
         }
-        match entry(&sector, 1) {
-            Some(next) if EXTENDED.contains(&next.type_id) => {
-                match extended_start.checked_add(u64::from(next.start)) {
-                    Some(next_ebr) => ebr = next_ebr,
-                    None => {
-                        notes.push(Note::ExtendedChainBroken);
-                        return;
-                    }
-                }
-            }
-            _ => return,
-        }
+    }
+    if broken {
+        notes.push(Note::ExtendedChainBroken);
     }
 }
 

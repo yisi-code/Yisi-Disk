@@ -34,8 +34,14 @@ const MAX_RECORDS: usize = 200;
 const MAX_BOOT_SECTOR_BYTES: u64 = 12 * 4096;
 
 /// 改写分区表只写设备开头与末尾这么大的范围：MBR 在第 0 扇区，GPT 的主表在开头、备份表在末尾
-/// （128 项 × 128 字节的表项区，按 512 或 4096 字节扇区都在 64 KiB 之内）。
+/// （128 项 × 128 字节的表项区，按 512 或 4096 字节扇区都在 64 KiB 之内）。逻辑分区的 EBR 在盘中间，另按
+/// [`is_ebr_write`] 核对。
 const TABLE_AREA: u64 = 64 * 1024;
+/// 一份改写分区表的计划最多写这么多个 EBR（加逻辑分区：前一个 EBR 与新 EBR）。
+const MAX_EBR_WRITES: usize = 2;
+/// MBR 扇区里分区表项区的起点与签名的位置。
+const MBR_TABLE_AT: usize = 446;
+const MBR_SIGNATURE_AT: usize = 510;
 
 /// `$MFT` 与 `$MFTMirr` 互修最多改 4 条记录，每条最大 4 KiB。
 const MAX_MFT_RECORDS: usize = 4;
@@ -89,6 +95,9 @@ pub struct PartitionTableDetail {
     pub length: u64,
     pub type_id: String,
     pub role: Option<String>,
+    /// 修 GPT 的方向（primaryFromBackup、backupFromPrimary）；此时上面的分区编号、位置为 0。
+    #[serde(default)]
+    pub gpt_repair: Option<String>,
 }
 
 /// `$MFT` 与 `$MFTMirr` 互修的细节，同引擎答复的 [`MftPlan`]（不含要写的内容）。
@@ -277,6 +286,7 @@ impl WritePlans {
             length: planned.length,
             type_id: planned.type_id,
             role: planned.role,
+            gpt_repair: planned.gpt_repair,
         };
         self.propose(
             planned.plan,
@@ -726,11 +736,14 @@ fn check_table_plan(planned: &PartitionTablePlan, expected: &Writable) -> Result
         let end = offset.saturating_add(length);
         end <= TABLE_AREA || offset >= size.saturating_sub(TABLE_AREA)
     };
-    if plan.writes.len() > 2
-        || plan
-            .writes
-            .iter()
-            .any(|write| !in_table_area(write.offset, write.len()))
+    let sector = u64::from(plan.device.sector_size);
+    let (in_area, elsewhere): (Vec<_>, Vec<_>) = plan
+        .writes
+        .iter()
+        .partition(|write| in_table_area(write.offset, write.len()));
+    if in_area.len() > 2
+        || elsewhere.len() > MAX_EBR_WRITES
+        || elsewhere.iter().any(|write| !is_ebr_write(write, sector))
     {
         return Err(HostError::new(
             "planMismatch",
@@ -738,6 +751,17 @@ fn check_table_plan(planned: &PartitionTablePlan, expected: &Writable) -> Result
         ));
     }
     Ok(())
+}
+
+/// 盘中间的一段写入是改一个 EBR：正好一个扇区、写后以 `55 AA` 结尾，只改动第 446 到 511 字节（分区表项与签名），
+/// 之前的引导代码区与 512 字节之后（大扇区的盘）都不变。
+fn is_ebr_write(write: &yisi_engine::protocol::SectorWrite, sector: u64) -> bool {
+    let same =
+        |range: std::ops::Range<usize>| write.before.get(range.clone()) == write.after.get(range);
+    write.len() == sector
+        && write.after.get(MBR_SIGNATURE_AT..MBR_SIGNATURE_AT + 2) == Some([0x55, 0xAA].as_slice())
+        && same(0..MBR_TABLE_AT)
+        && same(MBR_SIGNATURE_AT + 2..write.after.len())
 }
 
 /// `$MFT` 与 `$MFTMirr` 互修的计划最多 4 段、每段不超过一条记录的最大长度，都落在请求的分区里

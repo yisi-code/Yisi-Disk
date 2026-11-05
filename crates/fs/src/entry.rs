@@ -29,8 +29,8 @@ pub enum Unsupported {
 impl std::fmt::Display for Unsupported {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            Self::Compressed => "NTFS 压缩",
-            Self::Encrypted => "EFS 加密",
+            Self::Compressed => "新技术文件系统（NTFS）压缩",
+            Self::Encrypted => "加密文件系统（EFS）加密",
             Self::SystemCompressed => "系统压缩（WOF）",
             Self::Reparse => "重分析点（链接或云端占位文件）",
         })

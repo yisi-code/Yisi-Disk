@@ -188,15 +188,15 @@ pub struct FatRating {
 
 #[derive(Debug, thiserror::Error)]
 pub enum FsFixError {
-    #[error("这个分区不是 FAT 或 exFAT（{0:?}），这一版只修 FAT 与 exFAT")]
+    #[error("这个分区是 {0:?}，不是文件分配表（FAT）或扩展文件分配表（exFAT），这一版只修 FAT 与 exFAT")]
     NotFat(FsKind),
     #[error("主引导扇区不能用，检查是按备份做的：先修复引导扇区")]
     FromBackup,
     #[error("卷太大，检查没有跟踪每个簇归谁，修不了丢失簇、分配位图、过长的链与交叉链接")]
     NotTracked,
-    #[error("两份 FAT 本来就不一致：先统一两份 FAT，重新检查后再改 FAT")]
+    #[error("两份文件分配表（FAT）本来就不一致：先统一两份 FAT，重新检查后再改 FAT")]
     FatCopiesDiffer,
-    #[error("统一两份 FAT 要单独做：修完重新检查，再修别的")]
+    #[error("统一两份文件分配表（FAT）要单独做：修完重新检查，再修别的")]
     FatCopiesAlone,
     #[error("没有可以这样修的问题：{0:?}")]
     NothingToFix(FsFix),

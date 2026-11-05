@@ -43,7 +43,9 @@ const partitionDetail = computed(() => {
   if (mft !== null) {
     return { partition: mft.partition, filesystem: 'ntfs' }
   }
-  return detail.value ?? tableDetail.value ?? fsFixDetail.value
+  // 修 GPT 不针对某个分区
+  const table = tableDetail.value?.fix.kind === 'repairGpt' ? null : tableDetail.value
+  return detail.value ?? table ?? fsFixDetail.value
 })
 const totalBytes = computed(() => props.plan.writes.reduce((sum, range) => sum + range.length, 0))
 /** 重建引导扇区时推算出的内容；回滚时不再列出 */
@@ -96,6 +98,9 @@ const whatText = computed(() => {
   if (table !== null) {
     if (props.plan.kind === 'rollback') {
       return t('writePlan.tableRollbackValue')
+    }
+    if (table.fix.kind === 'repairGpt') {
+      return t(`writePlan.repairGptValue.${table.gptRepair ?? 'primaryFromBackup'}`)
     }
     return table.fix.kind === 'addLost'
       ? t('writePlan.addLostValue', {

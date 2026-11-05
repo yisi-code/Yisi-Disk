@@ -509,6 +509,7 @@ pub(crate) fn fs_key(kind: FsKind) -> &'static str {
 pub(crate) fn note_key(note: &Note) -> String {
     match note {
         Note::PrimaryGptInvalid => "primaryGptInvalid",
+        Note::BackupGptInvalid => "backupGptInvalid",
         Note::GptUnreadable => "gptUnreadable",
         Note::SectorSizeMismatch { .. } => "sectorSizeMismatch",
         Note::ExtendedChainBroken => "extendedChainBroken",
