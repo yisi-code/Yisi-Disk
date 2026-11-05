@@ -901,7 +901,12 @@ export default {
   partitionFiles: {
     browse: {
       partition: '分区',
-      deletedOnly: '只看已删除的文件',
+      view: {
+        label: '列出哪些文件',
+        all: '全部',
+        live: '未删除',
+        deleted: '已删除',
+      },
       liveHint:
         '读的是磁盘上此刻的内容。分区正在使用时，刚写入的文件可能还没落盘；要找回删除的文件，请先停止往这块盘写东西。',
       stateHint:
@@ -1049,7 +1054,8 @@ export default {
       truncated: '找到的分区太多，只列出前 {count} 个。',
       stopped: '搜索停在 {position}（{percent}%），只列出这之前找到的分区。',
       deep: '深度搜索',
-      deepHint: '没找到要找的分区？深度搜索从头到尾读一遍整块盘再找，大盘要几个小时。',
+      label: '搜索结果',
+      deepHint: '没找到要找的分区？点右上角的「深度搜索」，从头到尾读一遍整块盘再找，大盘要几个小时。',
       readOnly:
         '搜索与浏览只读，不改动这块盘。先把需要的文件另存到另一块盘；之后可以把「丢失」的分区写回分区表。',
       opening: '正在打开浏览…',

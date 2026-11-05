@@ -137,6 +137,15 @@ const statusText = computed(() => {
   return ''
 })
 
+/** 快速搜索的结果页（不在确认写回时）：顶部给出「深度搜索」 */
+const canSearchDeeper = computed(
+  () =>
+    step.value === 'results' &&
+    !isConfirming.value &&
+    !search.isBusy.value &&
+    search.summary.value?.mode === 'quick',
+)
+
 const summaryText = computed(() => {
   const summary = search.summary.value
   if (summary === null) {
@@ -350,6 +359,16 @@ async function openSelected() {
       <div class="wizard__stepbar">
         <WizardSteps :steps="STEPS" :current="step" label-prefix="findPartitions.steps" />
         <div class="wizard__nav">
+          <!-- 快速搜索的结果页：没找到要的分区时从这里改用深度搜索 -->
+          <button
+            v-if="canSearchDeeper"
+            class="wizard__button wizard__button--secondary"
+            type="button"
+            :disabled="target === null || isPartitionBusy"
+            @click="searchDeep"
+          >
+            {{ t('findPartitions.results.deep') }}
+          </button>
           <button
             v-if="stepIndex > 0"
             class="wizard__button wizard__button--secondary"
@@ -467,19 +486,12 @@ async function openSelected() {
         <dl class="wizard__details">
           <dt>{{ t('common.source') }}</dt>
           <dd class="wizard__path-text">{{ sourceText }}</dd>
+          <dt>{{ t('findPartitions.results.label') }}</dt>
+          <dd>
+            {{ summaryText }}
+            <span v-if="canSearchDeeper" class="wizard__hint">{{ t('findPartitions.results.deepHint') }}</span>
+          </dd>
         </dl>
-        <p class="wizard__note">{{ summaryText }}</p>
-        <div v-if="search.summary.value?.mode === 'quick'" class="find-partitions__deep">
-          <button
-            class="wizard__button wizard__button--secondary"
-            type="button"
-            :disabled="target === null || isPartitionBusy"
-            @click="searchDeep"
-          >
-            {{ t('findPartitions.results.deep') }}
-          </button>
-          <span class="wizard__hint">{{ t('findPartitions.results.deepHint') }}</span>
-        </div>
         <p class="wizard__hint wizard__hint--warning">{{ t('findPartitions.results.readOnly') }}</p>
         <div v-if="lastRecord" class="find-partitions__outcome">
           <p :class="lastRecord.outcome.done ? 'wizard__note' : 'wizard__error'" role="status">
@@ -716,7 +728,6 @@ async function openSelected() {
 }
 
 .find-partitions__outcome,
-.find-partitions__deep,
 .find-partitions__write {
   display: flex;
   flex-wrap: wrap;

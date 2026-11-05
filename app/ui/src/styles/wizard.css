@@ -27,6 +27,41 @@
   gap: var(--space-md);
 }
 
+/* 带步骤条的向导：返回与标题、步骤条与按钮排成同一行，省出一行高度给下面的内容；表单只是包着它们，
+   其余部分（各步的面板）在下面占满宽度。铺满窗口时面板那一行分到剩下的高度 */
+.wizard:has(> .wizard__form > .wizard__stepbar) {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-content: start;
+  row-gap: var(--space-md);
+}
+
+.wizard--fill:has(> .wizard__form > .wizard__stepbar) {
+  grid-template-rows: auto 1fr;
+  align-content: stretch;
+}
+
+.wizard:has(> .wizard__form > .wizard__stepbar) > .wizard__header {
+  grid-row: 1;
+  grid-column: 1;
+  padding: 0 var(--space-lg) var(--space-sm) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.wizard:has(> .wizard__form > .wizard__stepbar) > .wizard__form {
+  display: contents;
+}
+
+.wizard:has(> .wizard__form > .wizard__stepbar) > .wizard__form > * {
+  grid-column: 1 / -1;
+}
+
+.wizard:has(> .wizard__form > .wizard__stepbar) > .wizard__form > .wizard__stepbar {
+  grid-row: 1;
+  grid-column: 2;
+  margin-top: 0;
+}
+
 .wizard__title {
   margin: 0;
   font-size: var(--font-size-section-title);
