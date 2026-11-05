@@ -899,13 +899,22 @@ export default {
     folderInvalid: '请填写带盘符的完整路径，例如 D:/照片/2024（网络路径不行）。',
   },
   partitionFiles: {
+    attributes: {
+      hidden: '隐藏',
+      system: '系统',
+      detail: '{label}：资源管理器默认不显示。{note}',
+      known: {
+        recycleBin: '这是 Windows 的回收站：删到回收站的文件在里面，按用户分在子文件夹里，文件名改成了 $R 开头，原来的名字与位置记在同名的 $I 文件里。',
+        systemVolumeInformation: '这是 Windows 存放系统还原点、卷影副本与搜索索引的文件夹，一般用不着恢复。',
+      },
+    },
     browse: {
       partition: '分区',
-      view: {
-        label: '列出哪些文件',
-        all: '全部',
+      filter: {
+        label: '显示',
         live: '未删除',
         deleted: '已删除',
+        hidden: '隐藏与系统文件',
       },
       liveHint:
         '读的是磁盘上此刻的内容。分区正在使用时，刚写入的文件可能还没落盘；要找回删除的文件，请先停止往这块盘写东西。',
@@ -919,6 +928,7 @@ export default {
       check: '选择 {name}',
       checkInherited: '所在的文件夹已勾选，会一起复制；要单独取消，先取消文件夹',
       nameUncertain: '名字不完整：删除时丢了首字母',
+      contextDir: '未删除的文件夹：只勾了「已删除」时也列出它，展开能看到里面删除的文件',
       orphans: '找不到原目录的文件',
       hint: '单击文件夹展开或收起，单击文件查看详情，双击文件用默认程序打开；方向键移动，空格勾选。',
       status: {
@@ -926,6 +936,8 @@ export default {
         more: '还有 {count} 项，正在加载…',
         error: '读取失败：{reason}（点这里重试）',
         empty: '空文件夹',
+        filtered: '这里没有符合勾选条件的项（另有 {count} 项没显示）',
+        nothingChecked: '勾选上面的「未删除」或「已删除」才会列出文件',
         overwritten: '这个已删除的文件夹已被覆盖，列不出里面的内容',
         truncated: '这个文件夹的项太多，没有全部列出',
       },
@@ -972,6 +984,7 @@ export default {
       shortName: '短文件名',
       path: '路径',
       state: '状态',
+      attributes: '属性',
       size: '大小',
       modified: '修改时间',
       created: '创建时间',
@@ -1065,6 +1078,7 @@ export default {
       preparing: '正在生成写回分区表的计划…',
       hint: '「丢失」的分区可以写回分区表：先存写前备份，确认后才写，之后能回滚。写回之后 Windows 会挂载它并可能往里写，先把要的文件另存出来。',
       volumeUnsupported: '选的是一个盘符，不能改分区表：请改选整块磁盘。',
+      inTable: '这个分区在分区表里（分区 {number}），没有丢，不需要写回：Windows 能认出它的话已经分到了盘符。它打不开、提示要格式化时，用「修复打不开的分区」在原盘上修，不用另存。',
       structureOnly: '这个分区的主备引导扇区都没了，是按主文件表（$MFT）找到的，按推算的参数浏览；分区原来的末尾推不准，所以不提供写回分区表。先把要的文件另存到另一块盘。',
       outcome: '{action}：{outcome}',
       reopenHint: '分区表已经改了，搜索结果里的「丢失」不会自动更新：要核对就重新搜索，或到「修复打不开的分区」里看。',

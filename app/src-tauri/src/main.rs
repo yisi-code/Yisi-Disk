@@ -666,6 +666,12 @@ fn fs_check_save_report(target: Target, path: String, text: String) -> Result<()
     save_fs_check_report(&target, &path, &text)
 }
 
+/// 界面选中物理磁盘或卷时先提权启动磁盘代理（弹出 UAC），开始任务时不用再等；已经启动过就直接返回。
+#[tauri::command(async)]
+fn broker_prepare(broker: State<'_, BrokerSession>) -> Result<(), HostError> {
+    broker.prepare()
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -705,9 +711,16 @@ fn main() -> anyhow::Result<()> {
                 .first()
                 .cloned()
                 .ok_or("tauri.conf.json 里没有主窗口的配置")?;
-            WebviewWindowBuilder::from_config(app.handle(), &window)?
+            let main_window = WebviewWindowBuilder::from_config(app.handle(), &window)?
                 .data_directory(webview_dir)
                 .build()?;
+            // UAC 以主窗口为请求方才会直接弹到最前面
+            #[cfg(windows)]
+            if let Ok(hwnd) = main_window.hwnd() {
+                app.state::<BrokerSession>().set_owner(hwnd.0 as isize);
+            }
+            #[cfg(not(windows))]
+            let _ = main_window;
             Ok(())
         })
         // 页面开始（重新）加载时，旧页面发起的任务已经没人管了：全部取消，引擎随之退出
@@ -765,6 +778,7 @@ fn main() -> anyhow::Result<()> {
             write_plan_rollback,
             write_history_list,
             job_start_fs_check,
+            broker_prepare,
             fs_check_save_report
         ])
         .run(tauri::generate_context!())?;

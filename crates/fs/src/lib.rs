@@ -27,7 +27,10 @@ use std::sync::Arc;
 use yisi_io::{BlockDevice, IoError};
 
 pub use boot::{BootCopy, BootLayout, BootSector, inspect_boot};
-pub use entry::{ClusterRef, Entry, FileRef, Listing, Location, Moment, Stamp, State, Unsupported};
+pub use entry::{
+    ClusterRef, Entry, FileAttributes, FileRef, Listing, Location, Moment, Stamp, State,
+    Unsupported,
+};
 /// FAT 短文件名的长文件名校验和与显示形式。文件系统检查（`yisi-repair`）用的也是这一份。
 pub use fat::{short_checksum as fat_short_checksum, short_display as fat_short_display};
 pub use ntfs::{

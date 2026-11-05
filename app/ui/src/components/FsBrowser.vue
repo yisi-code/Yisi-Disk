@@ -1,13 +1,18 @@
 <script setup lang="ts">
 import { computed, ref, shallowRef, useId, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useEntryAttributes } from '../composables/useEntryAttributes'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { useTreeNavigation } from '../composables/useTreeNavigation'
 import { listFiles, toHostError, type FsEntry, type HostError } from '../services/host'
 import { formatBytes } from '../utils/format'
 
-/** 列出哪些项：全部、未删除的、已删除的 */
-export type FileView = 'all' | 'live' | 'deleted'
+/** 列出哪些项：未删除的、已删除的、带隐藏或系统属性的（三项各自勾选，见 isShown） */
+export interface FileFilter {
+  live: boolean
+  deleted: boolean
+  hidden: boolean
+}
 
 /** 树里的一项：目录项本身，以及它在分区里的路径（一级一项） */
 export interface TreeItem {
@@ -35,13 +40,17 @@ interface EntryRow {
   isExpanded: boolean
 }
 
-/** 目录末尾的状态行：正在加载、还有更多（滚到这里自动加载）、加载失败、空目录、已被覆盖 */
+/**
+ * 目录末尾的状态行：正在加载、还有更多（滚到这里自动加载）、加载失败、空目录、
+ * 有内容但都不符合勾选的显示条件（`hidden` 是没显示的项数）、已被覆盖
+ */
 interface StatusRow {
   kind: 'status'
   id: string
   dirId: string
   depth: number
-  status: 'loading' | 'more' | 'error' | 'empty' | 'overwritten' | 'truncated'
+  status: 'loading' | 'more' | 'error' | 'empty' | 'filtered' | 'overwritten' | 'truncated'
+  hidden: number
 }
 
 type TreeRow = EntryRow | StatusRow
@@ -59,7 +68,7 @@ const props = defineProps<{
   jobId: string
   partition: number
   /** 列出哪些项，规则见 isShown */
-  view: FileView
+  filter: FileFilter
   /** 打开后直接定位到这个文件夹（各级名字，不分大小写）：逐级展开、选中它；不给时停在根目录 */
   revealPath?: string[]
 }>()
@@ -74,6 +83,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const { formatHostError } = useHostErrorText()
+const { attributesLabel } = useEntryAttributes()
 const domPrefix = useId()
 
 /** 各目录已加载的内容，键是目录所在行的标识（根目录为 root）；每次更新换一个新 Map */
@@ -164,20 +174,29 @@ function appendChildren(result: TreeRow[], dirId: string, depth: number) {
   })
   const status = statusOf(state, shown)
   if (status !== null) {
-    result.push({ kind: 'status', id: `${dirId}/#${status}`, dirId, depth, status })
+    const hidden = state.entries.length - shown
+    result.push({ kind: 'status', id: `${dirId}/#${status}`, dirId, depth, status, hidden })
   }
 }
 
-/** 按 `view` 这一项列不列：只看已删除的时，未删除的文件夹照样列出（删除的文件可能在里面） */
+/**
+ * 按 `filter` 这一项列不列：隐藏与系统文件没勾选时都不列（同资源管理器的默认）；只勾已删除时，
+ * 未删除的文件夹照样列出（删除的文件可能在里面）
+ */
 function isShown(entry: FsEntry): boolean {
-  switch (props.view) {
-    case 'live':
-      return !entry.deleted
-    case 'deleted':
-      return entry.deleted || entry.isDir
-    default:
-      return true
+  const { live, deleted, hidden } = props.filter
+  if ((entry.hidden || entry.system) && !hidden) {
+    return false
   }
+  if (entry.deleted) {
+    return deleted
+  }
+  return live || (deleted && entry.isDir)
+}
+
+/** 只勾已删除时列出的未删除文件夹：只是通往删除的文件的路，变淡显示 */
+function isContextDir(entry: FsEntry): boolean {
+  return !entry.deleted && !props.filter.live
 }
 
 function statusOf(state: DirState, shown: number): StatusRow['status'] | null {
@@ -196,7 +215,10 @@ function statusOf(state: DirState, shown: number): StatusRow['status'] | null {
   if (state.truncated) {
     return 'truncated'
   }
-  return shown === 0 ? 'empty' : null
+  if (shown > 0) {
+    return null
+  }
+  return state.entries.length > 0 ? 'filtered' : 'empty'
 }
 
 /** 加载目录的下一页；正在加载或已经加载完时什么也不做 */
@@ -445,6 +467,12 @@ function statusText(row: StatusRow): string {
   if (row.status === 'more' && state !== undefined) {
     return t('partitionFiles.browser.status.more', { count: state.total - state.entries.length })
   }
+  if (row.status === 'filtered') {
+    const { live, deleted } = props.filter
+    return live || deleted
+      ? t('partitionFiles.browser.status.filtered', { count: row.hidden }, row.hidden)
+      : t('partitionFiles.browser.status.nothingChecked')
+  }
   return t(`partitionFiles.browser.status.${row.status}`)
 }
 
@@ -491,6 +519,7 @@ function withShownName(entry: FsEntry): FsEntry {
             'tree-list__row--active': row.id === activeId,
             'tree-list__row--selected': row.kind === 'entry' && row.id === selected?.id,
             'fs-browser__row--deleted': row.kind === 'entry' && row.entry.deleted,
+            'fs-browser__row--context': row.kind === 'entry' && isContextDir(row.entry),
             'fs-browser__row--status': row.kind === 'status',
           }"
           :style="{
@@ -525,7 +554,13 @@ function withShownName(entry: FsEntry): FsEntry {
                 'fs-browser__name--dir': row.entry.isDir,
                 'fs-browser__name--virtual': row.entry.virtualDir !== null,
               }"
-              :title="row.entry.nameUncertain ? t('partitionFiles.browser.nameUncertain') : undefined"
+              :title="
+                row.entry.nameUncertain
+                  ? t('partitionFiles.browser.nameUncertain')
+                  : isContextDir(row.entry)
+                    ? t('partitionFiles.browser.contextDir')
+                    : undefined
+              "
             >
               {{ row.entry.name }}
             </span>
@@ -535,6 +570,9 @@ function withShownName(entry: FsEntry): FsEntry {
               :class="`fs-browser__badge--${row.entry.state}`"
             >
               {{ entryBadge(row.entry) }}
+            </span>
+            <span v-if="attributesLabel(row.entry)" class="fs-browser__badge fs-browser__badge--system">
+              {{ attributesLabel(row.entry) }}
             </span>
             <span
               v-if="row.entry.unsupported"
@@ -581,6 +619,12 @@ function withShownName(entry: FsEntry): FsEntry {
 }
 
 /* 已删除：名字划线、变淡，旁边另有文字标签，不只靠颜色区分 */
+/* 只勾已删除时列出的未删除文件夹：不加粗、变淡，与删除项、正常项都分得开 */
+.fs-browser__row--context .tree-list__name {
+  color: var(--color-text-muted);
+  font-weight: normal;
+}
+
 .fs-browser__row--deleted .tree-list__name {
   color: var(--color-text-muted);
   text-decoration: line-through;
@@ -602,6 +646,10 @@ function withShownName(entry: FsEntry): FsEntry {
 .fs-browser__badge--overwritten {
   color: var(--color-danger);
   border-color: var(--color-danger);
+}
+
+.fs-browser__badge--system {
+  color: var(--color-text-muted);
 }
 
 .fs-browser__badge--unsupported {

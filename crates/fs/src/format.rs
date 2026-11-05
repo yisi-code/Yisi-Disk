@@ -17,9 +17,11 @@ pub enum FatWidth {
 
 /// 目录项的大小（FAT 与 exFAT 都是 32 字节）。
 pub const DIR_ENTRY_SIZE: usize = 32;
-/// FAT 目录项：已删除项的首字节；属性里的卷标位、目录位；长文件名项的属性（只读、隐藏、系统、卷标四位全为 1）。
-/// exFAT 文件项的属性同样第 4 位表示目录。
+/// FAT 目录项：已删除项的首字节；属性里的隐藏位、系统位、卷标位、目录位；长文件名项的属性（只读、隐藏、系统、
+/// 卷标四位全为 1）。exFAT 文件项与 NTFS 的文件属性用同样的位。
 pub const FAT_DELETED: u8 = 0xE5;
+pub const ATTR_HIDDEN: u8 = 0x02;
+pub const ATTR_SYSTEM: u8 = 0x04;
 pub const ATTR_VOLUME_ID: u8 = 0x08;
 pub const ATTR_DIRECTORY: u8 = 0x10;
 pub const ATTR_LONG_NAME: u8 = 0x0F;

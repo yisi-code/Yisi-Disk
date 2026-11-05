@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use std::{io, iter, mem, ptr, thread};
 
 use windows_sys::Win32::Foundation::{
-    ERROR_CANCELLED, ERROR_PIPE_CONNECTED, INVALID_HANDLE_VALUE, LocalFree, WAIT_FAILED,
+    ERROR_CANCELLED, ERROR_PIPE_CONNECTED, HWND, INVALID_HANDLE_VALUE, LocalFree, WAIT_FAILED,
     WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::Authorization::{
@@ -99,11 +99,13 @@ pub struct BrokerConnection {
 
 impl BrokerConnection {
     /// 建管道，弹出 UAC 以管理员身份启动 `broker_exe`，等它在 `timeout` 内连上并核对身份。
-    pub fn launch(broker_exe: &Path, timeout: Duration) -> Result<Self, LaunchError> {
+    /// `owner` 是请求提权的窗口（`HWND` 的值，0 表示没有）：给了窗口，UAC 才会直接弹到最前面；
+    /// 不给时 Windows 常把它先放在任务栏里闪烁，过一阵才出来。
+    pub fn launch(broker_exe: &Path, timeout: Duration, owner: isize) -> Result<Self, LaunchError> {
         let name = random_pipe_name().map_err(LaunchError::Pipe)?;
         let pipe = create_pipe(&wide(&name)).map_err(LaunchError::Pipe)?;
         let parameters = format!("--pipe {name} --parent-pid {}", std::process::id());
-        let process = launch_elevated(broker_exe, &parameters)?;
+        let process = launch_elevated(broker_exe, &parameters, owner)?;
         // SAFETY: 进程句柄有效，函数只读取进程 ID。
         let pid = unsafe { GetProcessId(process.as_raw_handle()) };
         if pid == 0 {
@@ -243,14 +245,14 @@ fn create_pipe(name: &[u16]) -> io::Result<File> {
     Ok(File::from(unsafe { OwnedHandle::from_raw_handle(handle) }))
 }
 
-fn launch_elevated(exe: &Path, parameters: &str) -> Result<OwnedHandle, LaunchError> {
+fn launch_elevated(exe: &Path, parameters: &str, owner: isize) -> Result<OwnedHandle, LaunchError> {
     let verb = wide("runas");
     let file = wide(exe.as_os_str());
     let parameters = wide(parameters);
     let mut info = SHELLEXECUTEINFOW {
         cbSize: mem::size_of::<SHELLEXECUTEINFOW>() as u32,
         fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC,
-        hwnd: ptr::null_mut(),
+        hwnd: owner as HWND,
         lpVerb: verb.as_ptr(),
         lpFile: file.as_ptr(),
         lpParameters: parameters.as_ptr(),

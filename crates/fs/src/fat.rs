@@ -4,7 +4,7 @@ use yisi_part::bytes::{le16, le32};
 
 use crate::bpb::FatBpb;
 use crate::clusters::{Clusters, Link};
-use crate::entry::{ClusterRef, Entry, FileRef, Listing, Location, Stamp, State};
+use crate::entry::{ClusterRef, Entry, FileAttributes, FileRef, Listing, Location, Stamp, State};
 use crate::format::{
     ATTR_DIRECTORY, ATTR_LONG_NAME, ATTR_VOLUME_ID, DIR_ENTRY_SIZE as ENTRY,
     FAT_DELETED as DELETED, LfnPart, MAX_LFN_PARTS, fat_first_cluster, lfn_name, lfn_ordered,
@@ -229,6 +229,7 @@ impl Fat {
                 .then(|| self.clusters.offset(raw.first_cluster))
                 .flatten(),
             unsupported: None,
+            attributes: FileAttributes::from_bits(u32::from(raw.attr)),
             file,
         })
     }
@@ -294,6 +295,7 @@ struct RawEntry {
     size: u64,
     modified: Stamp,
     created: Stamp,
+    attr: u8,
 }
 
 struct RawListing {
@@ -423,6 +425,7 @@ fn raw_entry(
         size: u64::from(le32(raw, 28).unwrap_or(0)),
         modified: date_time(24, 22),
         created: date_time(16, 14),
+        attr,
     }
 }
 

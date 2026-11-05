@@ -10,7 +10,8 @@ use crate::samples::{
     TAG_WOF, pattern,
 };
 use crate::{
-    Entry, FileRef, FsError, FsKind, NamedStream, ScanSummary, State, Unsupported, Volume, detect,
+    Entry, FileAttributes, FileRef, FsError, FsKind, NamedStream, ScanSummary, State, Unsupported,
+    Volume, detect,
 };
 
 fn open(image: Vec<u8>) -> Volume {
@@ -146,6 +147,57 @@ fn exercise_fat(kind: FatType) {
         read_all(&volume, &FileRef::from_token(&token).unwrap()),
         report
     );
+}
+
+#[test]
+fn hidden_and_system_attributes_are_reported() {
+    let mut image = FatImage::new(FatType::Fat32);
+    let root = image.root();
+    let bin = image.add_file(root, "RECYCLE.BIN", b"x", Layout::Contiguous);
+    image.add_file(root, "plain.txt", b"y", Layout::Contiguous);
+    // 属性字节：存档、隐藏、系统
+    image.patch_short_entry(&bin, 11, &[0x26]);
+    let volume = open(image.finish());
+    let entries = volume.list(&volume.root()).unwrap().entries;
+    let attributes = |name| find(&entries, name).attributes;
+    assert_eq!(
+        attributes("RECYCLE.BIN"),
+        FileAttributes {
+            hidden: true,
+            system: true
+        }
+    );
+    assert_eq!(attributes("plain.txt"), FileAttributes::default());
+}
+
+#[test]
+fn ntfs_hidden_and_system_attributes_are_reported_for_live_and_deleted_files() {
+    let mut sample = NtfsImage::new();
+    let bin = sample.mkdir(NTFS_ROOT, "$RECYCLE.BIN");
+    sample.add_attributes(bin, 0x06);
+    let gone = sample.add_file(NTFS_ROOT, "gone.txt", b"bye");
+    sample.add_attributes(gone, 0x02);
+    sample.delete(gone);
+    sample.add_file(NTFS_ROOT, "plain.txt", b"hi");
+    let volume = open(sample.finish());
+    volume.scan(&mut |_, _| true).unwrap().unwrap();
+    let entries = volume.list(&volume.root()).unwrap().entries;
+    let attributes = |name| find(&entries, name).attributes;
+    assert_eq!(
+        attributes("$RECYCLE.BIN"),
+        FileAttributes {
+            hidden: true,
+            system: true
+        }
+    );
+    assert_eq!(
+        attributes("gone.txt"),
+        FileAttributes {
+            hidden: true,
+            system: false
+        }
+    );
+    assert_eq!(attributes("plain.txt"), FileAttributes::default());
 }
 
 #[test]

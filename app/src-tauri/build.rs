@@ -50,6 +50,7 @@ fn main() {
         "write_history_list",
         "job_start_fs_check",
         "fs_check_save_report",
+        "broker_prepare",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("tauri-build 执行失败");

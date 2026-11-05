@@ -306,6 +306,9 @@ export interface FsEntry {
   record: number | null
   /** 不在卷上的虚拟目录：orphans 是「找不到原目录的文件」 */
   virtualDir: 'orphans' | null
+  /** 带隐藏、系统属性（回收站、System Volume Information 等，资源管理器默认不显示） */
+  hidden: boolean
+  system: boolean
 }
 
 export interface FileListPage {
@@ -565,6 +568,14 @@ export function getAppInfo(): Promise<AppInfo> {
 
 export function getEngineCapabilities(): Promise<EngineCapabilities> {
   return invoke<EngineCapabilities>('engine_capabilities')
+}
+
+/**
+ * 先提权启动磁盘代理（弹出 UAC），之后读物理磁盘或卷的任务不用再等；已经启动过时直接返回。
+ * 用户拒绝时以 elevationCancelled 失败
+ */
+export function prepareBroker(): Promise<void> {
+  return invoke<void>('broker_prepare')
 }
 
 /** 列出物理磁盘：只查询设备属性，不需要管理员权限 */

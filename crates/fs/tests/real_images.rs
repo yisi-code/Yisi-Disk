@@ -61,6 +61,24 @@ fn check_image(image: &Path, failures: &mut Vec<String>) {
                 let summary = volume.scan(&mut |_, _| true).unwrap().unwrap();
                 println!("    扫描 MFT {:?}：{summary:?}", started.elapsed());
             }
+            // Windows 在卷上建的 System Volume Information 带隐藏、系统属性
+            let root = volume.list(&volume.root()).unwrap().entries;
+            for entry in root
+                .iter()
+                .filter(|entry| entry.attributes.hidden || entry.attributes.system)
+            {
+                println!("    隐藏或系统：{} {:?}", entry.name, entry.attributes);
+            }
+            if let Some(entry) = root
+                .iter()
+                .find(|entry| entry.name == "System Volume Information")
+                && !(entry.attributes.hidden && entry.attributes.system)
+            {
+                failures.push(format!(
+                    "{} {label}：System Volume Information 没认出隐藏、系统属性",
+                    image.display()
+                ));
+            }
             volumes.insert(label, volume);
         }
     }

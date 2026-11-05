@@ -6,7 +6,7 @@ use yisi_part::bytes::{le32, le64};
 
 use crate::bpb::ExfatBpb;
 use crate::clusters::{Chain, Clusters, FatWidth, Run};
-use crate::entry::{ClusterRef, Entry, FileRef, Listing, Location, Stamp, State};
+use crate::entry::{ClusterRef, Entry, FileAttributes, FileRef, Listing, Location, Stamp, State};
 use crate::format::{
     ATTR_DIRECTORY, DIR_ENTRY_SIZE as ENTRY, EXFAT_TYPE_BITMAP, EXFAT_TYPE_FILE, EXFAT_TYPE_LABEL,
     ExfatSet, exfat_entry_set, exfat_label,
@@ -258,6 +258,7 @@ impl Exfat {
                 .then(|| self.clusters.offset(at.first_cluster))
                 .flatten(),
             unsupported: None,
+            attributes: FileAttributes::from_bits(u32::from(set.attributes)),
             file,
         })
     }

@@ -137,6 +137,18 @@ const statusText = computed(() => {
   return ''
 })
 
+/** 选中的分区不能写回的原因：按结构找到的长度推不准，分区表里已有的不需要写回 */
+const candidateNote = computed(() => {
+  const candidate = selectedCandidate.value
+  if (candidate?.foundBy === 'structure') {
+    return t('findPartitions.write.structureOnly')
+  }
+  if (candidate?.relation === 'inTable') {
+    return t('findPartitions.write.inTable', { number: candidate.tablePartition ?? '' })
+  }
+  return null
+})
+
 /** 快速搜索的结果页（不在确认写回时）：顶部给出「深度搜索」 */
 const canSearchDeeper = computed(
   () =>
@@ -554,14 +566,18 @@ async function openSelected() {
                   />
                   <FoundPartitionItem :candidate="candidate" />
                 </label>
+                <!-- 选中的分区为什么没有写回：放在它下面、列表框里，不占三栏共用的底部那一行 -->
+                <p
+                  v-if="index === selectedIndex && candidateNote"
+                  class="wizard__hint find-partitions__item-note"
+                >
+                  {{ candidateNote }}
+                </p>
               </li>
             </ul>
             <!-- 这一栏按三行排（标题、列表、下面这些），下面的提示与写回放在同一格里 -->
             <div class="find-partitions__footer">
               <p class="wizard__hint">{{ t('findPartitions.list.hint') }}</p>
-              <p v-if="selectedCandidate?.foundBy === 'structure'" class="wizard__hint">
-                {{ t('findPartitions.write.structureOnly') }}
-              </p>
               <div v-if="canWriteBack" class="find-partitions__write">
                 <template v-if="canWrite">
                   <button
@@ -691,6 +707,13 @@ async function openSelected() {
   padding: var(--space-sm);
   border-bottom: 1px solid var(--color-border);
   cursor: pointer;
+}
+
+.find-partitions__item-note {
+  margin: 0;
+  padding: 0 var(--space-sm) var(--space-sm);
+  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+  border-bottom: 1px solid var(--color-border);
 }
 
 .find-partitions__item--selected {
