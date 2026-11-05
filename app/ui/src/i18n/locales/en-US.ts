@@ -916,7 +916,12 @@ const enUS: typeof zhCN = {
   partitionFiles: {
     browse: {
       partition: 'Partition',
-      deletedOnly: 'Show deleted files only',
+      view: {
+        label: 'Files to list',
+        all: 'All',
+        live: 'Not deleted',
+        deleted: 'Deleted',
+      },
       liveHint:
         'This reads what is on the disk right now. While a partition is in use, recently written files may not have reached the disk yet; to recover deleted files, stop writing to this disk first.',
       stateHint:
@@ -1064,7 +1069,8 @@ const enUS: typeof zhCN = {
       truncated: 'Too many partitions were found; only the first {count} are listed.',
       stopped: 'The search stopped at {position} ({percent}%); only partitions found before that are listed.',
       deep: 'Deep search',
-      deepHint: 'Did not find the partition you need? A deep search reads the whole disk from start to end; it takes hours on a large disk.',
+      label: 'Search result',
+      deepHint: 'Did not find the partition you need? Use "Deep search" at the top right: it reads the whole disk from start to end and takes hours on a large disk.',
       readOnly:
         'Searching and browsing are read-only and do not change the disk. Save the files you need to another disk first; afterwards a "lost" partition can be written back to the partition table.',
       opening: 'Opening for browsing…',

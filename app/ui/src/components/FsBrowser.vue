@@ -6,6 +6,9 @@ import { useTreeNavigation } from '../composables/useTreeNavigation'
 import { listFiles, toHostError, type FsEntry, type HostError } from '../services/host'
 import { formatBytes } from '../utils/format'
 
+/** 列出哪些项：全部、未删除的、已删除的 */
+export type FileView = 'all' | 'live' | 'deleted'
+
 /** 树里的一项：目录项本身，以及它在分区里的路径（一级一项） */
 export interface TreeItem {
   /** 行的唯一标识：上级的标识加上它在排好序的目录里的序号，同名、同定位信息的项也不会混 */
@@ -55,8 +58,8 @@ const INDENT_PX = 18
 const props = defineProps<{
   jobId: string
   partition: number
-  /** 只显示已删除的文件（目录都显示：删除的文件可能在未删除的目录里） */
-  deletedOnly: boolean
+  /** 列出哪些项，规则见 isShown */
+  view: FileView
   /** 打开后直接定位到这个文件夹（各级名字，不分大小写）：逐级展开、选中它；不给时停在根目录 */
   revealPath?: string[]
 }>()
@@ -148,7 +151,7 @@ function appendChildren(result: TreeRow[], dirId: string, depth: number) {
   }
   let shown = 0
   state.entries.forEach((entry, index) => {
-    if (props.deletedOnly && !entry.isDir && !entry.deleted) {
+    if (!isShown(entry)) {
       return
     }
     shown += 1
@@ -162,6 +165,18 @@ function appendChildren(result: TreeRow[], dirId: string, depth: number) {
   const status = statusOf(state, shown)
   if (status !== null) {
     result.push({ kind: 'status', id: `${dirId}/#${status}`, dirId, depth, status })
+  }
+}
+
+/** 按 `view` 这一项列不列：只看已删除的时，未删除的文件夹照样列出（删除的文件可能在里面） */
+function isShown(entry: FsEntry): boolean {
+  switch (props.view) {
+    case 'live':
+      return !entry.deleted
+    case 'deleted':
+      return entry.deleted || entry.isDir
+    default:
+      return true
   }
 }
 
