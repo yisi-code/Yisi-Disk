@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*", "app/src-tauri"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 publish = false
 
@@ -11,6 +11,8 @@ publish = false
 anyhow = "1.0.104"
 # 只开 JPEG、PNG 解码与 PNG 编码，用于引擎生成预览缩略图
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+# 解 deflate 与 zlib：E01 镜像的压缩块；深度恢复里 gzip、压缩的 SWF 的流（只为找到流在哪里结束）
+miniz_oxide = "0.8"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 # 写入计划备份文件的摘要

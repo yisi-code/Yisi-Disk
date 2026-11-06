@@ -3,7 +3,8 @@ import { onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useEngineCapabilities } from '../composables/useEngineCapabilities'
 import { useHostErrorText } from '../composables/useHostErrorText'
-import { getAppInfo, toHostError, type HostError } from '../services/host'
+import { useUpdateCheck } from '../composables/useUpdateCheck'
+import { getAppInfo, openReleasesPage, toHostError, type HostError } from '../services/host'
 
 /** 项目主页与作者的联系方式：是事实，不随界面语言变 */
 const REPOSITORY = 'https://github.com/yisi-code/Yisi-Disk'
@@ -20,6 +21,17 @@ const { formatHostError } = useHostErrorText()
 const appVersion = ref<string | null>(null)
 const appError = ref<HostError | null>(null)
 const { capabilities, failure: engineError, load: loadEngine } = useEngineCapabilities()
+const { state: update, check: checkUpdate } = useUpdateCheck()
+const openFailure = ref<HostError | null>(null)
+
+async function openReleases() {
+  openFailure.value = null
+  try {
+    await openReleasesPage()
+  } catch (error) {
+    openFailure.value = toHostError(error)
+  }
+}
 
 // 每次打开都现查一次：引擎是否可用以这一刻为准（各功能卡片也跟着更新）
 onMounted(() => {
@@ -48,6 +60,33 @@ async function loadAppVersion() {
       <dd>
         <span v-if="appError" class="wizard__error" role="alert">{{ formatHostError(appError) }}</span>
         <template v-else>{{ appVersion ?? t('about.checking') }}</template>
+        <!-- 只在点按时联网问一次最新版本；有新版本时交给浏览器打开发布页下载 -->
+        <span v-if="appVersion" class="about__update" aria-live="polite">
+          <button
+            class="wizard__button wizard__button--secondary"
+            type="button"
+            :disabled="update.kind === 'checking'"
+            @click="checkUpdate(appVersion)"
+          >
+            {{ update.kind === 'checking' ? t('about.update.checking') : t('about.update.check') }}
+          </button>
+          <span v-if="update.kind === 'latest'">{{ t('about.update.latest', { version: update.latest }) }}</span>
+          <template v-else-if="update.kind === 'available'">
+            <span>{{ t('about.update.available', { version: update.latest }) }}</span>
+            <button class="wizard__button" type="button" @click="openReleases">
+              {{ t('about.update.open') }}
+            </button>
+          </template>
+          <span v-else-if="update.kind === 'failed'" class="wizard__error" role="alert">
+            {{
+              update.reason === null
+                ? t('about.update.timeout')
+                : t('about.update.failed', { reason: update.reason })
+            }}
+          </span>
+          <span v-if="openFailure" class="wizard__error" role="alert">{{ formatHostError(openFailure) }}</span>
+        </span>
+        <span class="about__hint">{{ t('about.update.privacy') }}</span>
       </dd>
       <dt>{{ t('about.engine') }}</dt>
       <dd aria-live="polite">
@@ -112,6 +151,14 @@ async function loadAppVersion() {
 
 .about__note {
   margin: 0;
+}
+
+.about__update {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-top: var(--space-xs);
 }
 
 .about__hint {

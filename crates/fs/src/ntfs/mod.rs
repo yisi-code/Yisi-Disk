@@ -1,10 +1,12 @@
 //! NTFS：引导扇区、MFT 记录、常驻与非常驻属性（含属性列表）、`$I30` 目录索引；
-//! 扫一遍 MFT 找出「未使用」的记录，按父目录引用挂回目录树，用 `$Bitmap` 判断它们的簇是否已被占用。
+//! 扫一遍 MFT 找出「未使用」的记录，按父目录引用挂回目录树，用 `$Bitmap` 判断它们的簇是否已被占用；
+//! 再读 `$LogFile`，找回 MFT 记录已被重用或清掉、日志里还留着的已删除项。
 //! 依据公开的 NTFS 结构资料实现，只读。
 
 mod audit;
 mod huffman;
 mod index;
+mod logfile;
 pub(crate) mod lznt1;
 mod lzx;
 mod record;
@@ -13,6 +15,7 @@ mod stream;
 pub(crate) mod wof;
 mod xpress;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use yisi_part::bytes::{le16, le16_units, le32, le64};
@@ -32,7 +35,7 @@ use crate::bpb::NtfsBpb;
 use crate::entry::{Entry, FileAttributes, FileRef, Listing, Location, Stamp, State, Unsupported};
 use crate::reader::{FileReader, Piece};
 use crate::region::Region;
-use crate::{FsError, MAX_ENTRIES, ScanSummary, bpb};
+use crate::{FsError, MAX_ENTRIES, ScanStage, ScanSummary, bpb};
 
 /// 系统文件的记录号。
 const MFT_RECORD: u64 = 0;
@@ -142,6 +145,8 @@ pub(crate) struct Ntfs {
     scan: Mutex<Option<Arc<Scan>>>,
     /// 同一时间只扫一遍；第二个请求等第一个扫完，直接用它的结果。
     scan_lock: Mutex<()>,
+    /// 扫描到了读 `$LogFile` 那一步（进度的阶段名按它取）。
+    reading_log: AtomicBool,
 }
 
 /// `$MFT` 的第一条记录（`$MFT` 自己）可用：签名、更新序列、记录头都对，在用，且是基本记录。
@@ -259,6 +264,7 @@ impl Ntfs {
             label: None,
             scan: Mutex::new(None),
             scan_lock: Mutex::new(()),
+            reading_log: AtomicBool::new(false),
         };
         let root = ntfs
             .record(ROOT_RECORD)?
@@ -301,6 +307,19 @@ impl Ntfs {
 
     pub fn needs_scan(&self) -> bool {
         self.scanned().is_none()
+    }
+
+    pub fn scan_stage(&self) -> ScanStage {
+        if self.reading_log.load(Ordering::Relaxed) {
+            ScanStage::Log
+        } else {
+            ScanStage::Mft
+        }
+    }
+
+    fn set_scan_stage(&self, stage: ScanStage) {
+        self.reading_log
+            .store(stage == ScanStage::Log, Ordering::Relaxed);
     }
 
     fn scanned(&self) -> Option<Arc<Scan>> {
@@ -421,6 +440,18 @@ impl Ntfs {
                     overwritten: false,
                 });
             }
+            // 从日志找回的目录：里面只有挂到它下面的已删除项
+            Location::Logged { record, sequence } => {
+                let entries = scan
+                    .as_ref()
+                    .map(|scan| scan.logged_children(record, sequence))
+                    .unwrap_or_default();
+                return Ok(Listing {
+                    entries,
+                    truncated: false,
+                    overwritten: false,
+                });
+            }
             Location::Mft { record, sequence } => (record, sequence),
             Location::Clusters(_) | Location::Inode { .. } => return Err(FsError::BadRef),
         };
@@ -462,13 +493,25 @@ impl Ntfs {
     }
 
     /// 文件的基本记录：定位信息要对得上（记录号、序号、是否删除），否则记录已被重用。
+    /// 从日志找回的文件用日志里删除前的记录映像，内容按那时的运行表读。
     fn base_record(&self, file: &FileRef) -> Result<(u64, Record), FsError> {
-        let Location::Mft { record, sequence } = file.location else {
-            return Err(FsError::BadRef);
-        };
         if file.is_dir {
             return Err(FsError::BadRef);
         }
+        if let Location::Logged { record, sequence } = file.location {
+            let scan = self
+                .scanned()
+                .ok_or(FsError::Invalid("还没有扫描主文件表（MFT）"))?;
+            let image = scan.logged_image(record, sequence).ok_or(FsError::Invalid(
+                "日志（$LogFile）里只留下了这个文件的名字，没有删除前的数据位置（或内容存放在主文件表记录里，这部分不进日志），读不出内容",
+            ))?;
+            let base = Record::parse_image(image.to_vec(), record)
+                .ok_or(FsError::Invalid("日志（$LogFile）里的记录映像不完整"))?;
+            return Ok((record, base));
+        }
+        let Location::Mft { record, sequence } = file.location else {
+            return Err(FsError::BadRef);
+        };
         let base = self
             .record(record)?
             .ok_or(FsError::Invalid("文件的主文件表（MFT）记录读不出"))?;
@@ -512,7 +555,11 @@ impl Ntfs {
     }
 
     /// 文件的备用数据流：名字与长度，按在记录（或属性列表）里的顺序，最多 [`MAX_STREAMS`] 个。
+    /// 从日志找回的文件不列（常驻的备用数据流内容不在日志里）。
     pub fn streams(&self, file: &FileRef) -> Result<Vec<NamedStream>, FsError> {
+        if file.from_log() {
+            return Ok(Vec::new());
+        }
         let (record, base) = self.base_record(file)?;
         let mut names: Vec<Vec<u16>> = Vec::new();
         let mut add = |name: Vec<u16>| {
@@ -556,6 +603,9 @@ impl Ntfs {
 
     /// 读一个备用数据流。加密或解不开的压缩照样按不支持拒绝。
     pub fn open_stream(&self, file: &FileRef, name: &str) -> Result<FileReader, FsError> {
+        if file.from_log() {
+            return Err(FsError::BadRef);
+        }
         let (record, base) = self.base_record(file)?;
         let value = self
             .value(record, &base, DATA, &utf16(name))?

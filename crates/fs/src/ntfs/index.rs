@@ -99,12 +99,7 @@ fn node_entries(node: &[u8], header: usize, keys: &mut Vec<Key>) -> bool {
     let end = (header + total as usize).min(node.len());
     let mut offset = header + first as usize;
     while offset < end {
-        let (Some(reference), Some(length), Some(key_length), Some(flags)) = (
-            le64(node, offset),
-            le16(node, offset + 8),
-            le16(node, offset + 10),
-            le16(node, offset + 12),
-        ) else {
+        let (Some(length), Some(flags)) = (le16(node, offset + 8), le16(node, offset + 12)) else {
             break;
         };
         let length = usize::from(length);
@@ -114,19 +109,30 @@ fn node_entries(node: &[u8], header: usize, keys: &mut Vec<Key>) -> bool {
         if flags & LAST_ENTRY != 0 {
             break;
         }
-        let key = node.get(offset + 0x10..offset + 0x10 + usize::from(key_length));
-        if let Some(name) = key.and_then(parse_file_name) {
+        if let Some(key) = node.get(offset..offset + length).and_then(entry_key) {
             if keys.len() >= MAX_ENTRIES {
                 return false;
             }
-            let (record, sequence) = split_ref(reference);
-            keys.push(Key {
-                record,
-                sequence,
-                name,
-            });
+            keys.push(key);
         }
         offset += length;
     }
     true
+}
+
+/// 一个索引项（开头 8 字节是文件引用，第 8、10 字节是项长与键长，键从第 16 字节起）：指向的记录与键。
+/// 结束项、键读不出时为 `None`。`$LogFile` 里目录索引项增删带的数据也是这个样子。
+pub(crate) fn entry_key(entry: &[u8]) -> Option<Key> {
+    let reference = le64(entry, 0)?;
+    let key_length = usize::from(le16(entry, 10)?);
+    if le16(entry, 12)? & LAST_ENTRY != 0 {
+        return None;
+    }
+    let name = parse_file_name(entry.get(0x10..0x10 + key_length)?)?;
+    let (record, sequence) = split_ref(reference);
+    Some(Key {
+        record,
+        sequence,
+        name,
+    })
 }

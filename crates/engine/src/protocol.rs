@@ -55,7 +55,8 @@ pub const PREVIEW_FS_FILE: &str = "repair.previewFile";
 /// 找出浏览中的一个分区里已删除的项：参数 [`ScanParams`]，扫完答复 [`ScanResult`]。NTFS 扫一遍 MFT
 /// （[`PartitionInfo::needs_scan`]，不扫列不出已删除的项）；FAT / exFAT 按需读一遍目录树没用到的空闲簇，找出原来的
 /// 目录已找不到的文件夹（[`PartitionInfo::optional_scan`]），列在根目录下的「找不到原目录的文件」里。
-/// 扫描期间浏览任务发 [`PROGRESS`]（`stage` 为 `scanMft` 或 `scanFree`，总字节还不知道时 `total` 为 0）。
+/// NTFS 扫完 MFT 后再读 `$LogFile`，找回 MFT 记录已被重用或清掉、日志里还留着的已删除项（[`FsEntry::from_log`]）。
+/// 扫描期间浏览任务发 [`PROGRESS`]（`stage` 为 `scanMft`、`scanLog` 或 `scanFree`，总字节还不知道时 `total` 为 0）。
 /// 同一个分区扫过之后直接答复上次的结果。
 pub const SCAN_DELETED: &str = "repair.scanDeleted";
 /// 停止正在进行的 [`SCAN_DELETED`]：参数 [`ScanParams`]，立即返回空对象；那次扫描答复 `cancelled: true`。
@@ -201,6 +202,8 @@ pub struct ReadScanParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Source {
+    /// 镜像文件：raw，或 E01（按开头的签名认，后续段在同目录找）。`sector_size` 是 raw 镜像按多大的扇区读；
+    /// E01 自己记着扇区大小，不用这一项。E01 只读，不能生成写入计划。
     #[serde(rename_all = "camelCase")]
     Image { path: String, sector_size: u32 },
     /// 物理磁盘。Windows 上 `handle` 是磁盘代理复制进引擎进程的只读句柄。
@@ -268,7 +271,8 @@ pub struct Progress {
     pub job_id: String,
     pub done: u64,
     pub total: u64,
-    /// 任务里的哪个阶段；只有一个阶段的任务不给。浏览与复制是 `scanMft`（扫描 MFT，单位是字节）或
+    /// 任务里的哪个阶段；只有一个阶段的任务不给。浏览与复制是 `scanMft`（扫描 MFT，单位是字节）、
+    /// `scanLog`（NTFS 扫完 MFT 后读 `$LogFile`，单位是字节，进度从 0 重新算）或
     /// `scanFree`（FAT / exFAT 读空闲簇，单位是字节），
     /// 制作镜像是轮次，文件系统检查见 [`FsCheckReport`]。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -385,6 +389,10 @@ pub struct CarveParams {
     /// （[`FoundFile::incomplete`]，名字在扩展名前加 `.incomplete`）。不给时为 false，与以前一样只要完整的文件。
     #[serde(default)]
     pub keep_incomplete: bool,
+    /// 两段重组：分成两段存放的照片（基线 JPEG）也找回来，拼成完整的文件（[`FoundFile::fragments`]）。
+    /// 要逐位核对每张这样的照片，扫描明显变慢；不给时为 false。
+    #[serde(default)]
+    pub join_fragments: bool,
 }
 
 /// 深度恢复的检查点（[`CHECKPOINT`]）：到此为止找到的文件都已经通知过，从 `resume_at` 接着扫不漏不重。
@@ -421,6 +429,36 @@ pub struct FoundFile {
     /// 部分恢复存下的不完整文件：在哪里断了。完整的文件没有这一项（旧的扫描记录里也没有）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incomplete: Option<IncompleteReason>,
+    /// 由两段拼成的文件（两段重组）：各段在源上的位置，按文件里的先后，第一段从 `offset` 起。
+    /// 连续存放的文件没有这一项（旧的扫描记录里也没有）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fragments: Vec<FileFragment>,
+}
+
+/// 由几段拼成的文件里的一段：在源上的起点与长度。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileFragment {
+    pub offset: u64,
+    pub length: u64,
+}
+
+impl From<yisi_carve::Fragment> for FileFragment {
+    fn from(fragment: yisi_carve::Fragment) -> Self {
+        Self {
+            offset: fragment.offset,
+            length: fragment.length,
+        }
+    }
+}
+
+impl From<FileFragment> for yisi_carve::Fragment {
+    fn from(fragment: FileFragment) -> Self {
+        Self {
+            offset: fragment.offset,
+            length: fragment.length,
+        }
+    }
 }
 
 /// 不完整的文件（部分恢复）在哪里断了。
@@ -498,6 +536,9 @@ pub struct ExtractItem {
     /// 起点与长度和扫描时一致才保存。
     #[serde(default)]
     pub incomplete: Option<IncompleteReason>,
+    /// 扫描时由两段拼成的文件（[`FoundFile::fragments`] 原样带回）：保存时把这几段接起来重新核对。
+    #[serde(default)]
+    pub fragments: Vec<FileFragment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -506,6 +547,9 @@ pub struct PreviewRangeParams {
     pub source: Source,
     pub offset: u64,
     pub length: u64,
+    /// 由两段拼成的文件（[`FoundFile::fragments`]）：按这几段接起来预览，不看 `offset` 与 `length`。
+    #[serde(default)]
+    pub fragments: Vec<FileFragment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -665,7 +709,7 @@ pub struct FsEntry {
     pub created: Option<String>,
     pub deleted: bool,
     /// live、intact（删除了，看起来完整）、overwritten（已被覆盖）、unknown（无法判断）、
-    /// cleared（删除时文件系统清空了长度与数据位置，读不出；ext3 / ext4）之一。
+    /// cleared（数据位置已不知道，读不出：ext3 / ext4 删除时清空了长度与数据位置，或 NTFS 的日志里只有名字）之一。
     pub state: String,
     /// 定位信息，原样传回给 [`LIST_FILES`]、[`PREVIEW_FS_FILE`]、[`COPY_FILES`]。
     pub file: String,
@@ -685,6 +729,10 @@ pub struct FsEntry {
     pub hidden: bool,
     #[serde(default)]
     pub system: bool,
+    /// NTFS 从 `$LogFile` 找回的已删除项：MFT 里这条记录已被重用或清掉，名字与数据位置来自日志。
+    /// 文件内容按删除前的运行表读，那些簇可能已被别的文件用了；`state` 为 `cleared` 时日志里只有名字，读不出。
+    #[serde(default)]
+    pub from_log: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -714,6 +762,12 @@ pub struct ScanResult {
     /// FAT、exFAT：读过的空闲空间字节数。
     #[serde(default)]
     pub free_bytes: u64,
+    /// NTFS：`$LogFile` 里认出的日志记录数（没有日志、读不出时为 0）。
+    #[serde(default)]
+    pub log_records: u64,
+    /// NTFS：从 `$LogFile` 找回的名字数（MFT 里这条记录已被重用或清掉的已删除项）。
+    #[serde(default)]
+    pub log_names: u64,
     pub elapsed_ms: u64,
 }
 

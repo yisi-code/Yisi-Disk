@@ -65,11 +65,12 @@ pub fn enabled_formats(
 /// 检查点最多这么久发一次。
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(1);
 
-/// 一次深度恢复的选项：启用的格式、从哪里开始扫、是否部分恢复。
+/// 一次深度恢复的选项：启用的格式、从哪里开始扫、是否部分恢复、是否两段重组。
 pub struct ScanSettings {
     pub enabled: Vec<bool>,
     pub start_at: u64,
     pub keep_incomplete: bool,
+    pub join_fragments: bool,
 }
 
 pub fn run(
@@ -91,6 +92,7 @@ pub fn run(
         enabled: settings.enabled,
         start: settings.start_at,
         keep_incomplete: settings.keep_incomplete,
+        join_fragments: settings.join_fragments,
     };
     let outcome = carve(device, registry, &options, sink, &control);
     // 终结通知之前把剩下的文件发完；被取消时再发最后的检查点
@@ -192,6 +194,7 @@ impl CarveControl for Reporter<'_> {
             offset: file.offset,
             length: file.length,
             incomplete: file.incomplete.map(Into::into),
+            fragments: file.fragments.iter().copied().map(Into::into).collect(),
         };
         self.batch.push(found, |files| self.send(files));
     }

@@ -164,6 +164,207 @@ fn check_file(volume: &Volume, expected: &Expected, failures: &mut Vec<String>) 
     }
 }
 
+/// 把 NTFS 镜像复制一份（放在临时目录里，原镜像不动），清掉其中全部已删除项的 MFT 记录，模拟记录已被重用或清掉，
+/// 再扫：这些项要从 `$LogFile` 找回。报告日志里认出的记录数、找回的名字数，以及读得出、与清单一致的文件数。
+#[test]
+#[ignore = "需要先用 make-test-images.ps1 生成镜像，并设置 YISI_FS_TEST_IMAGES"]
+fn ntfs_log_recovers_files_whose_records_were_cleared() {
+    let dir = std::env::var("YISI_FS_TEST_IMAGES").expect("设置 YISI_FS_TEST_IMAGES 为镜像目录");
+    let mut images: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "vhd"))
+        .collect();
+    images.sort();
+    let mut failures = Vec::new();
+    for image in images {
+        let manifest = fs::read_to_string(image.with_extension("tsv")).unwrap_or_default();
+        let deleted: Vec<Expected> = manifest
+            .lines()
+            .filter_map(|line| {
+                let fields: Vec<&str> = line.split('\t').collect();
+                Some(Expected {
+                    label: (*fields.first()?).to_owned(),
+                    path: (*fields.get(1)?).to_owned(),
+                    length: fields.get(2)?.parse().ok()?,
+                    sha: (*fields.get(3)?).to_owned(),
+                    kind: (*fields.get(4)?).to_owned(),
+                })
+            })
+            .filter(|expected| expected.kind.starts_with("deleted"))
+            .collect();
+        let copy = std::env::temp_dir().join(image.file_name().unwrap());
+        let mut cleared = Vec::new();
+        {
+            let device: Arc<dyn BlockDevice> = Arc::new(RawImage::open(&image, 512).unwrap());
+            let table = yisi_part::read_table(device.as_ref()).unwrap();
+            for partition in &table.partitions {
+                let Ok(volume) =
+                    Volume::open(Arc::clone(&device), partition.offset, partition.length)
+                else {
+                    continue;
+                };
+                if volume.kind() != FsKind::Ntfs {
+                    continue;
+                }
+                let summary = volume.scan(&mut |_, _| true).unwrap().unwrap();
+                println!(
+                    "== {} 分区 {}（原样）：日志记录 {}，从日志找回 {}（MFT 里都还在，应为 0）",
+                    image.display(),
+                    partition.number,
+                    summary.log_records,
+                    summary.log_names
+                );
+                if summary.log_names != 0 {
+                    failures.push(format!("{}：原样的镜像不该从日志找回", image.display()));
+                }
+                let mut records = Vec::new();
+                walk(&volume, volume.root(), "", 0, &mut |_, entry| {
+                    if entry.deleted()
+                        && let Some(record) = entry.file.record()
+                    {
+                        records.push(record);
+                    }
+                });
+                records.sort_unstable();
+                records.dedup();
+                let positions = mft_positions(device.as_ref(), partition.offset, &records);
+                cleared.extend(positions);
+            }
+        }
+        if cleared.is_empty() {
+            continue;
+        }
+        fs::copy(&image, &copy).unwrap();
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut file = fs::OpenOptions::new().write(true).open(&copy).unwrap();
+            for &(offset, length) in &cleared {
+                file.seek(SeekFrom::Start(offset)).unwrap();
+                file.write_all(&vec![0u8; length]).unwrap();
+            }
+        }
+        println!("   清掉 {} 条已删除项的 MFT 记录", cleared.len());
+        let device: Arc<dyn BlockDevice> = Arc::new(RawImage::open(&copy, 512).unwrap());
+        let table = yisi_part::read_table(device.as_ref()).unwrap();
+        for partition in &table.partitions {
+            let Ok(volume) = Volume::open(Arc::clone(&device), partition.offset, partition.length)
+            else {
+                continue;
+            };
+            if volume.kind() != FsKind::Ntfs {
+                continue;
+            }
+            let label = volume.label().unwrap_or_default().to_owned();
+            let started = Instant::now();
+            let summary = volume.scan(&mut |_, _| true).unwrap().unwrap();
+            println!(
+                "   清掉之后扫描 {:?}：MFT 已删除的名字 {}，日志记录 {}，从日志找回 {}，找不到原目录 {}",
+                started.elapsed(),
+                summary.deleted_names,
+                summary.log_records,
+                summary.log_names,
+                summary.orphans
+            );
+            let (mut found, mut readable, mut matching) = (0, 0, 0);
+            walk(&volume, volume.root(), "", 0, &mut |path, entry| {
+                if !entry.file.from_log() {
+                    return;
+                }
+                found += 1;
+                let content = (!entry.is_dir()).then(|| read_all(&volume, &entry.file));
+                let expected = deleted.iter().find(|expected| {
+                    expected.label == label && expected.path.rsplit('/').next() == Some(&entry.name)
+                });
+                let verdict = match (&content, expected) {
+                    (None, _) => "目录".to_owned(),
+                    (Some(Ok(data)), Some(expected)) => {
+                        readable += 1;
+                        if data.len() as u64 == expected.length && sha256_hex(data) == expected.sha
+                        {
+                            matching += 1;
+                            "内容一致".to_owned()
+                        } else {
+                            format!("内容不一致（读出 {} 字节）", data.len())
+                        }
+                    }
+                    (Some(Ok(data)), None) => {
+                        readable += 1;
+                        format!("读出 {} 字节（清单里没有）", data.len())
+                    }
+                    (Some(Err(error)), _) => format!("读不出：{error}"),
+                };
+                println!(
+                    "     {path:<60} {:?} {} 字节 {verdict}",
+                    entry.state, entry.size
+                );
+                if let (Some(Ok(_)), Some(_)) = (&content, expected)
+                    && entry.state == State::Intact
+                    && !verdict.starts_with("内容一致")
+                {
+                    failures.push(format!(
+                        "{}:{path}：判为可能完整，内容却对不上",
+                        image.display()
+                    ));
+                }
+            });
+            println!(
+                "   {label}：从日志找回 {found} 项，读得出 {readable} 个，与清单一致 {matching} 个"
+            );
+        }
+        fs::remove_file(&copy).unwrap();
+    }
+    assert!(failures.is_empty(), "不一致：\n{}", failures.join("\n"));
+}
+
+/// 走遍目录树（含已删除的目录与「找不到原目录的文件」），对每一项调 `visit(路径, 项)`。
+fn walk(
+    volume: &Volume,
+    dir: FileRef,
+    prefix: &str,
+    depth: usize,
+    visit: &mut dyn FnMut(&str, &Entry),
+) {
+    if depth > 16 {
+        return;
+    }
+    let Ok(listing) = volume.list(&dir) else {
+        return;
+    };
+    for entry in listing.entries {
+        let path = format!("{prefix}/{}", entry.name);
+        visit(&path, &entry);
+        if entry.is_dir() {
+            walk(volume, entry.file, &path, depth + 1, visit);
+        }
+    }
+}
+
+/// 各条 MFT 记录在设备上的位置与长度：按引导扇区里的 MFT 起点算，只认那里确实是这条记录的（记录头里的记录号对得上）。
+fn mft_positions(device: &dyn BlockDevice, partition: u64, records: &[u64]) -> Vec<(u64, usize)> {
+    let mut boot = [0u8; 512];
+    device.read_exact_at(partition, &mut boot).unwrap();
+    let cluster = u64::from(u16::from_le_bytes([boot[0x0B], boot[0x0C]])) * u64::from(boot[0x0D]);
+    let mft = u64::from_le_bytes(boot[0x30..0x38].try_into().unwrap()) * cluster;
+    let per_record = boot[0x40] as i8;
+    let record_size = if per_record > 0 {
+        per_record as u64 * cluster
+    } else {
+        1 << -i32::from(per_record)
+    };
+    records
+        .iter()
+        .filter_map(|&record| {
+            let offset = partition + mft + record * record_size;
+            let mut head = vec![0u8; record_size as usize];
+            device.read_exact_at(offset, &mut head).ok()?;
+            let number = u32::from_le_bytes(head[0x2C..0x30].try_into().unwrap());
+            (&head[..4] == b"FILE" && u64::from(number) == record)
+                .then_some((offset, record_size as usize))
+        })
+        .collect()
+}
+
 /// 按路径一级级找下去。已删除的短文件名丢了首字母，按其余部分匹配。
 fn locate(volume: &Volume, path: &str, want_deleted: bool) -> Option<Entry> {
     let mut dir = volume.root();

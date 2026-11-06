@@ -1,5 +1,5 @@
 import { useI18n } from 'vue-i18n'
-import type { JobTarget } from '../services/host'
+import { isEwfPath, type JobTarget } from '../services/host'
 import { formatBytes, formatHex } from '../utils/format'
 
 /** 引导扇区里按十六进制显示的字段 */
@@ -42,14 +42,16 @@ export function usePartitionText() {
     return te(key) ? t(key) : note
   }
 
-  /** 来源：镜像文件的路径、磁盘编号或盘符 */
+  /** 来源：镜像文件（E01 写明是 E01 镜像）的路径、磁盘编号或盘符 */
   function sourceName(source: JobTarget | null): string {
     if (source === null) {
       return ''
     }
     switch (source.kind) {
       case 'image':
-        return t('partition.sourceImage', { path: source.path })
+        return isEwfPath(source.path)
+          ? t('partition.sourceEwf', { path: source.path })
+          : t('partition.sourceImage', { path: source.path })
       case 'disk':
         return t('partition.sourceDisk', { number: source.diskNumber })
       case 'volume':

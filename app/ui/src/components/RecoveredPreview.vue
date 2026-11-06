@@ -36,24 +36,40 @@ const emit = defineEmits<{
   reveal: [file: FoundFile]
 }>()
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const { bytePosition } = usePositionText()
 const { formatHostError } = useHostErrorText()
 const titleId = useId()
+
+/** 由两段拼成的文件（两段重组）：「由两段拼成：第一段 A–B，第二段 C–D」，A–D 是源上的字节偏移，含两端 */
+const pieces = computed(() => {
+  const fragments = props.file?.fragments
+  if (fragments === undefined || fragments.length < 2) {
+    return null
+  }
+  const [first, second] = fragments.map((fragment) =>
+    t('carve.preview.fragment', {
+      start: fragment.offset.toLocaleString(locale.value),
+      end: (fragment.offset + Math.max(fragment.length, 1) - 1).toLocaleString(locale.value),
+      size: formatBytes(fragment.length),
+    }),
+  )
+  return t('carve.preview.fragmentsValue', { first, second })
+})
 
 const { preview, error: previewError, isLoading } = useDelayedPreview(
   () => (props.jobId !== null && props.file !== null ? { jobId: props.jobId, file: props.file } : null),
   (target) => `${target.jobId}/${target.file.name}`,
   (target) =>
     props.scanOnly
-      ? previewCarveRange(target.jobId, target.file.offset, target.file.length)
+      ? previewCarveRange(target.jobId, target.file.offset, target.file.length, target.file.fragments)
       : previewRecoveredFile(target.jobId, target.file.name),
 )
 
-/** 起止都按字节偏移给出，结束位置是文件最后一个字节 */
+/** 起止都按字节偏移给出，结束位置是文件最后一个字节；由两段拼成的文件改为分段给出 */
 const extent = computed(() => {
   const file = props.file
-  if (file === null) {
+  if (file === null || pieces.value !== null) {
     return null
   }
   return {
@@ -87,6 +103,10 @@ const extent = computed(() => {
             <dd>{{ extent.start }}</dd>
             <dt>{{ t('carve.preview.end') }}</dt>
             <dd>{{ extent.end }}</dd>
+          </template>
+          <template v-if="pieces !== null">
+            <dt>{{ t('carve.preview.fragments') }}</dt>
+            <dd class="recovered-preview__selectable">{{ pieces }}</dd>
           </template>
           <template v-if="file.incomplete">
             <dt>{{ t('carve.preview.state') }}</dt>

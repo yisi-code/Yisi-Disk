@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use crate::font::{Sfnt, Woff};
+use crate::gzip::Gzip;
 use crate::iff::{AIFF, DJVU};
 use crate::metafile::{Emf, Wmf};
 use crate::mp4::{Cr3, Heic, Mp4};
@@ -114,6 +115,7 @@ impl Registry {
             Box::new(Wmf),
             Box::new(Iso),
             Box::new(Flac),
+            Box::new(Gzip),
         ])
     }
 
@@ -265,6 +267,11 @@ mod tests {
             ("emf", samples::emf(1, 0)),
             ("wmf", samples::wmf(false, 1)),
             ("flac", samples::flac(&samples::FlacLayout::default())),
+            (
+                "gz",
+                samples::gzip(b"hello", &samples::GzipLayout::default()),
+            ),
+            ("swf", samples::cws(&[4])),
             // ISO 9660 在 32 KiB 处的卷描述符那一块认
             (
                 "iso",

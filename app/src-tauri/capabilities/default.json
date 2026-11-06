@@ -5,6 +5,7 @@
   "windows": ["main"],
   "permissions": [
     "allow-app-info",
+    "allow-open-releases-page",
     "allow-engine-capabilities",
     "allow-disk-list",
     "allow-carve-file-types",

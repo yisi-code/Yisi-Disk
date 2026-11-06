@@ -169,6 +169,9 @@ fn os_error(error: &IoError) -> Option<i32> {
         | IoError::Read { source, .. }
         | IoError::Locate { source, .. }
         | IoError::Adopt { source, .. } => source.raw_os_error(),
-        IoError::UnexpectedEof { .. } | IoError::InvalidSectorSize(_) => None,
+        IoError::UnexpectedEof { .. }
+        | IoError::InvalidSectorSize(_)
+        | IoError::Ewf { .. }
+        | IoError::EwfSegmentMissing { .. } => None,
     }
 }

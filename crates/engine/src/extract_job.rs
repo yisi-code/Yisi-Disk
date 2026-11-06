@@ -1,7 +1,8 @@
 //! 保存「先只扫描」时选中的文件：把源上每个文件所在的那一段当作一块小设备，只启用它的格式，
 //! 再跑一遍深度恢复。保存时因此会重做一遍格式校验；找到的文件起点、长度与扫描时一致才算保存成功，
 //! 否则（源上的内容变了）不保留。扫描时不完整的文件按部分恢复重跑：那一段在这块小设备的末尾断开，
-//! 插件给出的那一段（或正好在这里结束的完整文件）起点、长度与扫描时一致就保存。
+//! 插件给出的那一段（或正好在这里结束的完整文件）起点、长度与扫描时一致就保存。由两段拼成的文件
+//! （[`ExtractItem::fragments`]）把那两段首尾接起来当作这块小设备，照样要核对出同样长的完整文件。
 //!
 //! 文件直接存进用户选的目录：先在目录里的暂存子目录中恢复、校验，通过的再移到目录下，名字用另存为时起的
 //! 或恢复时起的；与已有文件重名时加序号，不覆盖。暂存子目录在任务结束时删掉。
@@ -12,7 +13,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use yisi_carve::{
-    CarveControl, CarveError, CarveOptions, DirectorySink, RecoveredFile, carve, rename_new,
+    CarveControl, CarveError, CarveOptions, DirectorySink, Fragment, FragmentView, RecoveredFile,
+    carve, rename_new,
 };
 use yisi_engine::protocol::{CopiedFile, CopySummary, ExtractItem};
 use yisi_formats::Registry;
@@ -160,8 +162,17 @@ fn extract_one(
         enabled,
         start: 0,
         keep_incomplete: item.incomplete.is_some(),
+        // 拼成的文件已经按两段接起来交给它，不用再找
+        join_fragments: false,
     };
+    let fragments: Vec<Fragment> = item.fragments.iter().copied().map(Into::into).collect();
     let window = Window::new(device, item.offset, item.length);
+    let joined = FragmentView::new(device, &fragments);
+    let range: &dyn BlockDevice = if fragments.is_empty() {
+        &window
+    } else {
+        &joined
+    };
     let mut sink = DirectorySink::with_origin(output_dir, item.offset)
         .map_err(|error| format!("无法创建 {}：{error}", output_dir.display()))?;
     let control = ItemControl {
@@ -171,7 +182,7 @@ fn extract_one(
         total,
         found: RefCell::new(Vec::new()),
     };
-    match carve(&window, registry, &options, &mut sink, &control) {
+    match carve(range, registry, &options, &mut sink, &control) {
         Ok(Some(_)) => {}
         Ok(None) => return Ok(None),
         Err(error @ CarveError::Output(_)) => return Err(error_chain(&error)),

@@ -4,7 +4,8 @@
 //! 记录清单存在程序文件夹下 `data` 里的 `carve-history.json`（读写规则见 [`record_file`]）；找到的文件追加写进
 //! `carve-history\<记录 ID>.jsonl`，引擎每发来一批写一行（一个 JSON 数组），不整份重写。记录由任务观察者
 //! [`CarveRecorder`] 按引擎的通知更新：找到的文件、检查点（从哪里接着扫不漏不重）、终结状态。
-//! 部分恢复存下的不完整文件在清单里带着 `incomplete`（原因），完整的没有这一项。
+//! 部分恢复存下的不完整文件在清单里带着 `incomplete`（原因），完整的没有这一项；由两段拼成的文件带着
+//! `fragments`（两段各在源上哪里，另存、预览时按它接起来读），连续存放的没有这一项。
 
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -47,6 +48,9 @@ pub struct CarveRecord {
     /// 部分恢复：不完整的文件也存下（接着扫时照样）。以前的记录没有这一项，按不存算。
     #[serde(default)]
     pub keep_incomplete: bool,
+    /// 两段重组：分成两段存放的照片也拼回来（接着扫时照样）。以前的记录没有这一项，按不拼算。
+    #[serde(default)]
+    pub join_fragments: bool,
     /// 边扫边保存时实际的目录（`recovered-…`）；只扫描时为空。
     pub output_dir: Option<String>,
     pub status: CarveStatus,
@@ -339,6 +343,7 @@ mod tests {
             source_label: "d.img".to_owned(),
             extensions: vec!["jpg".to_owned()],
             keep_incomplete: false,
+            join_fragments: false,
             output_dir: None,
             status: CarveStatus::Running,
             resume_at: 0,
@@ -419,6 +424,7 @@ mod tests {
         }]);
         let records: Vec<CarveRecord> = serde_json::from_value(old).unwrap();
         assert!(!records[0].keep_incomplete);
+        assert!(!records[0].join_fragments);
     }
 
     #[test]

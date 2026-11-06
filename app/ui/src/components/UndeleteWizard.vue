@@ -337,6 +337,9 @@ async function openSource() {
               deleted: currentScan.deleted.toLocaleString(locale),
             })
           }}
+          <template v-if="currentScan.logNames > 0">
+            {{ t('partitionFiles.scan.fromLog', { count: currentScan.logNames.toLocaleString(locale) }, currentScan.logNames) }}
+          </template>
           <template v-if="currentScan.orphans > 0">
             {{ t('partitionFiles.scan.orphans', { count: currentScan.orphans.toLocaleString(locale) }, currentScan.orphans) }}
           </template>

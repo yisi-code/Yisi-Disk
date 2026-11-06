@@ -214,6 +214,16 @@ const enUS: typeof zhCN = {
     technical: 'Technical details',
     engineVersion: 'Engine version',
     engineMethods: 'Supported operations',
+    update: {
+      check: 'Check for updates',
+      checking: 'Checking…',
+      latest: 'You have the latest version ({version})',
+      available: 'Version {version} is available',
+      open: 'Open download page',
+      failed: 'Check failed: {reason}. Try again later, or download from "Releases" on the project page.',
+      timeout: 'Could not reach GitHub within 20 seconds. Try again later, or download from "Releases" on the project page.',
+      privacy: 'The program only goes online, to ask GitHub for the latest version number, when you click "Check for updates"; it never does otherwise. Download and unpack new versions yourself.',
+    },
     techStack: 'Tech stack',
     techStackValue: 'Recovery engine and disk broker in Rust; interface in Tauri 2 + Vue 3 + TypeScript',
     repository: 'Project page',
@@ -650,6 +660,8 @@ const enUS: typeof zhCN = {
     wmf: 'WMF metafile',
     iso: 'Disc image (ISO)',
     flac: 'FLAC lossless audio',
+    gz: 'gzip compressed file',
+    tgz: 'gzip-compressed TAR archive (tar.gz)',
   },
   // Name of an entry in the format picker: when a format may be saved under several extensions, describe the whole format
   fileFormats: {
@@ -668,7 +680,8 @@ const enUS: typeof zhCN = {
     ico: 'Windows icons and cursors',
     psd: 'Photoshop documents (PSD / PSB)',
     pst: 'Outlook data files (PST / OST)',
-    swf: 'Flash movies (SWF, uncompressed only)',
+    swf: 'Flash movies (SWF, uncompressed or zlib-compressed)',
+    gz: 'gzip compressed files (incl. tar.gz)',
   },
   carve: {
     // Where an incomplete file (partial recovery) breaks off
@@ -701,6 +714,9 @@ const enUS: typeof zhCN = {
       keepIncomplete: 'Also list incomplete files (partial recovery)',
       keepIncompleteHint:
         'Files whose second half was overwritten, is unreadable or runs past the end of the disk are saved up to the point where their structure still checks out, marked "Incomplete" and named with .incomplete. They may not open, or only their first part may be usable (for example the top of a photo or the beginning of a video).',
+      joinFragments: 'Put together photos stored in two pieces (slower)',
+      joinFragmentsHint:
+        'When a photo was stored in two pieces with other data in between, find the second piece and put the photo back together. Only for common baseline JPEG (most camera and phone photos); every such photo is checked bit by bit during the scan, which makes it noticeably slower. The details of a put-together photo show where each piece is.',
     },
     output: {
       label: 'Save to',
@@ -735,6 +751,9 @@ const enUS: typeof zhCN = {
       incomplete: 'Incomplete files',
       incompleteOn: 'Listed',
       incompleteOff: 'Not listed',
+      joinFragments: 'Two-piece photos',
+      joinFragmentsOn: 'On',
+      joinFragmentsOff: 'Off',
     },
     history: {
       title: 'Previous scans',
@@ -785,6 +804,9 @@ const enUS: typeof zhCN = {
       state: 'Completeness',
       incomplete: 'Incomplete: {reason}',
       incompleteHint: 'Only the part whose structure still checks out was kept; it may not open, or only its first part may be usable.',
+      fragments: 'Stored in',
+      fragmentsValue: 'Put together from two pieces: first {first}, second {second}',
+      fragment: 'offset {start}–{end} ({size})',
       open: 'Open',
       saveAs: 'Save as…',
     },
@@ -818,8 +840,11 @@ const enUS: typeof zhCN = {
     image: 'Image file',
     disk: 'Physical disk',
     imagePath: 'Image file path',
-    imagePathPlaceholder: 'Full path of the image file, e.g. D:/images/disk.img',
+    imagePathPlaceholder: 'Full path of the image file (raw or E01), e.g. D:/images/disk.img',
     pickTitle: 'Choose an image file',
+    filterImages: 'Disk images',
+    filterEwf: 'E01 images (first segment)',
+    filterAll: 'All files',
     folder: 'Folder',
     folderPath: 'Folder path',
     folderPathPlaceholder: 'The folder to recover deleted files from, e.g. D:/Photos/2024',
@@ -924,6 +949,7 @@ const enUS: typeof zhCN = {
     opening: 'Reading the partition table…',
     openingDisk: 'Requesting administrator rights and reading the partition table…',
     sourceImage: 'Image file {path}',
+    sourceEwf: 'E01 image {path}',
     sourceDisk: 'Disk {number}',
     sourceVolume: 'Drive {letter}:',
   },
@@ -971,6 +997,7 @@ const enUS: typeof zhCN = {
       nameUncertain: 'Incomplete name: the first letter was lost when it was deleted',
       contextDir: 'Folder that is not deleted: listed even when only "Deleted" is ticked; expand it to see the deleted files inside',
       orphans: 'Files without their folder',
+      fromLog: 'From log',
       hint: 'Click a folder to expand or collapse it, click a file to see its details, double-click a file to open it with its default app. Arrow keys move, Space selects.',
       status: {
         loading: 'Reading…',
@@ -991,6 +1018,11 @@ const enUS: typeof zhCN = {
       summary: 'The Master File Table (MFT) has {records} records. Deleted files and folders found: {deleted}.',
       orphans: '{count} of them has lost its original folder and is listed under "Files without their folder". | {count} of them have lost their original folder and are listed under "Files without their folder".',
       unreadable: '{count} Master File Table (MFT) record could not be read; files in it cannot be found. | {count} Master File Table (MFT) records could not be read; files in them cannot be found.',
+      fromLog: 'Another {count} deleted file or folder no longer in the Master File Table (MFT) was recovered from the log ($LogFile), marked "From log". | Another {count} deleted files and folders no longer in the Master File Table (MFT) were recovered from the log ($LogFile), marked "From log".',
+      log: {
+        running: 'Reading the log ($LogFile) for deleted files no longer in the Master File Table (MFT): {done} / {total} ({percent}%)',
+        starting: 'Reading the log ($LogFile) for deleted files no longer in the Master File Table (MFT)…',
+      },
       free: {
         hint: 'When a deleted folder has also lost its record in its parent folder, neither the folder nor the files in it can be reached by browsing. Reading the free space of this partition can recognize such folders by their contents and list them under "Files without their folder" in the root. It reads as much as the free space, which can take a long time on a large partition; you can cancel at any time.',
         action: 'Look for files whose folder is gone',
@@ -1008,6 +1040,7 @@ const enUS: typeof zhCN = {
       overwritten: 'Deleted · overwritten',
       unknown: 'Deleted · uncertain',
       cleared: 'Deleted · location cleared',
+      logNameOnly: 'Deleted · name only',
     },
     unsupported: {
       compressed: 'New Technology File System (NTFS) compressed · not supported',
@@ -1029,6 +1062,8 @@ const enUS: typeof zhCN = {
       overwritten: 'Deleted. Part of the space it used now belongs to another file; its contents are at least partly overwritten',
       unknown: 'Deleted. Whether it can be fully recovered cannot be told (for example the first cluster is uncertain or the cluster chain is broken)',
       cleared: 'Deleted. When it was deleted the file system cleared its length and data location (as ext3 and ext4 do), so only its name can be listed and its contents cannot be read; they may still be on the disk, so try deep recovery by file type',
+      logNameOnly:
+        'Deleted. The log ($LogFile) only kept its name and parent folder, not where its data was (the file is older than the oldest log record, or its contents were stored inside its Master File Table (MFT) record, which the log does not keep), so its contents cannot be read or saved; they may still be on the disk, so try deep recovery by file type',
     },
     details: {
       title: 'Details',
@@ -1044,6 +1079,11 @@ const enUS: typeof zhCN = {
       position: 'Data location',
       record: 'MFT record',
       storage: 'Storage',
+      source: 'Source',
+      fromLog:
+        'Recovered from the log ($LogFile): this file\'s Master File Table (MFT) record has been reused or cleared. Its contents are read using the data runs it had before it was deleted; those clusters may since have been used by other files, so open the copy to check it.',
+      fromLogDir:
+        'Recovered from the log ($LogFile): this folder\'s Master File Table (MFT) record has been reused or cleared; it lists the deleted items that were in it.',
       utcTime: '{time} (UTC)',
       open: 'Open with default app',
       openHint: 'Before opening, a temporary copy is made in the data folder inside the program folder; it is cleared the next time.',
@@ -1060,6 +1100,7 @@ const enUS: typeof zhCN = {
         running: 'Copied {done} / {total} ({percent}%), {count} file | Copied {done} / {total} ({percent}%), {count} files',
         scanning: 'Scanning the Master File Table (MFT) for deleted files in the folders ({percent}%)…',
         scanningFree: 'Reading the free space for files whose folder is gone ({percent}%)…',
+        scanningLog: 'Reading the log ($LogFile) for deleted files no longer in the Master File Table (MFT) ({percent}%)…',
         completed: 'Copy finished',
         failed: 'Copy failed',
         cancelled: 'Cancelled; files already copied stay in the destination',
@@ -1132,6 +1173,7 @@ const enUS: typeof zhCN = {
       preparing: 'Preparing the plan to write it back…',
       hint: 'A "lost" partition can be written back to the partition table: a backup is saved first, nothing is written until you confirm, and it can be rolled back. Windows mounts it afterwards and may write to it, so save the files you need first.',
       volumeUnsupported: 'A single drive letter is selected, so the partition table cannot be changed: choose the whole disk.',
+      ewfUnsupported: 'E01 images are read-only, so the partition table cannot be changed: use "Create a disk image" to turn it into a plain image first and write it back there.',
       extUnsupported: 'Partitions with a Linux extended file system (ext) can only be browsed and their files saved to another disk; writing them back to the partition table is not offered yet.',
       inTable: 'This partition is in the partition table (partition {number}), so it is not lost and there is nothing to write back: if Windows can read it, it already has a drive letter. If it will not open or asks to be formatted, use "Repair a partition that will not open" to repair it in place, without saving files elsewhere.',
       structureOnly: 'Both boot sectors of this partition are gone; it was found by its master file table ($MFT) and is browsed with worked-out settings. Where the partition originally ended cannot be worked out exactly, so writing it back to the partition table is not offered. Save the files you need to another disk first.',
@@ -1248,6 +1290,7 @@ const enUS: typeof zhCN = {
       rebuild: 'Rebuild the boot sector…',
       preparing: 'Preparing the repair plan…',
       volumeUnsupported: 'A single drive letter cannot be repaired: choose the whole disk instead, or create an image and repair the image.',
+      ewfUnsupported: 'E01 images are read-only and cannot be repaired: use "Create a disk image" to turn it into a plain image first and repair that instead.',
       setType: 'Change the partition type…',
       repairGpt: 'Repair the GPT…',
       repairGptHint: 'The intact copy of the GUID Partition Table (GPT) is written over the damaged one; the partitions themselves are not changed.',
@@ -1449,6 +1492,7 @@ const enUS: typeof zhCN = {
       mftFromMirror: 'Repair the master file table from its copy…',
       preparing: 'Preparing the repair plan…',
       volumeUnsupported: 'A single drive letter cannot be repaired: choose the whole disk instead, or create an image and repair the image.',
+      ewfUnsupported: 'E01 images are read-only and cannot be repaired: use "Create a disk image" to turn it into a plain image first and repair that instead.',
       outcome: '{action}: {outcome}',
     },
     fix: {
@@ -1969,6 +2013,7 @@ const enUS: typeof zhCN = {
     backupFailed: 'Could not save the backup, so nothing was written',
     backupUnreadable: 'The backup file cannot be read or is damaged, so it cannot be rolled back',
     writeTargetUnsupported: 'A single drive letter cannot be written: choose the whole disk or an image file',
+    writeTargetEwf: 'E01 images are read-only and cannot be written: use "Create a disk image" to turn it into a plain image first and repair that instead',
     writeSystemDisk: 'Windows runs from a partition on this disk, so it is not written',
     writeWrongDisk: 'This disk number no longer refers to the disk the plan was made for (it may have been reconnected): diagnose again',
     volumeInUse: 'A partition to be written is in use by another program and cannot be locked: close programs using it (Explorer windows, open files) and click "Write" again',

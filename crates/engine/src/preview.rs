@@ -6,6 +6,7 @@ use std::io::{self, Cursor, Read};
 use std::path::Path;
 
 use image::{ImageFormat, ImageReader, Limits};
+use yisi_carve::{Fragment, FragmentView};
 use yisi_engine::protocol::{
     FilePreview, ImagePreview, PREVIEW_HEAD_BYTES, STREAM_HEAD_BYTES, StreamPreview, THUMBNAIL_EDGE,
 };
@@ -17,20 +18,27 @@ const MAX_IMAGE_FILE: u64 = 64 << 20;
 const MAX_DECODE_ALLOC: u64 = 256 << 20;
 const MAX_IMAGE_EDGE: u32 = 16_384;
 
-/// 预览源上从 `offset` 起 `length` 字节（只扫描、还没保存的文件）。超出源末尾的部分截掉。
+/// 预览源上从 `offset` 起 `length` 字节（只扫描、还没保存的文件）；由几段拼成的文件给出 `fragments`，
+/// 按这几段接起来读。超出源末尾的部分截掉。
 pub fn preview_range(
     device: &dyn BlockDevice,
     offset: u64,
     length: u64,
+    fragments: &[Fragment],
 ) -> io::Result<FilePreview> {
     let window = Window::new(device, offset, length);
-    let length = window.size();
+    let joined = FragmentView::new(device, fragments);
+    let range: &dyn BlockDevice = if fragments.is_empty() {
+        &window
+    } else {
+        &joined
+    };
     preview_from(
         DeviceReader {
-            device: &window,
+            device: range,
             position: 0,
         },
-        length,
+        range.size(),
     )
 }
 

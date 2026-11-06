@@ -164,6 +164,8 @@ export function useBrowse() {
     isScanning,
     isCancellingScan,
     scanFailure,
+    /** 扫描进行到的阶段（scanMft、scanLog、scanFree）；NTFS 扫完 MFT 后读 $LogFile 时换成 scanLog，进度从 0 重新算 */
+    scanStage: job.stage,
     scanDone: job.done,
     scanTotal: job.total,
     scanPercent: job.percent,

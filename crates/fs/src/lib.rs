@@ -1,7 +1,7 @@
 //! 文件系统识别；目录读取与文件提取；空闲空间位图；引导扇区与超级块的检查和重建；exFAT / FAT 一致性检查。
 //!
 //! 目前能浏览的是 FAT12/16/32、exFAT、NTFS 与 ext2/3/4：列目录（含已删除的项，并判断还能不能完整找回）、读出文件。
-//! NTFS 的已删除项要先扫一遍 MFT（[`Volume::scan`]）才列得出；FAT / exFAT 可以按需扫一遍空闲簇，找回原来的目录
+//! NTFS 的已删除项要先扫一遍 MFT（[`Volume::scan`]，之后再读 `$LogFile`）才列得出；FAT / exFAT 可以按需扫一遍空闲簇，找回原来的目录
 //! 已找不到的文件夹。主引导扇区（ext 是主超级块）坏了时可以按备份打开
 //! （[`Volume::open_with`]）。只读，不写盘。
 #![forbid(unsafe_code)]
@@ -111,6 +111,21 @@ pub struct ScanSummary {
     pub unreadable: u64,
     /// FAT / exFAT：读过的空闲空间字节数。
     pub free_bytes: u64,
+    /// NTFS：`$LogFile` 里认出的日志记录数（读不出日志时为 0）。
+    pub log_records: u64,
+    /// NTFS：从 `$LogFile` 找回的名字数（MFT 里这条记录已被重用或清掉、日志里还留着的已删除项）。
+    pub log_names: u64,
+}
+
+/// 扫描进行到哪一步：进度里的阶段名按它取（[`Volume::scan_stage`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanStage {
+    /// NTFS 扫 MFT（ext 不扫，也报这一种）。
+    Mft,
+    /// FAT / exFAT 读空闲簇。
+    FreeSpace,
+    /// NTFS 扫完 MFT 之后读 `$LogFile`。
+    Log,
 }
 
 /// 按分区开头的引导扇区（ext 是超级块）识别文件系统。读不出时返回错误，认不出时返回 [`FsKind::Unknown`]。
@@ -297,9 +312,19 @@ impl Volume {
         }
     }
 
-    /// 扫一遍，找出已删除的项：NTFS 扫 MFT；FAT / exFAT 读目录树没用到的空闲簇，按内容认出原来的目录已找不到的
-    /// 文件夹，列进根目录下的虚拟目录；ext 什么也不做。扫过一次之后直接返回上次的结果。
-    /// `progress(已处理字节, 总字节)` 返回 `false` 时停下，结果为 `None`，下次重新扫；总字节还不知道时为 0。
+    /// 扫描正在做的那一步（进度回调里查，换了一步时进度从 0 重新算）。
+    pub fn scan_stage(&self) -> ScanStage {
+        match &self.inner {
+            Inner::Fat(_) | Inner::Exfat(_) => ScanStage::FreeSpace,
+            Inner::Ntfs(ntfs) => ntfs.scan_stage(),
+            Inner::Ext(_) => ScanStage::Mft,
+        }
+    }
+
+    /// 扫一遍，找出已删除的项：NTFS 扫 MFT，再读 `$LogFile` 找回 MFT 记录已被重用或清掉的已删除项；FAT / exFAT
+    /// 读目录树没用到的空闲簇，按内容认出原来的目录已找不到的文件夹，列进根目录下的虚拟目录；ext 什么也不做。
+    /// 扫过一次之后直接返回上次的结果。`progress(已处理字节, 总字节)` 返回 `false` 时停下，结果为 `None`，下次重新扫；
+    /// 总字节还不知道时为 0。NTFS 换到读日志那一步（[`scan_stage`](Self::scan_stage)）时进度从 0 重新算。
     pub fn scan(
         &self,
         progress: &mut dyn FnMut(u64, u64) -> bool,

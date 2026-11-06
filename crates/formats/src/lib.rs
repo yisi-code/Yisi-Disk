@@ -11,8 +11,10 @@ mod flac;
 mod flv;
 mod font;
 mod gif;
+mod gzip;
 mod ico;
 mod iff;
+mod inflate;
 mod iso;
 mod jpg;
 mod metafile;
@@ -43,7 +45,7 @@ mod tiff;
 mod walker;
 mod zip;
 
-pub use plugin::{DataCheck, FileFormat, FormatInfo, Recovering, Signature};
+pub use plugin::{DataCheck, FileFormat, FormatInfo, Recovering, Resume, Signature};
 pub use registry::{HeaderMatch, Registry};
 
 #[cfg(test)]
@@ -157,6 +159,23 @@ mod robustness {
                 ..samples::FlacLayout::default()
             }),
             samples::cab_signed(2, 300, 500),
+            samples::gzip(
+                &samples::compressible(3000, 1),
+                &samples::GzipLayout {
+                    name: Some("a.tar"),
+                    header_crc: true,
+                    ..samples::GzipLayout::default()
+                },
+            ),
+            [
+                samples::gzip(b"first", &samples::GzipLayout::default()),
+                samples::gzip(
+                    &samples::compressible(700, 2),
+                    &samples::GzipLayout::default(),
+                ),
+            ]
+            .concat(),
+            samples::cws(&[5, 70, 0]),
         ];
         for round in 0..3000 {
             let seed = &seeds[round % seeds.len()];
@@ -265,6 +284,14 @@ mod robustness {
                 samples::tar(&[("a", 600), ("b", 600), ("c", 600)], false, false),
             ),
             ("flac", samples::flac(&samples::FlacLayout::default())),
+            (
+                "gz",
+                samples::gzip(
+                    &samples::compressible(60_000, 3),
+                    &samples::GzipLayout::default(),
+                ),
+            ),
+            ("swf", samples::cws(&[60_000])),
         ];
         for (extension, sample) in &supported {
             for tenths in [4, 6, 8] {

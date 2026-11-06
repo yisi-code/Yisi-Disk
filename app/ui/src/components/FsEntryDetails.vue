@@ -7,7 +7,7 @@ import { useDelayedPreview } from '../composables/useDelayedPreview'
 import { useEntryAttributes } from '../composables/useEntryAttributes'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { usePositionText } from '../composables/usePositionText'
-import { previewFsFile, type HostError } from '../services/host'
+import { hasReadableContent, previewFsFile, type HostError } from '../services/host'
 import { formatBytes } from '../utils/format'
 
 const props = defineProps<{
@@ -33,12 +33,9 @@ const { bytePosition } = usePositionText()
 const titleId = useId()
 const { formatHostError } = useHostErrorText()
 
-// 目录没有内容可预览；存放方式不支持的文件读不出原内容，也不预览
+// 目录没有内容可预览；存放方式不支持、数据位置已不知道的文件读不出原内容，也不预览
 const { preview, error: previewError, isLoading } = useDelayedPreview(
-  () =>
-    props.item !== null && !props.item.entry.isDir && props.item.entry.unsupported === null
-      ? props.item
-      : null,
+  () => (props.item !== null && hasReadableContent(props.item.entry) ? props.item : null),
   (item) => `${props.jobId}/${props.partition}/${item.id}`,
   (item) => previewFsFile(props.jobId, props.partition, item.entry.file),
 )
@@ -50,6 +47,10 @@ const stateText = computed(() => {
   }
   if (entry.virtualDir !== null) {
     return t(`partitionFiles.stateDetail.${entry.virtualDir}`)
+  }
+  // 从日志找回、日志里只有名字：与 ext 删除时清空位置是同一个状态，原因不同
+  if (entry.fromLog && entry.state === 'cleared') {
+    return t('partitionFiles.stateDetail.logNameOnly')
   }
   return t(`partitionFiles.stateDetail.${entry.deleted ? entry.state : 'live'}`)
 })
@@ -89,6 +90,18 @@ const position = computed(() => {
           <dd class="wizard__path-text">/{{ item.path.join('/') }}</dd>
           <dt>{{ t('partitionFiles.details.state') }}</dt>
           <dd>{{ stateText }}</dd>
+          <template v-if="item.entry.fromLog">
+            <dt>{{ t('partitionFiles.details.source') }}</dt>
+            <dd>
+              {{
+                t(
+                  item.entry.isDir
+                    ? 'partitionFiles.details.fromLogDir'
+                    : 'partitionFiles.details.fromLog',
+                )
+              }}
+            </dd>
+          </template>
           <template v-if="attributesDetail(item.entry)">
             <dt>{{ t('partitionFiles.details.attributes') }}</dt>
             <dd>{{ attributesDetail(item.entry) }}</dd>
@@ -131,7 +144,7 @@ const position = computed(() => {
             <button
               class="wizard__button"
               type="button"
-              :disabled="!canOpen || item.entry.unsupported !== null"
+              :disabled="!canOpen || !hasReadableContent(item.entry)"
               @click="emit('open', item)"
             >
               {{ t('partitionFiles.details.open') }}
@@ -143,7 +156,7 @@ const position = computed(() => {
             {{ formatHostError(actionError) }}
           </p>
           <FilePreviewView
-            v-if="item.entry.unsupported === null"
+            v-if="hasReadableContent(item.entry)"
             :preview="preview"
             :is-loading="isLoading"
             :error="previewError"

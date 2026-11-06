@@ -3,12 +3,16 @@
 //!
 //! 允许 `unsafe`，仅用于平台系统调用，每处都要写 `// SAFETY:` 说明。
 
+mod adler32;
+pub mod bytes;
 mod device;
 #[cfg(windows)]
 mod disk_list;
 mod disk_path;
 mod error;
+mod ewf;
 mod file;
+mod image;
 mod imaging;
 #[cfg(windows)]
 mod ioctl;
@@ -18,6 +22,8 @@ mod plan;
 mod range;
 mod raw;
 mod read;
+#[cfg(any(test, feature = "test-samples"))]
+pub mod samples;
 mod scan;
 #[cfg(windows)]
 mod sparse;
@@ -29,6 +35,7 @@ mod window;
 #[cfg(windows)]
 mod windows_disk;
 
+pub use adler32::adler32;
 pub use device::BlockDevice;
 #[cfg(windows)]
 pub use disk_list::{BusType, DiskInfo, PartitionStyle, disk_identity, list_disks};
@@ -37,7 +44,9 @@ pub use disk_path::{
     volume_root,
 };
 pub use error::IoError;
+pub use ewf::EwfImage;
 pub use file::{temp_path, with_suffix, write_then_replace};
+pub use image::{ImageFormat, OpenedImage, image_format, open_image};
 pub use imaging::{
     BadMap, ImageStore, ImagingControl, ImagingOptions, ImagingOutcome, MapError, MapHeader,
     RecordedPartition, Round, Scope, Segment, SegmentState, map_path, recorded_sector_size,

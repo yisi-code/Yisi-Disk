@@ -6,8 +6,9 @@ import type { useBrowse } from '../composables/useBrowse'
 import { isDeviceKind } from '../services/host'
 
 /**
- * 浏览会话里扫描已删除项的进度：进度条、已扫描多少、读得慢的原因、取消扫描。两种扫描共用：NTFS 扫主文件表（MFT），
- * FAT / exFAT 读空闲簇（找原来的目录已找不到的文件夹），文字按 browse.scanKind 选。找回删除的文件与找回丢失的分区共用
+ * 浏览会话里扫描已删除项的进度：进度条、已扫描多少、读得慢的原因、取消扫描。两种扫描共用：NTFS 扫主文件表（MFT）、
+ * 再读日志（$LogFile），FAT / exFAT 读空闲簇（找原来的目录已找不到的文件夹），文字按 browse.scanKind 与进度的阶段选。
+ * 找回删除的文件与找回丢失的分区共用
  */
 const props = defineProps<{
   browse: ReturnType<typeof useBrowse>
@@ -15,10 +16,13 @@ const props = defineProps<{
 
 const { t } = useI18n()
 
-/** 读空闲簇的文案在 partitionFiles.scan.free 下，扫 MFT 的直接在 partitionFiles.scan 下 */
-const textPrefix = computed(() =>
-  props.browse.scanKind.value === 'free' ? 'partitionFiles.scan.free' : 'partitionFiles.scan',
-)
+/** 读空闲簇的文案在 partitionFiles.scan.free 下，读日志的在 partitionFiles.scan.log 下，扫 MFT 的直接在 partitionFiles.scan 下 */
+const textPrefix = computed(() => {
+  if (props.browse.scanKind.value === 'free') {
+    return 'partitionFiles.scan.free'
+  }
+  return props.browse.scanStage.value === 'scanLog' ? 'partitionFiles.scan.log' : 'partitionFiles.scan'
+})
 
 const statusText = computed(() =>
   props.browse.scanTotal.value > 0

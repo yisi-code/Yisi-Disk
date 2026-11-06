@@ -38,7 +38,7 @@ const { sourceName, unbrowsableReason } = usePartitionText()
 const search = usePartitionSearch()
 const browse = useBrowse()
 const writePlan = useWritePlan()
-const { writeActionText, writeOutcomeText } = useWritePlanText()
+const { writeActionText, writeOutcomeText, writeBlockedText } = useWritePlanText()
 const domPrefix = useId()
 
 const titleElement = ref<HTMLHeadingElement | null>(null)
@@ -89,7 +89,7 @@ const isPartitionBusy = computed(
     writePlan.isExecuting.value,
 )
 
-/** 镜像文件与整块磁盘可以写回分区表；卷上没有分区表 */
+/** raw 镜像文件与整块磁盘可以写回分区表；卷上没有分区表，E01 只读 */
 const canWrite = computed(() => canWritePlan(search.target.value))
 
 /** 选中的是「丢失」、又不与别的候选重叠的分区：可以写回分区表（ext 分区只浏览、另存，不写回） */
@@ -599,7 +599,7 @@ async function openSelected() {
                   </p>
                   <p v-else class="wizard__hint">{{ t('findPartitions.write.hint') }}</p>
                 </template>
-                <p v-else class="wizard__hint">{{ t('findPartitions.write.volumeUnsupported') }}</p>
+                <p v-else class="wizard__hint">{{ writeBlockedText(search.target.value, 'findPartitions.write') }}</p>
               </div>
             </div>
           </section>

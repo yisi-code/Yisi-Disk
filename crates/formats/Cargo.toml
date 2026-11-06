@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+miniz_oxide.workspace = true
 yisi-part.workspace = true
 
 [lints]

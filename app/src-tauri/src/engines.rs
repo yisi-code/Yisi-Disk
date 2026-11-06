@@ -22,11 +22,11 @@ use yisi_engine::protocol::{
     BROWSE_OPEN, BrowseOpened, BrowseParams, CANCEL, CANCEL_SCAN, CANCELLED, CAPABILITIES,
     CARVE_EXTRACT, CARVE_START, CHECKPOINT, COMPLETED, COPIED, COPY_FILES, Capabilities,
     CarveParams, CarveStarted, CopyItem, CopyParams, CopyStarted, DiskList, ExtractItem,
-    ExtractParams, FAILED, FOUND, FileListPage, FilePreview, FileTypeList, FoundFile, HEARTBEAT,
-    IMAGING, JobRef, LIST_DISKS, LIST_FILE_TYPES, LIST_FILES, LOG, ListFilesParams, PARTIAL_SUFFIX,
-    PARTITIONS, PAUSE, PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS, PartitionRef,
-    PreviewFsParams, PreviewParams, PreviewRangeParams, READ_SCAN, READING, RESUME, ReadScanParams,
-    SCAN_DELETED, ScanParams, ScanResult, Source, error_code,
+    ExtractParams, FAILED, FOUND, FileFragment, FileListPage, FilePreview, FileTypeList, FoundFile,
+    HEARTBEAT, IMAGING, JobRef, LIST_DISKS, LIST_FILE_TYPES, LIST_FILES, LOG, ListFilesParams,
+    PARTIAL_SUFFIX, PARTITIONS, PAUSE, PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS,
+    PartitionRef, PreviewFsParams, PreviewParams, PreviewRangeParams, READ_SCAN, READING, RESUME,
+    ReadScanParams, SCAN_DELETED, ScanParams, ScanResult, Source, error_code,
 };
 
 use crate::carve_history::{CarveHistory, CarveRecord, CarveRecorder, CarveStatus};
@@ -69,8 +69,9 @@ pub(crate) const IMAGE_SECTOR_SIZE: u32 = 512;
 /// 坏区图的头几行在开头，只读这么多。
 const MAP_HEAD_BYTES: u64 = 4096;
 
-/// 镜像按多大的扇区打开：本程序做的镜像旁边有坏区图，里面记着源的扇区大小（4 KiB 扇区的盘做的镜像要按 4096 打开），
-/// 其他按 [`IMAGE_SECTOR_SIZE`]。读源、生成与执行写入计划都按这一个函数。
+/// raw 镜像按多大的扇区打开：本程序做的镜像旁边有坏区图，里面记着源的扇区大小（4 KiB 扇区的盘做的镜像要按 4096 打开），
+/// 其他按 [`IMAGE_SECTOR_SIZE`]。读源、生成与执行写入计划都按这一个函数。E01 自己记着扇区大小，引擎打开时用它记的，
+/// 不看这里（E01 也不能写）。
 pub(crate) fn image_sector_size(image_path: &Path) -> u32 {
     let Ok(file) = std::fs::File::open(yisi_io::map_path(image_path)) else {
         return IMAGE_SECTOR_SIZE;
@@ -205,6 +206,7 @@ impl Engines {
         output_dir: Option<String>,
         extensions: Vec<String>,
         keep_incomplete: bool,
+        join_fragments: bool,
         source_label: String,
     ) -> Result<(), HostError> {
         // 磁盘编号不合法时不启动引擎
@@ -217,6 +219,7 @@ impl Engines {
             source_label,
             extensions: extensions.clone(),
             keep_incomplete,
+            join_fragments,
             output_dir: None,
             status: CarveStatus::Running,
             resume_at: 0,
@@ -245,6 +248,7 @@ impl Engines {
                     start_at: 0,
                     continue_dir: None,
                     keep_incomplete,
+                    join_fragments,
                 })
             },
         );
@@ -299,6 +303,7 @@ impl Engines {
                     start_at: record.resume_at,
                     continue_dir: record.output_dir.clone(),
                     keep_incomplete: record.keep_incomplete,
+                    join_fragments: record.join_fragments,
                 })
             },
         );
@@ -336,13 +341,15 @@ impl Engines {
         lock(&self.carve_targets).insert(id.to_owned(), target);
     }
 
-    /// 预览只扫描、还没保存的文件：另起一个引擎回到扫描任务 `scan_job_id` 的源上读这一段。
+    /// 预览只扫描、还没保存的文件：另起一个引擎回到扫描任务 `scan_job_id` 的源上读这一段
+    /// （由两段拼成的文件按 `fragments` 接起来读）。
     pub fn preview_range(
         &self,
         broker: &BrokerSession,
         scan_job_id: &str,
         offset: u64,
         length: u64,
+        fragments: Vec<FileFragment>,
     ) -> Result<FilePreview, HostError> {
         let target = self.carve_target(scan_job_id)?;
         let process = EngineProcess::spawn(None, None, || {})?;
@@ -352,6 +359,7 @@ impl Engines {
                     source,
                     offset,
                     length,
+                    fragments,
                 })
             })
             .and_then(|params| process.request(PREVIEW_RANGE, params, BROWSE_TIMEOUT));

@@ -1,6 +1,12 @@
 import { useI18n } from 'vue-i18n'
 import { usePartitionText } from './usePartitionText'
-import type { PartitionTableDetail, PlanSummary, WriteRecord } from '../services/host'
+import {
+  writePlanBlock,
+  type JobTarget,
+  type PartitionTableDetail,
+  type PlanSummary,
+  type WriteRecord,
+} from '../services/host'
 import { formatBytes } from '../utils/format'
 
 /** 写入计划与写盘记录的文字：做了什么、结果怎样。确认页、写盘记录、执行后的提示共用 */
@@ -78,5 +84,14 @@ export function useWritePlanText() {
       : t('writePlan.outcome.partial', { step, written: outcome.written })
   }
 
-  return { writeActionText, writeOutcomeText, writeTargetText, tableTypeText }
+  /**
+   * 不能为这个源生成写盘计划时的说明：`scope` 是功能自己的文案位置（如 `repair.fix`），下面有 volumeUnsupported
+   * 与 ewfUnsupported 两句，按原因（writePlanBlock）选；还没有源时按卷说
+   */
+  function writeBlockedText(target: JobTarget | null, scope: string): string {
+    const block = (target === null ? null : writePlanBlock(target)) ?? 'volume'
+    return t(`${scope}.${block}Unsupported`)
+  }
+
+  return { writeActionText, writeOutcomeText, writeTargetText, tableTypeText, writeBlockedText }
 }

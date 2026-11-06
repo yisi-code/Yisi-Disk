@@ -1,10 +1,12 @@
 //! 扫一遍 MFT：每条记录留一份摘要（序号、是否在用、长度、数据位置、存放方式、可信度），
 //! 已删除的记录另外留下名字与父目录引用，扫完按父目录挂回目录树。
+//! 之后读 `$LogFile`（[`logfile`](super::logfile)），把 MFT 里已找不到的已删除项一并挂上。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use yisi_part::bytes::{le32, le64};
 
+use super::logfile::{self, LogFile, Logged};
 use super::record::{
     ATTRIBUTE_LIST, Body, DATA, NAMESPACE_DOS, Record, STANDARD_INFORMATION, decode_runs, split_ref,
 };
@@ -14,7 +16,7 @@ use super::{
     BITMAP_RECORD, Ntfs, Value, file_names, reparse_point, truncated_on_delete, unsupported,
 };
 use crate::entry::{Entry, FileAttributes, FileRef, Location, Stamp, State, Unsupported};
-use crate::{FsError, ScanSummary};
+use crate::{FsError, ScanStage, ScanSummary};
 
 /// 一次读这么多字节的 MFT 或分配位图。
 const BLOCK: u64 = 1 << 20;
@@ -149,6 +151,28 @@ struct ExtensionData {
     encrypted: bool,
 }
 
+/// 从 `$LogFile` 找回的一个名字。
+struct LoggedName {
+    record: u64,
+    sequence: u16,
+    parent: u64,
+    parent_sequence: u16,
+    name: String,
+    short_name: Option<String>,
+    created: u64,
+    modified: u64,
+    attributes: u32,
+    /// 长度、数据位置、存放方式、可信度（按删除前的运行表判断）；`DIRECTORY` 标志表示目录。
+    summary: Summary,
+}
+
+/// 挂在某个目录下的一项：MFT 里的已删除名字，或从日志找回的名字。
+#[derive(Clone, Copy)]
+enum Child {
+    Mft(u32),
+    Logged(u32),
+}
+
 pub(crate) struct Scan {
     pub summary: ScanSummary,
     records: Vec<Summary>,
@@ -156,6 +180,13 @@ pub(crate) struct Scan {
     /// 父目录记录号 → 挂在它下面的已删除名字（`names` 的下标）。
     children: HashMap<u64, Vec<u32>>,
     orphans: Vec<u32>,
+    logged: Vec<LoggedName>,
+    /// 从日志找回、内容读得出的文件删除前的记录映像：（记录号，序号）→ 映像。
+    logged_images: HashMap<(u64, u16), Vec<u8>>,
+    /// 目录列出时的（记录号，序号）→ 另外挂在它下面的项：从日志找回的名字，以及上级目录只在日志里找得到的
+    /// MFT 已删除名字。
+    extra_children: HashMap<(u64, u16), Vec<Child>>,
+    logged_orphans: Vec<u32>,
 }
 
 /// 簇的分配位图：一位一个簇，1 为已占用。
@@ -212,6 +243,7 @@ impl Scan {
         ntfs: &Ntfs,
         progress: &mut dyn FnMut(u64, u64) -> bool,
     ) -> Result<Option<Self>, FsError> {
+        ntfs.set_scan_stage(ScanStage::Mft);
         let record_count = ntfs.record_count;
         if record_count > MAX_RECORDS {
             return Err(FsError::Invalid(
@@ -262,6 +294,9 @@ impl Scan {
             extensions: HashMap::new(),
             pending: Vec::new(),
             unreadable: 0,
+            logged: Vec::new(),
+            logged_images: HashMap::new(),
+            log_records: 0,
         };
         let per_block = (BLOCK / record_size).max(1);
         let mut buffer = Vec::new();
@@ -291,6 +326,14 @@ impl Scan {
                 return Ok(None);
             }
         }
+        // 日志读不出（没有 $LogFile、重启区坏了）不影响扫描的结果，只是没有从日志找回的项
+        ntfs.set_scan_stage(ScanStage::Log);
+        let log = match logfile::read(ntfs, progress) {
+            Ok(Some(log)) => log,
+            Ok(None) => return Ok(None),
+            Err(_) => LogFile::default(),
+        };
+        builder.add_logged(log);
         Ok(Some(builder.finish()))
     }
 
@@ -315,21 +358,40 @@ impl Scan {
             })
     }
 
-    /// 挂在目录 `record`（序号 `sequence`）下的已删除项。
+    /// 挂在目录 `record`（序号 `sequence`）下的已删除项，含从日志找回的。
     pub fn child_entries(&self, record: u64, sequence: u16) -> Vec<Entry> {
         let matches = usize::try_from(record)
             .ok()
             .and_then(|index| self.records.get(index))
             .is_some_and(|summary| summary.has(DIRECTORY) && summary.sequence == sequence);
-        if !matches {
-            return Vec::new();
-        }
-        self.children
-            .get(&record)
+        let mut entries: Vec<Entry> = if matches {
+            self.children
+                .get(&record)
+                .map(|children| {
+                    children
+                        .iter()
+                        .filter_map(|&index| self.entry(index))
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        entries.extend(self.logged_children(record, sequence));
+        entries
+    }
+
+    /// 另外挂在目录 `record`（列出时的序号 `sequence`）下的项；从日志找回的目录只有这些。
+    pub fn logged_children(&self, record: u64, sequence: u16) -> Vec<Entry> {
+        self.extra_children
+            .get(&(record, sequence))
             .map(|children| {
                 children
                     .iter()
-                    .filter_map(|&index| self.entry(index))
+                    .filter_map(|&child| match child {
+                        Child::Mft(index) => self.entry(index),
+                        Child::Logged(index) => self.logged_entry(index),
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -339,7 +401,48 @@ impl Scan {
         self.orphans
             .iter()
             .filter_map(|&index| self.entry(index))
+            .chain(
+                self.logged_orphans
+                    .iter()
+                    .filter_map(|&index| self.logged_entry(index)),
+            )
             .collect()
+    }
+
+    /// 从日志找回、内容读得出的文件删除前的记录映像。
+    pub fn logged_image(&self, record: u64, sequence: u16) -> Option<&[u8]> {
+        self.logged_images
+            .get(&(record, sequence))
+            .map(Vec::as_slice)
+    }
+
+    fn logged_entry(&self, index: u32) -> Option<Entry> {
+        let name = self.logged.get(index as usize)?;
+        let summary = &name.summary;
+        let is_dir = summary.has(DIRECTORY);
+        let size = if is_dir { 0 } else { summary.size };
+        Some(Entry {
+            name: name.name.clone(),
+            short_name: name.short_name.clone(),
+            name_uncertain: false,
+            size,
+            modified: Stamp::Nt(name.modified).text(),
+            created: Stamp::Nt(name.created).text(),
+            state: summary.state(),
+            position: summary.position(),
+            unsupported: summary.unsupported(),
+            attributes: FileAttributes::from_bits(name.attributes),
+            file: FileRef {
+                size,
+                is_dir,
+                deleted: true,
+                location: Location::Logged {
+                    record: name.record,
+                    sequence: name.sequence,
+                },
+                modified: (name.modified != 0).then_some(Stamp::Nt(name.modified)),
+            },
+        })
     }
 
     fn entry(&self, index: u32) -> Option<Entry> {
@@ -385,6 +488,9 @@ struct Builder<'a> {
     /// 有属性列表的已删除记录：扫完再跟着属性列表去读扩展记录。
     pending: Vec<u64>,
     unreadable: u64,
+    logged: Vec<LoggedName>,
+    logged_images: HashMap<(u64, u16), Vec<u8>>,
+    log_records: u64,
 }
 
 impl Builder<'_> {
@@ -559,29 +665,52 @@ impl Builder<'_> {
             }
         }
 
-        // 按父目录挂：父目录还在用时序号必须相等；父目录也已删除时，删除会让序号加 1，两种都认。
-        // 父记录已被别的文件重用、不是目录、或就是自己的，放进「找不到原目录」
+        // 按父目录挂（规则见 mft_parent）；MFT 里找不到、日志里找回了的上级目录也认。
+        // 都找不到的，或父记录就是自己的，放进「找不到原目录」
+        let logged_dirs: HashSet<(u64, u16)> = self
+            .logged
+            .iter()
+            .filter(|name| name.summary.has(DIRECTORY))
+            .map(|name| (name.record, name.sequence))
+            .collect();
+        let logged_parent = |parent: u64, sequence: u16, own: (u64, u16)| {
+            (parent != own.0 && logged_dirs.contains(&(parent, sequence)))
+                .then_some((parent, sequence))
+        };
         let mut children: HashMap<u64, Vec<u32>> = HashMap::new();
+        let mut extra_children: HashMap<(u64, u16), Vec<Child>> = HashMap::new();
         let mut orphans = Vec::new();
         for (index, name) in self.names.iter().enumerate() {
-            let parent = usize::try_from(name.parent)
-                .ok()
-                .and_then(|parent| self.records.get(parent))
-                .filter(|parent| parent.has(VALID) && parent.has(BASE) && parent.has(DIRECTORY));
-            let attached = name.parent != name.record
-                && parent.is_some_and(|parent| {
-                    if parent.has(IN_USE) {
-                        parent.sequence == name.parent_sequence
-                    } else {
-                        parent.sequence == name.parent_sequence
-                            || parent.sequence == name.parent_sequence.wrapping_add(1)
-                    }
-                });
             let index = index as u32;
-            if attached {
+            if name.parent != name.record
+                && mft_parent(&self.records, name.parent, name.parent_sequence).is_some()
+            {
                 children.entry(name.parent).or_default().push(index);
+            } else if let Some(key) =
+                logged_parent(name.parent, name.parent_sequence, (name.record, 0))
+            {
+                extra_children
+                    .entry(key)
+                    .or_default()
+                    .push(Child::Mft(index));
             } else {
                 orphans.push(index);
+            }
+        }
+        let mut logged_orphans = Vec::new();
+        for (index, name) in self.logged.iter().enumerate() {
+            let index = index as u32;
+            let own = (name.record, name.sequence);
+            let key = mft_parent(&self.records, name.parent, name.parent_sequence)
+                .filter(|_| name.parent != name.record)
+                .map(|sequence| (name.parent, sequence))
+                .or_else(|| logged_parent(name.parent, name.parent_sequence, own));
+            match key {
+                Some(key) => extra_children
+                    .entry(key)
+                    .or_default()
+                    .push(Child::Logged(index)),
+                None => logged_orphans.push(index),
             }
         }
         let deleted = self
@@ -600,16 +729,138 @@ impl Builder<'_> {
                 in_use,
                 deleted,
                 deleted_names: self.names.len() as u64,
-                orphans: orphans.len() as u64,
+                orphans: (orphans.len() + logged_orphans.len()) as u64,
                 unreadable: self.unreadable,
                 free_bytes: 0,
+                log_records: self.log_records,
+                log_names: self.logged.len() as u64,
             },
             records: self.records,
             names: self.names,
             children,
             orphans,
+            logged: self.logged,
+            logged_images: self.logged_images,
+            extra_children,
+            logged_orphans,
         }
     }
+
+    /// 日志里找到的文件：MFT 里还在的（同一条记录、同一个序号）以 MFT 为准，其余的按删除前的记录映像判断长度、
+    /// 数据位置与可信度，只有名字的列出、读不出。
+    fn add_logged(&mut self, log: LogFile) {
+        self.log_records = log.records;
+        let named: HashSet<u64> = self.names.iter().map(|name| name.record).collect();
+        for found in log.found {
+            if self.in_mft(&found, &named) {
+                continue;
+            }
+            let (summary, image, times) = self.logged_summary(&found);
+            if let Some(image) = image {
+                self.logged_images
+                    .insert((found.record, found.sequence), image);
+            }
+            for name in found.names {
+                if self.logged.len() >= MAX_DELETED_NAMES {
+                    return;
+                }
+                let (created, modified) = times.unwrap_or((name.created, name.modified));
+                self.logged.push(LoggedName {
+                    record: found.record,
+                    sequence: found.sequence,
+                    parent: name.parent,
+                    parent_sequence: name.parent_sequence,
+                    short_name: found.short_name.clone().filter(|short| *short != name.name),
+                    name: name.name,
+                    created,
+                    modified,
+                    attributes: name.flags,
+                    summary,
+                });
+            }
+        }
+    }
+
+    /// 这个（记录号，序号）在 MFT 里还在：在用的记录序号相同；已删除的记录序号相同或大 1（释放时加 1），且列出了名字。
+    fn in_mft(&self, found: &Logged, named: &HashSet<u64>) -> bool {
+        let Some(current) = usize::try_from(found.record)
+            .ok()
+            .and_then(|index| self.records.get(index))
+            .filter(|current| current.has(VALID) && current.has(BASE))
+        else {
+            return false;
+        };
+        if current.has(IN_USE) {
+            current.sequence == found.sequence
+        } else {
+            (current.sequence == found.sequence
+                || current.sequence == found.sequence.wrapping_add(1))
+                && named.contains(&found.record)
+        }
+    }
+
+    /// 从日志找回的一项的摘要、读得出时的记录映像、记录里的创建与修改时间。
+    /// 读不出（只有名字、常驻内容不在日志里、记录映像对不上）的文件记为「位置已不知道」（[`State::Cleared`]）。
+    fn logged_summary(&self, found: &Logged) -> (Summary, Option<Vec<u8>>, Option<(u64, u64)>) {
+        let mut summary = Summary {
+            size: found.names.first().map_or(0, |name| name.size),
+            position: NO_POSITION,
+            sequence: found.sequence,
+            flags: VALID | BASE | if found.is_dir { DIRECTORY } else { 0 },
+            detail: 0,
+        };
+        let record = found
+            .image
+            .as_ref()
+            .and_then(|image| Record::parse_image(image.clone(), found.record));
+        let times = record
+            .as_ref()
+            .map(standard_times)
+            .filter(|&times| times != (0, 0));
+        if found.is_dir {
+            summary.size = 0;
+            summary.set_state(State::Intact);
+            return (summary, None, times);
+        }
+        summary.set_state(State::Cleared);
+        let (Some(record), Some(image)) = (record, &found.image) else {
+            return (summary, None, times);
+        };
+        let Ok(described) = self.ntfs.describe(found.record, &record) else {
+            return (summary, None, times);
+        };
+        summary.set_data(described.data.as_ref(), self.ntfs.cluster_size);
+        summary.set_unsupported(described.unsupported);
+        match &described.data {
+            // 常驻的内容：位置是现在 MFT 里那条记录的，已不是这个文件；内容的改动不进日志
+            Some(Value::Resident { .. }) => {
+                summary.position = NO_POSITION;
+                if found.resident_unknown {
+                    return (summary, None, times);
+                }
+                summary.set_state(State::Intact);
+            }
+            data => {
+                let state = self.deleted_state(data.as_ref()).unwrap_or(State::Unknown);
+                summary.set_state(state);
+            }
+        }
+        (summary, Some(image.clone()), times)
+    }
+}
+
+/// 名字的父目录在 MFT 里、挂得上时，父目录列出时的序号：父目录还在用时序号必须相等；父目录也已删除时，
+/// 删除会让序号加 1，两种都认。父记录已被别的文件重用、不是目录时为 `None`。
+fn mft_parent(records: &[Summary], parent: u64, parent_sequence: u16) -> Option<u16> {
+    let summary = records
+        .get(usize::try_from(parent).ok()?)
+        .filter(|parent| parent.has(VALID) && parent.has(BASE) && parent.has(DIRECTORY))?;
+    let attached = if summary.has(IN_USE) {
+        summary.sequence == parent_sequence
+    } else {
+        summary.sequence == parent_sequence || summary.sequence == parent_sequence.wrapping_add(1)
+    };
+    attached.then_some(summary.sequence)
 }
 
 fn apply_extension(summary: &mut Summary, data: &ExtensionData, record: &Record) {

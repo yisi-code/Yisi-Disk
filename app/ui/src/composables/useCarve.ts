@@ -45,12 +45,16 @@ export function useCarve() {
     summary.value = null
   }
 
-  /** outputDir 为 null 时只扫描、什么都不写；keepIncomplete 时不完整的文件也存下；sourceLabel 记进扫描记录 */
+  /**
+   * outputDir 为 null 时只扫描、什么都不写；keepIncomplete 时不完整的文件也存下；joinFragments 时分成两段的照片
+   * 也拼回来；sourceLabel 记进扫描记录
+   */
   async function start(
     target: JobTarget,
     outputDir: string | null,
     extensions: string[],
     keepIncomplete: boolean,
+    joinFragments: boolean,
     sourceLabel: string,
   ) {
     if (job.isBusy.value) {
@@ -60,7 +64,15 @@ export function useCarve() {
     record.value = null
     await job.start((jobId) => {
       recordId.value = jobId
-      return startCarve(jobId, target, outputDir, extensions, keepIncomplete, sourceLabel)
+      return startCarve(
+        jobId,
+        target,
+        outputDir,
+        extensions,
+        keepIncomplete,
+        joinFragments,
+        sourceLabel,
+      )
     })
   }
 

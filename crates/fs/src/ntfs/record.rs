@@ -83,6 +83,14 @@ impl Record {
         if bytes.get(..4) != Some(b"FILE".as_slice()) || !apply_fixup(&mut bytes) {
             return None;
         }
+        Self::parse_image(bytes, number)
+    }
+
+    /// 解析已经是内存里样子的记录（不做更新序列修正）：`$LogFile` 里记的记录映像就是这样，扇区末尾是原值。
+    pub fn parse_image(bytes: Vec<u8>, number: u64) -> Option<Self> {
+        if bytes.get(..4) != Some(b"FILE".as_slice()) {
+            return None;
+        }
         let usa_offset = usize::from(le16(&bytes, 4)?);
         let first_attribute = usize::from(le16(&bytes, 0x14)?);
         let used = (le32(&bytes, 0x18)? as usize).min(bytes.len());
