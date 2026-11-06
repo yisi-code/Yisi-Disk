@@ -4,7 +4,7 @@
 
 **下载最新版：<https://github.com/yisi-code/Yisi-Disk/releases/latest>**
 
-## 能做什么（v0.3.0）
+## 能做什么（v0.3.1）
 
 | 功能 | 说明 |
 |---|---|
