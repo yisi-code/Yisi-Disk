@@ -1017,7 +1017,7 @@ const enUS: typeof zhCN = {
       contextDir: 'Folder that is not deleted: listed even when only "Deleted" is ticked; expand it to see the deleted files inside',
       orphans: 'Files without their folder',
       fromLog: 'From log',
-      hint: 'Click a folder to expand or collapse it, click a file to see its details, double-click a file to open it with its default app. Arrow keys move, Space selects.',
+      hint: 'Click a folder to expand or collapse it, click a file to see its details, double-click a file to open it with its default app. Arrow keys move, Space selects. A ticked folder saves only what is currently shown inside it.',
       status: {
         loading: 'Reading…',
         more: '{count} more, loading…',

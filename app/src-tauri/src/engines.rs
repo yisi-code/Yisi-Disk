@@ -26,7 +26,7 @@ use yisi_engine::protocol::{
     HEARTBEAT, IMAGING, JobRef, LIST_DISKS, LIST_FILE_TYPES, LIST_FILES, LOG, ListFilesParams,
     PARTIAL_SUFFIX, PARTITIONS, PAUSE, PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS,
     PartitionRef, PreviewFsParams, PreviewParams, PreviewRangeParams, READ_SCAN, READING, RESUME,
-    ReadScanParams, SCAN_DELETED, ScanParams, ScanResult, Source, error_code,
+    ReadScanParams, SCAN_DELETED, ScanParams, ScanResult, ShowFilter, Source, error_code,
 };
 
 use crate::carve_history::{CarveHistory, CarveRecord, CarveRecorder, CarveStatus};
@@ -699,6 +699,7 @@ impl Engines {
         items: Vec<CopyItem>,
         output_dir: Option<String>,
         boot: BootCopy,
+        filter: Option<ShowFilter>,
     ) -> Result<(), HostError> {
         target.validate()?;
         validate_job_id(&job_id)?;
@@ -724,6 +725,7 @@ impl Engines {
                     items,
                     output_dir,
                     boot,
+                    filter,
                 })
             },
         )?;

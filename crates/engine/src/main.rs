@@ -19,6 +19,7 @@ mod read_scan;
 mod reading;
 mod runtime;
 mod search_job;
+mod shown;
 mod table_plan;
 
 fn main() {

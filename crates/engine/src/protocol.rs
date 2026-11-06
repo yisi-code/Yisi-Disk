@@ -733,6 +733,33 @@ pub struct FsEntry {
     /// 文件内容按删除前的运行表读，那些簇可能已被别的文件用了；`state` 为 `cleared` 时日志里只有名字，读不出。
     #[serde(default)]
     pub from_log: bool,
+    /// 在哪几种显示条件下列出：第 n 位对应 [`ShowFilter::index`] 为 n 的那种勾选。文件夹按里面的内容算——
+    /// 里面一项都不符合的不列（本来就空的按自身列）；里面太大、没算出来的按自身列。界面只按这一位显示，不另判断。
+    pub shown_under: u8,
+}
+
+/// 分区里的文件列出哪些项：未删除的、已删除的、带隐藏或系统属性的，三项各自勾选。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShowFilter {
+    pub live: bool,
+    pub deleted: bool,
+    pub hidden: bool,
+}
+
+impl ShowFilter {
+    /// 这种勾选的编号：未删除为 1、已删除为 2、隐藏为 4，相加（0–7）。[`FsEntry::shown_under`] 的位按它排。
+    pub fn index(self) -> u8 {
+        u8::from(self.live) | u8::from(self.deleted) << 1 | u8::from(self.hidden) << 2
+    }
+
+    pub fn from_index(index: u8) -> Self {
+        Self {
+            live: index & 1 != 0,
+            deleted: index & 2 != 0,
+            hidden: index & 4 != 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -792,6 +819,10 @@ pub struct CopyParams {
     /// 按哪一份引导扇区打开分区，与浏览时一致；不给时用主引导扇区。
     #[serde(default)]
     pub boot: BootCopy,
+    /// 勾选的文件夹只复制在这种显示条件下列出的项（与目录树显示的一致）；勾选的项本身照样复制。
+    /// 不给时复制文件夹里的全部内容。
+    #[serde(default)]
+    pub filter: Option<ShowFilter>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

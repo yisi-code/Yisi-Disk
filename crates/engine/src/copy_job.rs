@@ -11,12 +11,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use yisi_carve::{PARTIAL_SUFFIX, partial_path, rename_new};
-use yisi_engine::protocol::{COPIED, CopiedFile, CopySummary, JobCopied};
+use yisi_engine::protocol::{COPIED, CopiedFile, CopySummary, JobCopied, ShowFilter};
 use yisi_fs::{FileRef, Moment, Stamp, Volume};
 
 use crate::browse::scan_stage;
 use crate::job::{Batcher, JobContext, JobOutcome};
 use crate::runtime::error_chain;
+use crate::shown;
 
 const CHUNK: usize = 1 << 20;
 /// 展开目录时最多这么多层、这么多项，挡住构造出来的环与超大目录树。
@@ -25,15 +26,19 @@ const MAX_PLANNED: usize = 1_000_000;
 /// Windows 一级名字最多 255 个 UTF-16 单元。
 const MAX_NAME_UNITS: usize = 255;
 
-/// 要复制的一项：文件的定位信息，以及输出目录下的相对路径（一级一项，未清洗）。
+/// 要复制的一项：文件的定位信息，以及输出目录下的相对路径（一级一项，未清洗）；`hidden` 是带隐藏或系统属性
+/// （展开文件夹时从目录里取；勾选的项不看它）。
 pub struct Planned {
     pub file: FileRef,
     pub path: Vec<String>,
+    pub hidden: bool,
 }
 
+/// 复制勾选的项。`filter` 给出时，勾选的文件夹只复制在这种显示条件下列出的内容（与目录树显示的一致）。
 pub fn run(
     volume: &Volume,
     items: Vec<Planned>,
+    filter: Option<ShowFilter>,
     output_dir: &Path,
     context: &JobContext,
 ) -> Result<JobOutcome, String> {
@@ -65,6 +70,7 @@ pub fn run(
             volume,
             item,
             0,
+            filter,
             &mut files,
             &mut dirs,
             &mut |path, message| {
@@ -154,25 +160,37 @@ pub fn run(
         .map_err(|error| format!("无法编码复制结果：{error}"))
 }
 
-/// 把一项展开成要复制的文件和要建的目录；列不出的目录经 `fail` 报告。
+/// 把一项展开成要复制的文件和要建的目录；列不出的目录经 `fail` 报告。勾选的项（`depth` 为 0）本身照样复制；
+/// 给了 `filter` 时，文件夹里只收这种显示条件下列出的项，按与目录树同一条规则（[`shown`]）只算这一种勾选：
+/// 文件看自身；文件夹带隐藏属性又没勾「隐藏」的不进去，其余的里面收了东西、或本来就空且自身状态被勾选才建。
+/// 返回这一项在这种勾选下列不列（收了没有）。
 fn expand(
     volume: &Volume,
     item: Planned,
     depth: usize,
+    filter: Option<ShowFilter>,
     files: &mut Vec<Planned>,
     dirs: &mut Vec<Vec<String>>,
     fail: &mut dyn FnMut(String, String),
-) {
+) -> bool {
+    let shown = |mask: u8| filter.is_none_or(|filter| shown::shown_by(mask, filter));
+    let hidden = item.hidden;
     if files.len() + dirs.len() >= MAX_PLANNED {
-        return;
+        return false;
     }
     if !item.file.is_dir {
+        if depth > 0 && !shown(shown::own_mask(item.file.deleted, hidden)) {
+            return false;
+        }
         files.push(item);
-        return;
+        return true;
+    }
+    if depth > 0 && filter.is_some_and(|filter| shown::blocked_by(hidden, filter)) {
+        return false;
     }
     if depth >= MAX_DEPTH {
         fail(item.path.join("/"), "目录层级太深，没有展开".to_owned());
-        return;
+        return false;
     }
     let listing = match volume.list(&item.file) {
         Ok(listing) => listing,
@@ -181,25 +199,41 @@ fn expand(
                 item.path.join("/"),
                 format!("列不出目录：{}", error_chain(&error)),
             );
-            return;
+            return false;
         }
     };
+    // 先占位：复制时按这个顺序建目录、给重名的编号；这一层最后不收时再去掉
+    let slot = dirs.len();
     dirs.push(item.path.clone());
+    let is_empty = listing.entries.is_empty();
+    let mut kept_any = false;
     for entry in listing.entries {
         let mut path = item.path.clone();
         path.push(entry.name);
-        expand(
-            volume,
-            Planned {
-                file: entry.file,
-                path,
-            },
-            depth + 1,
-            files,
-            dirs,
-            fail,
-        );
+        let planned = Planned {
+            hidden: entry.attributes.hidden || entry.attributes.system,
+            file: entry.file,
+            path,
+        };
+        kept_any |= expand(volume, planned, depth + 1, filter, files, dirs, fail);
     }
+    // 收了的子项只代表当前这一种勾选，换算成这一位交给同一条文件夹规则
+    let children = match filter {
+        Some(filter) if kept_any => 1 << filter.index(),
+        _ => 0,
+    };
+    let keep = depth == 0
+        || filter.is_none()
+        || shown(shown::dir_mask(
+            item.file.deleted,
+            hidden,
+            children,
+            is_empty,
+        ));
+    if !keep {
+        dirs.truncate(slot);
+    }
+    keep
 }
 
 enum CopyResult {

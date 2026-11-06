@@ -262,7 +262,11 @@ async function startCopy(items: CopyItem[], dir: string | null, purpose: 'saveAs
   const source = props.source
   const partitionRef = props.partitionRef
   const boot = props.boot ?? 'primary'
-  await copy.start((jobId) => startCopyJob(jobId, source, partitionRef, items, dir, boot))
+  // 勾选的文件夹只另存当前显示出来的内容，与目录树看到的一致
+  const filter = { ...fileFilter.value }
+  await copy.start((jobId) =>
+    startCopyJob(jobId, source, partitionRef, items, dir, boot, filter),
+  )
 }
 
 async function revealOutput() {

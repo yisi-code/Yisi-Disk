@@ -473,6 +473,7 @@ fn dispatch_now(
             state.ensure_idle()?;
             let params: CopyParams = request.params()?;
             let items = copy_items(&params)?;
+            let filter = params.filter;
             let output_dir = Path::new(&params.output_dir)
                 .join(format!("restored-{}", short_id(&params.job_id)));
             let device: Arc<dyn BlockDevice> =
@@ -484,7 +485,7 @@ fn dispatch_now(
                 output_dir: output_dir.display().to_string(),
             };
             state.job = Some(start_job(params.job_id, outbox, events, move |context| {
-                copy_job::run(&volume, items, &output_dir, context)
+                copy_job::run(&volume, items, filter, &output_dir, context)
             }));
             to_result(&started)
         }
@@ -834,6 +835,7 @@ fn copy_items(params: &CopyParams) -> Result<Vec<Planned>, ErrorObject> {
             Ok(Planned {
                 file: browse::decode(&item.file)?,
                 path: item.path.clone(),
+                hidden: false,
             })
         })
         .collect()
