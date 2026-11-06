@@ -160,6 +160,11 @@ pub struct Engines {
 }
 
 impl Engines {
+    /// 有没有正在运行的任务（程序内更新要等任务都结束）。
+    pub fn is_busy(&self) -> bool {
+        !lock(&self.jobs).is_empty()
+    }
+
     pub fn capabilities(&self) -> Result<Capabilities, HostError> {
         query(CAPABILITIES)
     }
@@ -1251,7 +1256,7 @@ fn is_executable_type(path: &Path) -> bool {
 }
 
 /// 程序所在的文件夹：引擎、代理与宿主放在一起。
-fn program_dir() -> std::io::Result<PathBuf> {
+pub(crate) fn program_dir() -> std::io::Result<PathBuf> {
     let host = std::env::current_exe()?;
     host.parent()
         .map(Path::to_path_buf)

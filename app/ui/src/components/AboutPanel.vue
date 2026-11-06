@@ -21,7 +21,7 @@ const { formatHostError } = useHostErrorText()
 const appVersion = ref<string | null>(null)
 const appError = ref<HostError | null>(null)
 const { capabilities, failure: engineError, load: loadEngine } = useEngineCapabilities()
-const { state: update, check: checkUpdate } = useUpdateCheck()
+const { state: update, check: checkUpdate, install: installUpdate } = useUpdateCheck()
 const openFailure = ref<HostError | null>(null)
 
 async function openReleases() {
@@ -60,30 +60,41 @@ async function loadAppVersion() {
       <dd>
         <span v-if="appError" class="wizard__error" role="alert">{{ formatHostError(appError) }}</span>
         <template v-else>{{ appVersion ?? t('about.checking') }}</template>
-        <!-- 只在点按时联网问一次最新版本；有新版本时交给浏览器打开发布页下载 -->
+        <!-- 只在点按时由宿主联网：查最新版本；有新版本时下载、核对签名后换上并重启，也可以去下载页手动下载 -->
         <span v-if="appVersion" class="about__update" aria-live="polite">
           <button
+            v-if="update.kind !== 'installing' && update.kind !== 'restarting'"
             class="wizard__button wizard__button--secondary"
             type="button"
             :disabled="update.kind === 'checking'"
-            @click="checkUpdate(appVersion)"
+            @click="checkUpdate"
           >
             {{ update.kind === 'checking' ? t('about.update.checking') : t('about.update.check') }}
           </button>
           <span v-if="update.kind === 'latest'">{{ t('about.update.latest', { version: update.latest }) }}</span>
           <template v-else-if="update.kind === 'available'">
             <span>{{ t('about.update.available', { version: update.latest }) }}</span>
-            <button class="wizard__button" type="button" @click="openReleases">
-              {{ t('about.update.open') }}
+            <button class="wizard__button" type="button" @click="installUpdate(update.latest)">
+              {{ t('about.update.install') }}
             </button>
           </template>
-          <span v-else-if="update.kind === 'failed'" class="wizard__error" role="alert">
-            {{
-              update.reason === null
-                ? t('about.update.timeout')
-                : t('about.update.failed', { reason: update.reason })
-            }}
+          <span v-else-if="update.kind === 'installing'">
+            {{ t('about.update.installing', { version: update.latest }) }}
           </span>
+          <span v-else-if="update.kind === 'restarting'">
+            {{ t('about.update.restarting', { version: update.version }) }}
+          </span>
+          <span v-else-if="update.kind === 'failed'" class="wizard__error" role="alert">
+            {{ formatHostError(update.error) }}
+          </span>
+          <button
+            v-if="update.kind === 'available' || (update.kind === 'failed' && update.latest !== null)"
+            class="wizard__button wizard__button--secondary"
+            type="button"
+            @click="openReleases"
+          >
+            {{ t('about.update.open') }}
+          </button>
           <span v-if="openFailure" class="wizard__error" role="alert">{{ formatHostError(openFailure) }}</span>
         </span>
         <span class="about__hint">{{ t('about.update.privacy') }}</span>

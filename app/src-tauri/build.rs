@@ -3,6 +3,8 @@ fn main() {
     let manifest = tauri_build::AppManifest::new().commands(&[
         "app_info",
         "open_releases_page",
+        "update_check",
+        "update_install",
         "engine_capabilities",
         "disk_list",
         "carve_file_types",
