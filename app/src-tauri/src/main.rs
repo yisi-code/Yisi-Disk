@@ -22,7 +22,7 @@ use yisi_engine::protocol::PartitionInfo;
 use yisi_engine::protocol::{BootCopy, BootDiagnosis, BootFix, ImageDescription, ImageInspection};
 use yisi_engine::protocol::{
     BrowseOpened, Capabilities, CopyItem, DiskList, ExtractItem, FileFragment, FileListPage,
-    FilePreview, FileTypeList, FoundFile, PartitionRef, ScanResult,
+    FilePreview, FileTypeList, FoundFile, PartitionRef, ScanResult, ShowFilter,
 };
 use yisi_engine::protocol::{ClusterRun, FatRating, FsFix, MftFix, PartitionTableFix, SearchMode};
 
@@ -523,7 +523,8 @@ fn browse_open_range(
 }
 
 /// 把浏览中选中的项复制到另一块盘（另存为）。不给输出目录时是为打开而复制：存到程序文件夹下 `data` 里的 `open-cache`，
-/// 同时在后台清掉以前的副本。`boot` 与浏览时一致。
+/// 同时在后台清掉以前的副本。`boot` 与浏览时一致。`filter` 是目录树当前的显示条件：勾选的文件夹只复制
+/// 在这种条件下列出的内容；不给时复制全部。
 #[tauri::command(async)]
 #[expect(clippy::too_many_arguments, reason = "与界面传来的参数一一对应")]
 fn job_start_copy(
@@ -536,6 +537,7 @@ fn job_start_copy(
     items: Vec<CopyItem>,
     output_dir: Option<String>,
     boot: Option<BootCopy>,
+    filter: Option<ShowFilter>,
 ) -> Result<(), HostError> {
     engines.start_copy(
         app,
@@ -546,6 +548,7 @@ fn job_start_copy(
         items,
         output_dir,
         boot.unwrap_or_default(),
+        filter,
     )
 }
 

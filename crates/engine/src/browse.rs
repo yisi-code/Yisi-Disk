@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use yisi_engine::protocol::{
     self, BrowseOpened, FileListPage, FilePreview, FsEntry, ListFilesParams, MAX_PAGE,
@@ -19,11 +19,18 @@ use crate::boot_check;
 use crate::job::ProgressSender;
 use crate::preview;
 use crate::runtime::error_chain;
+use crate::shown;
 
 /// 一页答复里目录项编码后的总字节数上限，留出余量，保证整条消息不超过 1 MiB。
 const PAGE_BYTES: usize = 768 * 1024;
 /// 最多缓存这么多个目录的排序结果，满了整个清空。
 const MAX_CACHED_DIRS: usize = 64;
+/// 列一个目录时，给里面的各个子文件夹算子树（决定它在哪些显示条件下列出）总共最多花这么久、看这么多项、
+/// 往下这么多层；超了的子文件夹按「没算出来」处理（[`shown::unknown_dir_mask`]）。时间按子文件夹平分，
+/// 一个特别大的不会挤掉其余的。
+const WALK_TIME: Duration = Duration::from_secs(2);
+const WALK_ENTRIES: u64 = 2_000_000;
+const WALK_DEPTH: usize = 64;
 /// 扫描进度里的阶段名：NTFS 扫 MFT、再读 `$LogFile`，FAT / exFAT 读空闲簇。
 pub const STAGE_SCAN_MFT: &str = "scanMft";
 pub const STAGE_SCAN_LOG: &str = "scanLog";
@@ -47,6 +54,8 @@ pub struct Session {
     boot: BootCopy,
     volumes: Mutex<HashMap<u32, Arc<Volume>>>,
     listings: Mutex<HashMap<(u32, String), Arc<SortedDir>>>,
+    /// 已经算全了的文件夹在哪些显示条件下列出（[`FsEntry::shown_under`]），键同 `listings`；扫描后清掉这个分区的。
+    masks: Mutex<HashMap<(u32, String), u8>>,
     progress: ProgressSender,
     /// 正在扫描的分区各自的停止标记。
     scans: Mutex<HashMap<u32, Arc<AtomicBool>>>,
@@ -63,6 +72,18 @@ struct Range {
     boot: BootCopy,
     /// 按推算的引导扇区打开（丢失分区搜索按结构找到的）。
     rebuilt: bool,
+}
+
+/// 算子树时剩下的限额。
+struct WalkBudget {
+    deadline: Instant,
+    entries_left: u64,
+}
+
+impl WalkBudget {
+    fn is_spent(&self) -> bool {
+        self.entries_left == 0 || Instant::now() >= self.deadline
+    }
 }
 
 struct SortedDir {
@@ -91,6 +112,7 @@ impl Session {
             boot,
             volumes: Mutex::new(HashMap::new()),
             listings: Mutex::new(HashMap::new()),
+            masks: Mutex::new(HashMap::new()),
             progress,
             scans: Mutex::new(HashMap::new()),
             closing: AtomicBool::new(false),
@@ -209,6 +231,7 @@ impl Session {
             });
         };
         lock(&self.listings).retain(|(number, _), _| *number != partition);
+        lock(&self.masks).retain(|(number, _), _| *number != partition);
         Ok(ScanResult {
             cancelled: false,
             records: summary.records,
@@ -389,10 +412,13 @@ impl Session {
             .list(dir)
             .map_err(|error| fs_error(error_chain(&error)))?;
         let base = self.partition_offset(partition);
+        let masks = self.entry_masks(volume, partition, &listing.entries);
         let mut entries: Vec<FsEntry> = listing
             .entries
             .into_iter()
-            .map(|entry| FsEntry {
+            .zip(masks)
+            .map(|(entry, shown_under)| FsEntry {
+                shown_under,
                 position: entry.position.and_then(|offset| offset.checked_add(base)),
                 unsupported: entry
                     .unsupported
@@ -422,6 +448,91 @@ impl Session {
             truncated: listing.truncated,
             overwritten: listing.overwritten,
         })
+    }
+
+    /// 目录里各项在哪些显示条件下列出：文件看自身；子文件夹往下走一遍算子树，限时（[`WALK_TIME`]）平分给各个
+    /// 子文件夹，走不完的按自身列。
+    fn entry_masks(&self, volume: &Volume, partition: u32, entries: &[yisi_fs::Entry]) -> Vec<u8> {
+        let started = Instant::now();
+        let mut dirs_left = entries.iter().filter(|entry| entry.file.is_dir).count();
+        let mut entries_left = WALK_ENTRIES;
+        entries
+            .iter()
+            .map(|entry| {
+                let hidden = entry.attributes.hidden || entry.attributes.system;
+                let file = &entry.file;
+                if !file.is_dir {
+                    return shown::own_mask(file.deleted, hidden);
+                }
+                let remaining = WALK_TIME.saturating_sub(started.elapsed());
+                let share = remaining / u32::try_from(dirs_left.max(1)).unwrap_or(u32::MAX);
+                dirs_left = dirs_left.saturating_sub(1);
+                let mut budget = WalkBudget {
+                    deadline: Instant::now() + share,
+                    entries_left,
+                };
+                let mask = self
+                    .subtree_mask(volume, partition, file, hidden, 0, &mut budget)
+                    .unwrap_or_else(|| shown::unknown_dir_mask(file.deleted, hidden));
+                entries_left = budget.entries_left;
+                mask
+            })
+            .collect()
+    }
+
+    /// 文件夹 `dir` 在哪些显示条件下列出，按里面的全部内容算（算全了的记下来，下次直接用）。限额用完、列不出、
+    /// 层级太深时为 `None`。里面已经同时有未删除与已删除的普通项时，结论再也变不了，提前停下。
+    fn subtree_mask(
+        &self,
+        volume: &Volume,
+        partition: u32,
+        dir: &FileRef,
+        hidden: bool,
+        depth: usize,
+        budget: &mut WalkBudget,
+    ) -> Option<u8> {
+        let key = (partition, dir.to_token());
+        if let Some(&mask) = lock(&self.masks).get(&key) {
+            return Some(mask);
+        }
+        if depth >= WALK_DEPTH || budget.is_spent() {
+            return None;
+        }
+        let listing = volume.list(dir).ok()?;
+        budget.entries_left = budget
+            .entries_left
+            .saturating_sub(listing.entries.len() as u64);
+        // 结论最多到这里；只用算出来了的子项判断够不够，没算出来的不能拿来凑
+        let complete = shown::dir_mask(dir.deleted, hidden, shown::REACHABLE, false);
+        let mut children = 0u8;
+        let mut known = true;
+        let mut mask = None;
+        for entry in &listing.entries {
+            let child_hidden = entry.attributes.hidden || entry.attributes.system;
+            let file = &entry.file;
+            let child = if file.is_dir {
+                self.subtree_mask(volume, partition, file, child_hidden, depth + 1, budget)
+            } else {
+                Some(shown::own_mask(file.deleted, child_hidden))
+            };
+            match child {
+                Some(child) => children |= child,
+                None => known = false,
+            }
+            if shown::dir_mask(dir.deleted, hidden, children, false) == complete {
+                mask = Some(complete);
+                break;
+            }
+        }
+        let mask = match mask {
+            Some(mask) => mask,
+            None if known => {
+                shown::dir_mask(dir.deleted, hidden, children, listing.entries.is_empty())
+            }
+            None => return None,
+        };
+        lock(&self.masks).insert(key, mask);
+        Some(mask)
     }
 
     pub fn preview(&self, partition: u32, token: &str) -> Result<FilePreview, ErrorObject> {

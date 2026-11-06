@@ -3381,3 +3381,117 @@ fn a_real_fat_image_converted_to_e01_browses_and_copies_the_same() {
         }
     }
 }
+
+/// 文件夹按里面的内容决定在哪些勾选下列出；另存勾选的文件夹时只收当前勾选下列出的内容。
+#[test]
+fn folders_are_listed_by_their_contents_and_saved_as_shown() {
+    use yisi_fs::samples::{FatImage, FatType, Layout};
+
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-shown");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut fat = FatImage::new(FatType::Fat16);
+    let root = fat.root();
+    fat.add_file(root, "LIVE.TXT", b"live", Layout::Contiguous);
+    // 未删除的文件夹，里面只有删掉的文件
+    let only_deleted = fat.mkdir(root, "ONLYDEL").as_dir();
+    let gone = fat.add_file(only_deleted, "gone file.txt", b"gone", Layout::Contiguous);
+    fat.delete(&gone);
+    // 本来就空的文件夹
+    fat.mkdir(root, "EMPTY");
+    // 带隐藏属性的文件夹，里面是普通文件
+    let hidden = fat.mkdir(root, "SECRET");
+    fat.add_file(hidden.as_dir(), "NOTE.TXT", b"note", Layout::Contiguous);
+    fat.patch_short_entry(&hidden, 11, &[0x12]);
+    // 嵌套：外层勾选另存时，只有删除项的子文件夹与隐藏的子文件夹都不该出现
+    let outer = fat.mkdir(root, "OUTER").as_dir();
+    fat.add_file(outer, "A.TXT", b"a", Layout::Contiguous);
+    let deleted_b = fat.add_file(outer, "b file.txt", b"b", Layout::Contiguous);
+    fat.delete(&deleted_b);
+    let inner_deleted = fat.mkdir(outer, "INNERDEL").as_dir();
+    let inner_gone = fat.add_file(inner_deleted, "x file.txt", b"x", Layout::Contiguous);
+    fat.delete(&inner_gone);
+    let inner_hidden = fat.mkdir(outer, "INNERHID");
+    fat.add_file(inner_hidden.as_dir(), "Y.TXT", b"y", Layout::Contiguous);
+    fat.patch_short_entry(&inner_hidden, 11, &[0x12]);
+    let path = dir.join("shown.img");
+    std::fs::write(&path, fat.finish()).unwrap();
+    let source = json!({"type": "image", "path": path, "sectorSize": 512});
+
+    let (opened, roots) = browse_snapshot(&source, "shown-1");
+    let opened: BrowseOpened = serde_json::from_value(opened).unwrap();
+    let partition = opened.partitions[0].clone();
+    let root: FileListPage = serde_json::from_value(roots[0].clone()).unwrap();
+    let mask = |name: &str| {
+        root.entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .unwrap_or_else(|| panic!("根目录里没有 {name}"))
+            .shown_under
+    };
+    // 勾选的编号：未删除 1、已删除 2、隐藏 4 相加
+    let shown = |name: &str, index: u8| mask(name) & 1 << index != 0;
+    assert!(shown("LIVE.TXT", 1) && !shown("LIVE.TXT", 2));
+    assert!(
+        !shown("ONLYDEL", 1),
+        "只有删掉的文件的文件夹，只勾「未删除」时不列"
+    );
+    assert!(shown("ONLYDEL", 2) && shown("ONLYDEL", 3));
+    assert!(shown("EMPTY", 1) && !shown("EMPTY", 2), "空文件夹按自身列");
+    assert!(
+        !shown("SECRET", 1) && shown("SECRET", 5),
+        "隐藏的文件夹要勾「隐藏」"
+    );
+    assert!(shown("OUTER", 1) && shown("OUTER", 2));
+
+    // 只勾「未删除」时另存 OUTER：只有 A.TXT，删掉的 b file.txt、只有删除项的 INNERDEL、隐藏的 INNERHID 都不收
+    let outer_token = root
+        .entries
+        .iter()
+        .find(|entry| entry.name == "OUTER")
+        .unwrap()
+        .file
+        .clone();
+    let save = |filter: Option<Value>, out: &str| -> PathBuf {
+        let target = dir.join(out);
+        std::fs::create_dir_all(&target).unwrap();
+        let mut copier = Engine::start();
+        let mut params = json!({"jobId": out, "source": source, "outputDir": target,
+               "partition": {"number": partition.number, "offset": partition.offset, "length": partition.length},
+               "items": [{"file": outer_token, "path": ["OUTER"]}]});
+        if let Some(filter) = filter {
+            params["filter"] = filter;
+        }
+        let started = copier.call(COPY_FILES, params).unwrap();
+        let output = PathBuf::from(started["outputDir"].as_str().unwrap());
+        copier.notifications_until(COMPLETED);
+        assert!(copier.wait_exit().success());
+        output.join("OUTER")
+    };
+    let names = |dir: &Path| -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    let live_only = save(
+        Some(json!({"live": true, "deleted": false, "hidden": false})),
+        "live",
+    );
+    assert_eq!(names(&live_only), ["A.TXT"]);
+    // 只勾「已删除」：b file.txt 与 INNERDEL 里的 x file.txt；A.TXT 与隐藏的 INNERHID 不收
+    let deleted_only = save(
+        Some(json!({"live": false, "deleted": true, "hidden": false})),
+        "deleted",
+    );
+    assert_eq!(names(&deleted_only), ["INNERDEL", "b file.txt"]);
+    assert_eq!(names(&deleted_only.join("INNERDEL")), ["x file.txt"]);
+    // 不给条件：全部
+    let everything = save(None, "all");
+    assert_eq!(
+        names(&everything),
+        ["A.TXT", "INNERDEL", "INNERHID", "b file.txt"]
+    );
+}

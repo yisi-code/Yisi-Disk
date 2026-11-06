@@ -88,6 +88,11 @@ const dirs = shallowRef(new Map<string, DirState>())
 const dirTokens = new Map<string, string | null>()
 const dirPaths = new Map<string, string[]>()
 const expandedIds = ref(new Set<string>())
+/**
+ * 定位到的文件夹及其各级上级：不管符不符合勾选都列出，免得「选文件夹找回」选的文件夹里没有已删除的项时
+ * 整行看不见（它下面会写明没有符合条件的项）
+ */
+const pinnedIds = ref(new Set<string>())
 /** 换分区或重新打开时作废旧请求 */
 let generation = 0
 
@@ -130,6 +135,7 @@ watch(
     dirTokens.set(ROOT_ID, null)
     dirPaths.set(ROOT_ID, [])
     expandedIds.value = new Set()
+    pinnedIds.value = new Set()
     activeId.value = null
     resetScroll()
     if (props.revealPath === undefined) {
@@ -157,11 +163,11 @@ function appendChildren(result: TreeRow[], dirId: string, depth: number) {
   }
   let shown = 0
   state.entries.forEach((entry, index) => {
-    if (!isShown(entry)) {
+    const id = `${dirId}/${index}`
+    if (!isShown(entry) && !pinnedIds.value.has(id)) {
       return
     }
     shown += 1
-    const id = `${dirId}/${index}`
     const isExpanded = entry.isDir && expandedIds.value.has(id)
     result.push({ kind: 'entry', id, entry, depth, parentId: dirId, isExpanded })
     if (isExpanded) {
@@ -298,6 +304,7 @@ async function reveal(path: string[]) {
     }
     dirTokens.set(id, entry.file)
     dirPaths.set(id, [...(dirPaths.get(dirId) ?? []), entry.name])
+    pinnedIds.value = new Set([...pinnedIds.value, id])
     expandedIds.value = new Set([...expandedIds.value, id])
     await loadMore(id)
     if (requestGeneration !== generation) {

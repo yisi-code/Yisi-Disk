@@ -2,6 +2,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { open, save } from '@tauri-apps/plugin-dialog'
+import type { FileFilter } from '../utils/fileFilter'
 
 export interface AppInfo {
   version: string
@@ -367,6 +368,8 @@ export interface FsEntry {
    * 那些簇可能已被别的文件用了；state 为 cleared 时日志里只有名字，读不出
    */
   fromLog: boolean
+  /** 在哪几种显示条件下列出（引擎按里面的内容算好的位），按 utils/fileFilter 的 isShownBy 取用 */
+  shownUnder: number
 }
 
 /**
@@ -913,6 +916,10 @@ export function openBrowseRange(
  * 输出目录在源盘上（或无法确认不在）会返回 outputOnSource。
  * outputDir 为 null 时是为打开而复制：宿主存到程序文件夹下 data 里的 open-cache 并在后台清掉以前的副本
  */
+/**
+ * 复制分区里的项。`filter` 是目录树当前的显示条件：勾选的文件夹只复制在这种条件下列出的内容（与看到的一致）；
+ * 不给时复制文件夹里的全部
+ */
 export function startCopy(
   jobId: string,
   target: JobTarget,
@@ -920,8 +927,9 @@ export function startCopy(
   items: CopyItem[],
   outputDir: string | null,
   boot: BootCopy = 'primary',
+  filter?: FileFilter,
 ): Promise<void> {
-  return invoke<void>('job_start_copy', { jobId, target, partition, items, outputDir, boot })
+  return invoke<void>('job_start_copy', { jobId, target, partition, items, outputDir, boot, filter })
 }
 
 /**
