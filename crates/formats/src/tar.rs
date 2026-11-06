@@ -101,6 +101,7 @@ impl FileFormat for Tar {
                 INFO.max_size,
                 TarStructure {
                     phase: Phase::Header,
+                    members: 0,
                 },
             )) as Box<dyn Recovering>
         })
@@ -120,6 +121,8 @@ enum Phase {
 
 struct TarStructure {
     phase: Phase,
+    /// 核对过校验和的头块数。
+    members: u32,
 }
 
 impl Structure for TarStructure {
@@ -128,6 +131,11 @@ impl Structure for TarStructure {
             at: 0,
             len: BLOCK as usize,
         }
+    }
+
+    /// 部分恢复：至少一个头块核对过校验和才保存，到断点为止；解包软件读到断处报错，之前的成员照样取得出来。
+    fn intact(&self, cut: u64) -> Option<u64> {
+        (self.members > 0).then_some(cut)
     }
 
     fn step(&mut self, event: Event<'_>) -> Step {
@@ -144,10 +152,13 @@ impl Structure for TarStructure {
                 }
             }
             Phase::Header => match data_len(bytes).and_then(|data| data.checked_add(at + BLOCK)) {
-                Some(next) if checksum_ok(bytes) => Step::Need {
-                    at: next,
-                    len: BLOCK as usize,
-                },
+                Some(next) if checksum_ok(bytes) => {
+                    self.members += 1;
+                    Step::Need {
+                        at: next,
+                        len: BLOCK as usize,
+                    }
+                }
                 _ => Step::Invalid,
             },
             Phase::SecondZero if zeros => {

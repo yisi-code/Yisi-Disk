@@ -74,7 +74,11 @@ pub fn preview_from(mut file: impl Read, length: u64) -> io::Result<FilePreview>
             file.read_to_end(&mut data)?;
             match thumbnail(&data, format) {
                 Ok(image) => (Some(image), None),
-                Err(error) => (None, Some(error.to_string())),
+                // 解码库的原话是英文、对用户没用：界面只说结论，原话写进日志
+                Err(error) => {
+                    tracing::info!(%error, "图片解码失败");
+                    (None, Some("图片数据不完整或已损坏，解码不了".to_owned()))
+                }
             }
         }
         None => (None, None),

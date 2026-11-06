@@ -1,7 +1,6 @@
 export default {
   app: {
     name: 'yisi-磁盘工具',
-    subtitle: '磁盘数据恢复',
   },
   locale: {
     label: '界面语言',
@@ -13,6 +12,7 @@ export default {
     overview: '首页',
     problems: '遇到了什么问题',
     allFeatures: '全部功能',
+    settings: '设置',
     about: '关于',
     back: '返回',
   },
@@ -153,8 +153,8 @@ export default {
     undelete: {
       name: '找回删除的文件',
       summary: '浏览分区里的文件夹，找出删掉的文件，连同文件名和文件夹结构复制到另一块盘。',
-      suits: '分区还能识别，是文件分配表（FAT）、扩展文件分配表（exFAT）或新技术文件系统（NTFS）；文件删除后没有写入太多新数据，想保留原文件名。',
-      limits: '分区被格式化过、打不开或已经丢失时用不上；固态硬盘删除的文件常常已被清零。',
+      suits: '分区还能识别，是文件分配表（FAT）、扩展文件分配表（exFAT）、新技术文件系统（NTFS）或 Linux 扩展文件系统（ext2/3/4）；文件删除后没有写入太多新数据，想保留原文件名。',
+      limits: '分区被格式化过、打不开或已经丢失时用不上；固态硬盘删除的文件常常已被清零；ext3、ext4 删除文件时清掉了它的位置，只能列出名字。',
     },
     carve: {
       name: '按文件类型深度恢复',
@@ -192,6 +192,11 @@ export default {
       suits: '盘有坏道或读写报错、数据又重要：先做镜像，之后的恢复都在镜像上进行。',
       limits: '需要另一块空间不小于原盘容量的盘来存放镜像。',
     },
+  },
+  settings: {
+    title: '设置',
+    intro: '整个程序的设置；选了就生效，下次打开程序还是这样。',
+    localeHint: '界面文字用哪种语言。',
   },
   about: {
     title: '关于 yisi-磁盘工具',
@@ -632,6 +637,8 @@ export default {
     chm: 'CHM 帮助文档',
     emf: 'EMF 图元文件',
     wmf: 'WMF 图元文件',
+    iso: '光盘镜像（ISO）',
+    flac: 'FLAC 无损音频',
   },
   // 格式选择里一项的名字：一个格式按内容可能存成好几种扩展名时，说整个格式
   fileFormats: {
@@ -653,6 +660,13 @@ export default {
     swf: 'Flash 动画（SWF，仅未压缩）',
   },
   carve: {
+    // 不完整的文件（部分恢复）在哪里断了
+    incomplete: {
+      sourceEnd: '读到磁盘（或镜像）末尾还没结束',
+      unreadable: '后面有读不出的扇区',
+      overwritten: '后面出现了别的文件，多半已被覆盖',
+      broken: '结构走到一半对不上了，后面多半已是别的数据',
+    },
     steps: {
       source: '来源',
       formats: '格式',
@@ -673,6 +687,9 @@ export default {
       saveWhileScanning: '扫描时就把找到的文件保存到下面的目录',
       saveWhileScanningHint:
         '默认只扫描、什么都不写，扫完再预览、勾选、「另存为」。整盘都要找回、文件又多时可以开启这一项，省去另存时再读一遍源盘。',
+      keepIncomplete: '不完整的文件也列出来（部分恢复）',
+      keepIncompleteHint:
+        '后半段被覆盖、读不出或到了磁盘末尾的文件，按结构还对得上的那一段保存，标为「不完整」、名字里带 .incomplete。这样的文件可能打不开，或只有前半段（例如照片只显示上半部分、视频只能放前面一段）。',
     },
     output: {
       label: '保存到',
@@ -684,6 +701,7 @@ export default {
     },
     run: {
       formats: '格式',
+      formatCount: '{count} 种（点开看全部）',
       output: '保存到',
       restart: '重新扫描',
       resume: '接着扫',
@@ -699,8 +717,12 @@ export default {
       },
       report: {
         files: '找到',
+        incomplete: '其中不完整',
         unreadable: '读不出的区域',
       },
+      incomplete: '不完整的文件',
+      incompleteOn: '也列出来',
+      incompleteOff: '不列出',
     },
     history: {
       title: '上次的扫描',
@@ -733,6 +755,7 @@ export default {
         '单击分组展开或收起，单击文件查看详情，双击打开，右键（或菜单键）有更多操作；勾选框或空格选择要另存的文件，勾选分组即选中整组。',
       check: '选择 {name}',
       checkGroup: '选择整组 {name}',
+      incomplete: '不完整',
     },
     preview: {
       title: '文件详情',
@@ -742,6 +765,9 @@ export default {
       size: '大小',
       start: '起始位置',
       end: '结束位置',
+      state: '完整性',
+      incomplete: '不完整：{reason}',
+      incompleteHint: '只保存了按结构还对得上的那一段，可能打不开或只有前半段。',
       open: '打开',
       saveAs: '另存为…',
       notSavedHint:
@@ -859,13 +885,13 @@ export default {
       role: '用途',
       start: '起始位置',
       size: '大小',
-      none: '没有能浏览的分区。目前支持文件分配表（FAT12/16/32）、扩展文件分配表（exFAT）与新技术文件系统（NTFS）；其他情况可以用「按文件类型深度恢复」。',
+      none: '没有能浏览的分区。目前支持文件分配表（FAT12/16/32）、扩展文件分配表（exFAT）、新技术文件系统（NTFS）与 Linux 扩展文件系统（ext2/3/4）；其他情况可以用「按文件类型深度恢复」。',
       scanHint:
         'NTFS（新技术文件系统）分区点「下一步」时，先扫描一遍 MFT（主文件表）找出已删除的文件：大分区可能要几十秒到几分钟，可以随时取消。',
       reason: {
         ntfs: '读不出主文件表，无法浏览',
         bitlocker: '已加密，无法读取内容',
-        ext: '暂不支持浏览',
+        ext: '超级块或块组描述符不对，无法打开',
         unknown: '认不出文件系统',
         unreadable: '读不出引导扇区',
         invalid: '引导扇区的参数不对，无法打开',
@@ -950,12 +976,23 @@ export default {
       summary: '主文件表（MFT）共 {records} 条记录，找到 {deleted} 个已删除的文件和文件夹。',
       orphans: '其中 {count} 个原来所在的文件夹已不在，列在「找不到原目录的文件」里。',
       unreadable: '有 {count} 条主文件表（MFT）记录读不出，其中的文件找不到。',
+      free: {
+        hint: '删掉的文件夹如果连它在上级文件夹里的记录也没了，沿文件夹找不到它和里面的文件。可以读一遍这个分区的空闲空间，按内容认出这些文件夹，列在根目录下的「找不到原目录的文件」里：要读的量与空闲空间一样大，大分区可能要很久，可以随时取消。',
+        action: '查找原文件夹已不在的文件',
+        starting: '正在走一遍文件夹、清点空闲空间…',
+        running: '正在读空闲空间，找原文件夹已不在的文件：{done} / {total}（{percent}%）',
+        failed: '读空闲空间失败：{reason}',
+        summary: '读了 {bytes} 空闲空间，找到 {folders} 个原位置已找不到的文件夹（共 {entries} 项），列在根目录下的「找不到原目录的文件」里；它们原来的名字已找不到，按位置命名。',
+        none: '读了 {bytes} 空闲空间，没有找到原位置已找不到的文件夹。还找不到的文件可以试试「按文件类型深度恢复」。',
+        unreadable: '有 {count} 个簇读不出。',
+      },
     },
     state: {
       live: '',
       intact: '已删除 · 可能完整',
       overwritten: '已删除 · 已被覆盖',
       unknown: '已删除 · 无法判断',
+      cleared: '已删除 · 位置已清空',
     },
     unsupported: {
       compressed: '新技术文件系统（NTFS）压缩 · 暂不支持',
@@ -965,17 +1002,18 @@ export default {
     },
     unsupportedDetail: {
       compressed: '用新技术文件系统（NTFS）压缩存放，但压缩单元的大小不常见，解不开，读不出原内容。',
-      encrypted: '用加密文件系统（EFS）加密存放，读出来是密文，无法打开。',
+      encrypted: '加密存放（Windows 的加密文件系统 EFS，或 Linux 的 fscrypt），读出来是密文，无法打开。',
       systemCompressed: '用 Windows 的系统压缩（WOF / CompactOS）存放，但压缩算法不认识，或内容不在这个文件里（WIMBoot 放在 WIM 文件中），读不出。',
-      reparse: '这是符号链接、目录联接或云端占位文件，内容不在这里。',
+      reparse: '这是符号链接、目录联接或云端占位文件，内容不在这里（Linux 的符号链接里只记着它指向的路径）。',
     },
     stateDetail: {
       orphans:
-        '虚拟文件夹，不在卷上：这些已删除的文件原来所在的文件夹已不在（它的 MFT（主文件表）记录已被别的文件重用），集中列在这里',
+        '虚拟文件夹，不在卷上：这些已删除的文件原来所在的文件夹已找不到，集中列在这里。新技术文件系统（NTFS）是那个文件夹的 MFT（主文件表）记录已被别的文件重用；文件分配表（FAT）、扩展文件分配表（exFAT）是上级文件夹里记它的那一项已被清掉或覆盖，读空闲空间时按内容认出，原来的名字已找不到，按位置命名',
       live: '未删除',
       intact: '已删除。存放它的位置目前没有被别的文件占用，很可能完整',
       overwritten: '已删除。存放它的位置已经有一部分分给了别的文件，内容至少部分被覆盖',
       unknown: '已删除。无法判断还能不能完整找回（例如首簇不确定或簇链已断）',
+      cleared: '已删除。删除时文件系统清空了它的长度与数据位置（ext3、ext4 的做法），这里只能列出名字、读不出内容；内容可能还在盘上，可以试试「按文件类型深度恢复」',
     },
     details: {
       title: '详情',
@@ -1006,6 +1044,7 @@ export default {
         starting: '正在启动复制…',
         running: '已复制 {done} / {total}（{percent}%），{count} 个文件',
         scanning: '正在扫描主文件表（MFT），找出文件夹里已删除的文件（{percent}%）…',
+        scanningFree: '正在读空闲空间，找原文件夹已不在的文件（{percent}%）…',
         completed: '复制完成',
         failed: '复制失败',
         cancelled: '已取消；已经复制好的文件仍保留在保存位置',
@@ -1022,7 +1061,7 @@ export default {
       results: '结果',
     },
     intro:
-      '在整块盘或镜像上找 FAT（文件分配表）、exFAT（扩展文件分配表）、NTFS（新技术文件系统）分区的引导扇区（包括分区自带的备份），核对文件系统的结构后列出找到的分区，再浏览里面的文件、另存到别的盘。',
+      '在整块盘或镜像上找 FAT（文件分配表）、exFAT（扩展文件分配表）、NTFS（新技术文件系统）分区的引导扇区与 ext2/3/4（Linux 扩展文件系统）分区的超级块（包括分区自带的备份），核对文件系统的结构后列出找到的分区，再浏览里面的文件、另存到别的盘。',
     diskHint:
       '读取物理磁盘需要管理员权限，只读、不会改动这块盘。深度搜索要读完整块盘，大盘可能要几个小时；随时可以暂停、停止。已经报过读错误的盘，请先制作镜像，再在镜像上搜索。',
     mode: {
@@ -1054,7 +1093,7 @@ export default {
         deep: '深度搜索：',
       },
       summary: '找到 {count} 个分区。',
-      none: '没有找到文件分配表（FAT）、扩展文件分配表（exFAT）、新技术文件系统（NTFS）分区。分区里的文件仍可以试试「按文件类型深度恢复」。',
+      none: '没有找到文件分配表（FAT）、扩展文件分配表（exFAT）、新技术文件系统（NTFS）或 Linux 扩展文件系统（ext2/3/4）分区。分区里的文件仍可以试试「按文件类型深度恢复」。',
       table: '现有分区表：{scheme}。',
       scheme: {
         mbr: '主引导记录（MBR）',
@@ -1068,7 +1107,7 @@ export default {
       stopped: '搜索停在 {position}（{percent}%），只列出这之前找到的分区。',
       deep: '深度搜索',
       label: '搜索结果',
-      deepHint: '没找到要找的分区？点右上角的「深度搜索」，从头到尾读一遍整块盘再找，大盘要几个小时。',
+      deepHint: '没找到要找的分区时用：从头到尾读一遍整块盘再找，大盘要几个小时。',
       readOnly:
         '搜索与浏览只读，不改动这块盘。先把需要的文件另存到另一块盘；之后可以把「丢失」的分区写回分区表。',
       opening: '正在打开浏览…',
@@ -1078,6 +1117,7 @@ export default {
       preparing: '正在生成写回分区表的计划…',
       hint: '「丢失」的分区可以写回分区表：先存写前备份，确认后才写，之后能回滚。写回之后 Windows 会挂载它并可能往里写，先把要的文件另存出来。',
       volumeUnsupported: '选的是一个盘符，不能改分区表：请改选整块磁盘。',
+      extUnsupported: 'Linux 扩展文件系统（ext）的分区只能浏览、把文件另存到另一块盘，暂不提供写回分区表。',
       inTable: '这个分区在分区表里（分区 {number}），没有丢，不需要写回：Windows 能认出它的话已经分到了盘符。它打不开、提示要格式化时，用「修复打不开的分区」在原盘上修，不用另存。',
       structureOnly: '这个分区的主备引导扇区都没了，是按主文件表（$MFT）找到的，按推算的参数浏览；分区原来的末尾推不准，所以不提供写回分区表。先把要的文件另存到另一块盘。',
       outcome: '{action}：{outcome}',
@@ -1483,13 +1523,14 @@ export default {
     partition: {
       caption: '选择要检查的分区',
       start: '开始检查',
-      none: '没有能检查的分区。目前完整检查文件分配表（FAT12/16/32）与扩展文件分配表（exFAT），新技术文件系统（NTFS）检查结构、不修复（主文件表与副本对不上除外）。',
+      none: '没有能检查的分区。目前完整检查文件分配表（FAT12/16/32）与扩展文件分配表（exFAT），新技术文件系统（NTFS）检查结构、不修复（主文件表与副本对不上除外）；Linux 扩展文件系统（ext2/3/4）只能浏览、找回文件，不检查。',
       hint: '检查只读分区里的元数据（引导区、文件分配表、目录），不读文件内容，通常几秒到几分钟就能查完。',
       note: {
         ntfs: '检查结构，只修主文件表副本',
         unknown: '认不出，检查时会试着读备份引导扇区',
         unreadable: '读不出引导扇区，检查时会试着读备份',
         bitlocker: '已加密，无法检查',
+        ext: '只能浏览、找回文件，不检查',
         other: '暂不支持',
       },
     },

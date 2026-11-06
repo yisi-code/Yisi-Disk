@@ -1,5 +1,6 @@
-//! 丢失分区搜索：找 FAT12/16/32、exFAT、NTFS 的引导扇区，每个引导扇区既当作主引导扇区、
-//! 也当作备份引导扇区推算分区起点，再核对文件系统的结构，合并成候选分区，并与现有分区表比对。只读，不改分区表。
+//! 丢失分区搜索：找 FAT12/16/32、exFAT、NTFS 的引导扇区与 ext2/3/4 的超级块，每个引导扇区既当作主引导扇区、
+//! 也当作备份引导扇区推算分区起点（ext 的超级块自己记着在第几个块组，[`Finder::examine_ext`]），再核对文件系统的结构，
+//! 合并成候选分区，并与现有分区表比对。只读，不改分区表。
 //!
 //! 两种搜法只是读哪些位置不同，认分区、比对分区表用同一套代码（[`Finder`]、[`Search::candidates`]）：
 //! - 深度搜索从头到尾读一遍设备，逐个 512 字节看；
@@ -19,8 +20,9 @@ use yisi_fs::boot::exfat_region_checksum_ok;
 use yisi_fs::boot_write::EXFAT_BOOT_REGION_SECTORS;
 use yisi_fs::format::{FatWidth, fat_entry_raw, fat_media_ok};
 use yisi_fs::{
-    BootCopy, BootLayout, BootSector, FsKind, Volume, bpb, inspect_boot, mft_bad_clusters_length,
-    mft_record_layout, mft_self_record_ok,
+    BootCopy, BootLayout, BootSector, FsKind, Volume, bpb, ext_copy_confirmed, ext_superblock_copy,
+    ext_superblock_magic, inspect_boot, mft_bad_clusters_length, mft_record_layout,
+    mft_self_record_ok,
 };
 use yisi_io::{BlockDevice, ScanControl, ranges_overlap as overlaps, scan_device};
 use yisi_part::boot_sector::{has_signature, starts_with_jump};
@@ -45,6 +47,8 @@ const SMALL_ALIGNMENT: u64 = 64 << 10;
 const FOLLOW_GAPS: [u64; 4] = [0, TRACK, SMALL_ALIGNMENT, ALIGNMENT];
 /// `$MFT` 的记录最大 4 KiB（[`bpb::ntfs_size_ok`]）：按结构找时读这么多来看第 0、1 条记录。
 const MAX_MFT_RECORD: usize = 4096;
+/// ext 的超级块长 1024 字节（跨两个 512 字节扇区，魔数在第一个里）。
+const EXT_SUPERBLOCK: usize = 1024;
 /// `$BadClus` 是第 8 条记录。
 const BAD_CLUSTERS_RECORD: u64 = 8;
 /// 按推算的引导扇区打开时用的卷序列号：只为取卷标，不写盘。
@@ -252,6 +256,17 @@ impl Search {
                     },
                 };
                 self.finder.examine_mft(self.device.as_ref(), at, &records);
+            }
+            if ext_superblock_magic(sector) {
+                let start = index * SECTOR;
+                let superblock = match bytes.get(start..start + EXT_SUPERBLOCK) {
+                    Some(superblock) => superblock.to_vec(),
+                    None => match read(self.device.as_ref(), at, EXT_SUPERBLOCK) {
+                        Some(superblock) => superblock,
+                        None => continue,
+                    },
+                };
+                self.finder.examine_ext(&self.device, at, &superblock);
             }
         }
     }
@@ -465,18 +480,55 @@ impl Finder {
         if !confirms(device, start, boot, backup.unwrap_or(start)) {
             return;
         }
+        self.mark(key, boot.kind, backup.is_some());
+    }
+
+    /// 记下核对过的分区：靠主引导扇区（超级块）还是靠备份找到的。
+    fn mark(&mut self, key: Key, kind: FsKind, backup: bool) {
         let found = self.found.entry(key).or_insert(Found {
-            kind: boot.kind,
+            kind,
             primary: false,
             backup: false,
             structure: false,
         });
-        let flag = match backup {
-            Some(_) => &mut found.backup,
-            None => &mut found.primary,
+        let flag = if backup {
+            &mut found.backup
+        } else {
+            &mut found.primary
         };
         self.changed |= !*flag;
         *flag = true;
+    }
+
+    /// `at` 处是 ext 的超级块（主的或块组开头的备份）：按它记的块组号推算分区起点（主超级块在分区第 1024 字节处，
+    /// 备份在它所在块组的开头），按打开卷的规则核对得过才记下（[`ext_copy_confirmed`]：块组描述符、根目录的 inode，
+    /// 带校验和的卷还要超级块与描述符的校验和对）。备份有很多份，同一个分区已靠备份核对过的不再核对。
+    fn examine_ext(&mut self, device: &Arc<dyn BlockDevice>, at: u64, superblock: &[u8]) {
+        let Some(copy) = ext_superblock_copy(superblock) else {
+            return;
+        };
+        let Some(start) = at.checked_sub(copy.offset) else {
+            return;
+        };
+        let backup = copy.group != 0;
+        let key = Key {
+            offset: start,
+            volume_bytes: copy.volume_bytes,
+            kind: kind_rank(FsKind::Ext),
+        };
+        match self.found.get(&key) {
+            Some(found) if backup && found.backup || !backup && found.primary => return,
+            Some(_) => {}
+            None if self.found.len() >= MAX_CANDIDATES => {
+                self.truncated = true;
+                return;
+            }
+            None => {}
+        }
+        let length = copy.volume_bytes.min(device.size().saturating_sub(start));
+        if ext_copy_confirmed(Arc::clone(device), start, length, superblock) {
+            self.mark(key, FsKind::Ext, backup);
+        }
     }
 }
 
@@ -594,7 +646,8 @@ fn kind_rank(kind: FsKind) -> u8 {
         FsKind::Fat32 => 2,
         FsKind::Exfat => 3,
         FsKind::Ntfs => 4,
-        _ => 5,
+        FsKind::Ext => 5,
+        _ => 6,
     }
 }
 
@@ -792,6 +845,92 @@ mod tests {
             .map(|entry| entry.name)
             .collect();
         assert_eq!(names, ["kept.txt"]);
+    }
+
+    /// 1 MiB 处放一个 ext2 样本卷（16 MiB，两个块组，9 MiB + 1 KiB 处有 1 号块组的备份超级块），MBR 里登记成
+    /// Linux 分区之后又把分区表清掉了；`wipe` 时再抹掉主超级块。
+    fn ext_disk(wipe: bool) -> (Arc<dyn BlockDevice>, u64, Vec<u8>) {
+        use yisi_fs::samples::{EXT_ROOT, ExtFlavor, ExtImage, Layout, pattern};
+        use yisi_part::samples::{MbrEntry, mbr_disk};
+        const MIB: usize = 1 << 20;
+        let data = pattern(5, 30_000);
+        let mut sample = ExtImage::new(ExtFlavor::Ext2);
+        sample.set_label("linux data");
+        sample.add_file(EXT_ROOT, "kept.bin", &data, Layout::Fragmented);
+        let mut volume = sample.finish();
+        if wipe {
+            volume[1024..2048].fill(0);
+        }
+        let sectors = (volume.len() / 512) as u32;
+        let mut image = mbr_disk(
+            MIB + volume.len() + MIB,
+            &[MbrEntry::new(0x83, (MIB / 512) as u32, sectors)],
+        );
+        image[MIB..MIB + volume.len()].copy_from_slice(&volume);
+        // 擦掉分区表
+        image[446..510].fill(0);
+        (Arc::new(MemoryDisk::new(image, 512)), MIB as u64, data)
+    }
+
+    #[test]
+    fn ext_partitions_are_found_by_their_superblocks() {
+        let (device, start, data) = ext_disk(false);
+        for mode in [SearchMode::Quick, SearchMode::Deep] {
+            let report = run_on(&device, mode);
+            let [found] = report.candidates.as_slice() else {
+                panic!("{mode:?} {:#?}", report.candidates);
+            };
+            assert_eq!(
+                (found.offset, found.length, found.kind),
+                (start, 16 << 20, FsKind::Ext)
+            );
+            assert_eq!(
+                (found.relation, found.boot),
+                (Relation::Lost, BootCopy::Primary)
+            );
+            assert_eq!(found.label.as_deref(), Some("linux data"));
+            // 快速搜索认出分区后跳到它的末尾，看不到里面的备份超级块
+            let expected = match mode {
+                SearchMode::Quick => FoundBy::Primary,
+                SearchMode::Deep => FoundBy::Both,
+            };
+            assert_eq!(found.found_by, expected);
+            assert_eq!(file_in_root(Arc::clone(&device), found, "kept.bin"), data);
+        }
+    }
+
+    #[test]
+    fn ext_partitions_without_the_primary_superblock_are_found_by_a_backup() {
+        let (device, start, data) = ext_disk(true);
+        for mode in [SearchMode::Quick, SearchMode::Deep] {
+            let report = run_on(&device, mode);
+            let [found] = report.candidates.as_slice() else {
+                panic!("{mode:?} {:#?}", report.candidates);
+            };
+            assert_eq!((found.offset, found.kind), (start, FsKind::Ext));
+            assert_eq!(
+                (found.found_by, found.boot),
+                (FoundBy::Backup, BootCopy::Backup)
+            );
+            assert_eq!(found.label.as_deref(), Some("linux data"));
+            assert_eq!(file_in_root(Arc::clone(&device), found, "kept.bin"), data);
+        }
+    }
+
+    #[test]
+    fn ext_superblocks_without_matching_descriptors_are_rejected() {
+        use yisi_fs::samples::{ExtFlavor, ExtImage};
+        let sample = ExtImage::new(ExtFlavor::Ext4);
+        let descriptor = sample.descriptor_offset();
+        let mut volume = sample.finish();
+        // 两份描述符表都清零：超级块还在，核对不过
+        volume[descriptor..descriptor + 64].fill(0);
+        let backup = (8193 + 1) * 1024;
+        volume[backup..backup + 64].fill(0);
+        let mut image = vec![0u8; 1 << 20];
+        image.extend_from_slice(&volume);
+        let device: Arc<dyn BlockDevice> = Arc::new(MemoryDisk::new(image, 512));
+        assert!(run_on(&device, SearchMode::Deep).candidates.is_empty());
     }
 
     #[test]

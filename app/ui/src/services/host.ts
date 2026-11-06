@@ -115,13 +115,19 @@ export interface TypeTotal {
 export interface CarveSummary {
   /** 实际存放结果的目录；只扫描时为 null */
   outputDir: string | null
+  /** 找到的文件数与字节数，含不完整的 */
   files: number
   bytes: number
+  /** 其中不完整的文件数（部分恢复）；旧引擎没有这一项 */
+  incomplete?: number
   /** 按扩展名统计 */
   byType: Record<string, TypeTotal>
   unreadableBytes: number
   elapsedMs: number
 }
+
+/** 不完整的文件（部分恢复）在哪里断了：源的末尾、读不出的块、被别的文件覆盖、结构对不上 */
+export type IncompleteReason = 'sourceEnd' | 'unreadable' | 'overwritten' | 'broken'
 
 /** 深度恢复找到的一个文件 */
 export interface FoundFile {
@@ -129,6 +135,8 @@ export interface FoundFile {
   extension: string
   offset: number
   length: number
+  /** 部分恢复存下的不完整文件：在哪里断了；完整的文件没有这一项 */
+  incomplete?: IncompleteReason
 }
 
 /** 引擎生成的缩略图：图片在引擎里解码、缩小后重新编码成 PNG，界面不直接渲染恢复出的文件 */
@@ -258,6 +266,8 @@ export interface PartitionInfo {
   browsable: boolean
   /** 列出已删除的项之前要先 scanDeleted（NTFS） */
   needsScan: boolean
+  /** 可以按需 scanDeleted（FAT、exFAT）：读一遍空闲簇，找出原来的目录已找不到的文件夹 */
+  optionalScan: boolean
   /** 卷上的时间是 UTC（NTFS）；否则是写入时的本地时间（FAT、exFAT） */
   timesUtc: boolean
 }
@@ -265,24 +275,32 @@ export interface PartitionInfo {
 /** 扫描已删除的项的结果；cancelled 时其余各项为 0 */
 export interface ScanResult {
   cancelled: boolean
-  /** MFT 里的记录数、在用的记录数 */
+  /** MFT 里的记录数、在用的记录数（FAT、exFAT 为 0） */
   records: number
   inUse: number
-  /** 已删除、还留着内容的文件与目录记录数，以及它们的名字数 */
+  /** 已删除、还留着内容的文件与目录记录数，以及它们的名字数（FAT、exFAT 是认出的文件夹里的项数） */
   deleted: number
   deletedNames: number
-  /** 原来的目录已找不到的名字数 */
+  /** 列在「找不到原目录的文件」里的项数：NTFS 是名字数，FAT、exFAT 是文件夹数 */
   orphans: number
-  /** 读不出的记录数 */
+  /** 读不出的记录数；FAT、exFAT 是读不出的簇数 */
   unreadable: number
+  /** FAT、exFAT：读过的空闲空间字节数 */
+  freeBytes: number
   elapsedMs: number
 }
+
+/** 扫描的种类：mft 是 NTFS 扫主文件表，free 是 FAT / exFAT 读空闲簇（进度的 stage 是 scanMft / scanFree） */
+export type ScanKind = 'mft' | 'free'
 
 /** 内容的存放方式暂不支持读出 */
 export type UnsupportedReason = 'compressed' | 'encrypted' | 'systemCompressed' | 'reparse'
 
-/** live：未删除；intact：已删除、看起来完整；overwritten：已被覆盖；unknown：无法判断 */
-export type EntryState = 'live' | 'intact' | 'overwritten' | 'unknown'
+/**
+ * live：未删除；intact：已删除、看起来完整；overwritten：已被覆盖；unknown：无法判断；
+ * cleared：删除时文件系统清空了长度与数据位置（ext3 / ext4），读不出
+ */
+export type EntryState = 'live' | 'intact' | 'overwritten' | 'unknown' | 'cleared'
 
 /** 分区里的一项 */
 export interface FsEntry {
@@ -540,7 +558,7 @@ export type JobEvent<TResult = unknown> =
   | {
       jobId: string
       kind: 'progress'
-      /** stage：任务里的哪个阶段，只有一个阶段的任务不给；浏览与复制是 scanMft，文件系统检查见 FsCheckReport */
+      /** stage：任务里的哪个阶段，只有一个阶段的任务不给；浏览与复制是 scanMft 或 scanFree，文件系统检查见 FsCheckReport */
       data: { done: number; total: number; stage?: string }
     }
   | { jobId: string; kind: 'found'; data: { files: FoundFile[] } }
@@ -591,15 +609,26 @@ export function startReadScan(jobId: string, target: JobTarget): Promise<void> {
  * 之后用 previewCarveRange 预览、startExtract 保存选中的文件。物理磁盘与读取扫描一样可能先等提权；
  * 输出目录在被扫描的盘上（或无法确认不在）时宿主返回 outputOnSource
  */
-/** 开始一次深度恢复，记进扫描记录（记录 ID 就是任务 ID）；sourceLabel 是来源描述，源没接上时也认得出 */
+/**
+ * 开始一次深度恢复，记进扫描记录（记录 ID 就是任务 ID）；sourceLabel 是来源描述，源没接上时也认得出。
+ * keepIncomplete：部分恢复，不完整的文件也存下（标为不完整）
+ */
 export function startCarve(
   jobId: string,
   target: JobTarget,
   outputDir: string | null,
   extensions: string[],
+  keepIncomplete: boolean,
   sourceLabel: string,
 ): Promise<void> {
-  return invoke<void>('job_start_carve', { jobId, target, outputDir, extensions, sourceLabel })
+  return invoke<void>('job_start_carve', {
+    jobId,
+    target,
+    outputDir,
+    extensions,
+    keepIncomplete,
+    sourceLabel,
+  })
 }
 
 /** 扫描记录的状态：正在扫、停下了（可以接着扫）、扫完了、出错停下（可以接着扫） */
@@ -611,6 +640,8 @@ export interface CarveRecord {
   target: JobTarget
   sourceLabel: string
   extensions: string[]
+  /** 部分恢复：不完整的文件也存下（接着扫时照样）；以前的记录为 false */
+  keepIncomplete: boolean
   /** 边扫边保存时实际的目录（recovered-…）；只扫描时为 null */
   outputDir: string | null
   status: CarveStatus
@@ -653,6 +684,8 @@ export interface ExtractItem {
   length: number
   extension: string
   name?: string
+  /** 扫描时是不完整的文件：原样带回，保存时按部分恢复核对 */
+  incomplete?: IncompleteReason
 }
 
 /** 预览只扫描、还没保存的文件：宿主回到扫描任务的源上读这一段，由引擎生成预览 */
@@ -742,8 +775,9 @@ export function previewFsFile(jobId: string, partition: number, file: string): P
 }
 
 /**
- * 找出浏览中的一个分区里已删除的项（NTFS 扫一遍 MFT），扫完才返回；
- * 进度经浏览任务的 progress 事件送达（stage 为 scanMft）。扫过的分区直接返回上次的结果
+ * 找出浏览中的一个分区里已删除的项（NTFS 扫一遍 MFT；FAT、exFAT 读一遍空闲簇，找原来的目录已找不到的文件夹），
+ * 扫完才返回；进度经浏览任务的 progress 事件送达（stage 为 scanMft 或 scanFree，总量还不知道时 total 为 0）。
+ * 扫过的分区直接返回上次的结果
  */
 export function scanDeleted(jobId: string, partition: number): Promise<ScanResult> {
   return invoke<ScanResult>('browse_scan', { jobId, partition })

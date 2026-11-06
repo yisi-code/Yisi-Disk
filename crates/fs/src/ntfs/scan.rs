@@ -87,6 +87,7 @@ impl Summary {
             1 => State::Intact,
             2 => State::Overwritten,
             3 => State::Unknown,
+            4 => State::Cleared,
             _ => State::Live,
         }
     }
@@ -97,6 +98,7 @@ impl Summary {
             State::Intact => 1,
             State::Overwritten => 2,
             State::Unknown => 3,
+            State::Cleared => 4,
         };
         self.detail = (self.detail & 0x0F) | (code << 4);
     }
@@ -600,6 +602,7 @@ impl Builder<'_> {
                 deleted_names: self.names.len() as u64,
                 orphans: orphans.len() as u64,
                 unreadable: self.unreadable,
+                free_bytes: 0,
             },
             records: self.records,
             names: self.names,

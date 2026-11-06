@@ -40,16 +40,28 @@ impl FileFormat for Png {
             && be32(block, 8) == Some(13)
             && block.get(12..16) == Some(b"IHDR".as_slice());
         is_png.then(|| {
-            Box::new(Walker::new(INFO.max_size, PngStructure::Header)) as Box<dyn Recovering>
+            Box::new(Walker::new(
+                INFO.max_size,
+                PngStructure {
+                    phase: Phase::Header,
+                    image_data: false,
+                },
+            )) as Box<dyn Recovering>
         })
     }
 }
 
-enum PngStructure {
+enum Phase {
     /// 等块头：4 字节长度 + 4 字节类型。
     Header,
     /// 等块数据与 CRC，用来校验。
     Body { kind: [u8; 4], length: u32 },
+}
+
+struct PngStructure {
+    phase: Phase,
+    /// 读到过图像数据（IDAT）。
+    image_data: bool,
 }
 
 impl Structure for PngStructure {
@@ -57,12 +69,17 @@ impl Structure for PngStructure {
         Step::Need { at: 8, len: 8 }
     }
 
+    /// 部分恢复：有了图像数据（IDAT）才保存，到断点为止（IHDR 与小块都核对过 CRC）。
+    fn intact(&self, cut: u64) -> Option<u64> {
+        self.image_data.then_some(cut)
+    }
+
     fn step(&mut self, event: Event<'_>) -> Step {
         let Event::Bytes { at, bytes } = event else {
             return Step::Invalid;
         };
-        match *self {
-            PngStructure::Header => {
+        match self.phase {
+            Phase::Header => {
                 let (Some(length), Some(kind)) = (be32(bytes, 0), bytes.get(4..8)) else {
                     return Step::Invalid;
                 };
@@ -74,8 +91,9 @@ impl Structure for PngStructure {
                     return Step::Invalid;
                 }
                 let data_start = at + 8;
+                self.image_data |= &kind == b"IDAT";
                 if length <= CRC_CHECK_LIMIT {
-                    *self = PngStructure::Body { kind, length };
+                    self.phase = Phase::Body { kind, length };
                     Step::Need {
                         at: data_start,
                         len: length as usize + 4,
@@ -87,7 +105,7 @@ impl Structure for PngStructure {
                     }
                 }
             }
-            PngStructure::Body { kind, length } => {
+            Phase::Body { kind, length } => {
                 let data = bytes.get(..length as usize).unwrap_or_default();
                 if be32(bytes, length as usize) != Some(crc32(&[&kind, data])) {
                     return Step::Invalid;
@@ -96,7 +114,7 @@ impl Structure for PngStructure {
                 if &kind == b"IEND" {
                     return Step::Done(next);
                 }
-                *self = PngStructure::Header;
+                self.phase = Phase::Header;
                 Step::Need { at: next, len: 8 }
             }
         }

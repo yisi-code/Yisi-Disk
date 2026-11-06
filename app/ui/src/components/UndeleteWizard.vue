@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import MftScanProgress from './MftScanProgress.vue'
+import DeletedScanProgress from './DeletedScanProgress.vue'
 import PartitionFiles from './PartitionFiles.vue'
 import PartitionPicker from './PartitionPicker.vue'
 import SourcePicker from './SourcePicker.vue'
@@ -11,7 +11,7 @@ import { useHostErrorText } from '../composables/useHostErrorText'
 import { usePartitionText } from '../composables/usePartitionText'
 import { useSourceSelection } from '../composables/useSourceSelection'
 import { isDeviceKind, type PartitionRef } from '../services/host'
-import { formatBytes } from '../utils/format'
+import { formatBytes, formatCount } from '../utils/format'
 
 const STEPS = ['source', 'partition', 'browse'] as const
 type WizardStep = (typeof STEPS)[number]
@@ -53,12 +53,53 @@ const canGoNext = computed(() => {
   return false
 })
 
-/** 当前分区扫描已删除项的结果（只有 NTFS 有） */
+/** 当前分区扫描已删除项的结果（NTFS 进来前就扫过；FAT / exFAT 点了「查找」才有） */
 const currentScan = computed(() =>
   currentPartition.value === null
     ? null
     : (browse.scanResults.value.get(currentPartition.value.number) ?? null),
 )
+/** FAT / exFAT 读空闲簇扫完后加一，文件列表从根目录重新列出（根目录多出「找不到原目录的文件」） */
+const filesReloadKey = ref(0)
+
+/** FAT / exFAT 读空闲簇的结果：读了多少、找到几个文件夹、读不出几个簇 */
+/** 分区可以读空闲空间找原文件夹已不在的文件，而且还没读过、没在读 */
+const canScanFree = computed(
+  () =>
+    currentPartition.value?.optionalScan === true &&
+    !browse.isScanning.value &&
+    currentScan.value === null,
+)
+
+const freeScanText = computed(() => {
+  const scan = currentScan.value
+  if (scan === null) {
+    return ''
+  }
+  const bytes = formatBytes(scan.freeBytes)
+  const found =
+    scan.orphans > 0
+      ? t(
+          'partitionFiles.scan.free.summary',
+          {
+            bytes,
+            folders: formatCount(scan.orphans, locale.value),
+            entries: formatCount(scan.deletedNames, locale.value),
+          },
+          scan.orphans,
+        )
+      : t('partitionFiles.scan.free.none', { bytes })
+  if (scan.unreadable === 0) {
+    return found
+  }
+  const unreadable = t(
+    'partitionFiles.scan.free.unreadable',
+    { count: formatCount(scan.unreadable, locale.value) },
+    scan.unreadable,
+  )
+  // 与 NTFS 的扫描结果一样，几句之间空一格
+  return `${found} ${unreadable}`
+})
 const needsScanHint = computed(() => partitions.value.some((partition) => partition.needsScan))
 
 const partitionRef = computed<PartitionRef | null>(() =>
@@ -118,12 +159,24 @@ async function enterPartition() {
     return
   }
   if (partition.needsScan && !browse.scanResults.value.has(partition.number)) {
-    const result = await browse.scan(partition.number)
+    const result = await browse.scan(partition)
     if (result === null || step.value !== 'partition') {
       return
     }
   }
   step.value = 'browse'
+}
+
+/** FAT / exFAT：读一遍空闲簇，找出原来的目录已找不到的文件夹；扫完重新列出文件 */
+async function scanFreeClusters() {
+  const partition = currentPartition.value
+  if (partition === null || isCopying.value) {
+    return
+  }
+  const result = await browse.scan(partition)
+  if (result !== null) {
+    filesReloadKey.value += 1
+  }
 }
 
 async function openSource() {
@@ -235,20 +288,49 @@ async function openSource() {
           {{ t('partition.picker.none') }}
         </p>
         <p v-if="needsScanHint" class="wizard__hint">{{ t('partition.picker.scanHint') }}</p>
-        <MftScanProgress v-if="browse.isScanning.value" :browse="browse" aria-live="polite" />
+        <DeletedScanProgress v-if="browse.isScanning.value" :browse="browse" aria-live="polite" />
         <p v-if="browse.scanFailure.value" class="wizard__error" role="alert">
           {{ t('partitionFiles.scan.failed', { reason: formatHostError(browse.scanFailure.value) }) }}
         </p>
       </div>
 
       <div v-else-if="currentPartition && browse.jobId.value" class="wizard__panel wizard__fill">
-        <dl class="wizard__details">
-          <dt>{{ t('common.source') }}</dt>
-          <dd class="wizard__path-text">{{ sourceText }}</dd>
-          <dt>{{ t('partitionFiles.browse.partition') }}</dt>
-          <dd>{{ partitionLine(currentPartition) }}</dd>
-        </dl>
-        <p v-if="currentScan" class="wizard__note">
+        <!-- 来源、分区与「查找」按钮排在一行；按钮的说明悬停可看，读屏软件读下面那段隐藏的全文 -->
+        <div class="undelete__top">
+          <dl class="wizard__details wizard__details--inline">
+            <div>
+              <dt>{{ t('common.source') }}</dt>
+              <dd class="wizard__path-text">{{ sourceText }}</dd>
+            </div>
+            <div>
+              <dt>{{ t('partitionFiles.browse.partition') }}</dt>
+              <dd>{{ partitionLine(currentPartition) }}</dd>
+            </div>
+          </dl>
+          <button
+            v-if="canScanFree"
+            class="wizard__button wizard__button--secondary"
+            type="button"
+            :title="t('partitionFiles.scan.free.hint')"
+            aria-describedby="undelete-free-hint"
+            :disabled="isCopying || !browse.isOpen.value"
+            @click="scanFreeClusters"
+          >
+            {{ t('partitionFiles.scan.free.action') }}
+          </button>
+        </div>
+        <template v-if="currentPartition.optionalScan">
+          <DeletedScanProgress v-if="browse.isScanning.value" :browse="browse" aria-live="polite" />
+          <p v-else-if="currentScan" class="wizard__note">{{ freeScanText }}</p>
+          <p
+            v-if="browse.scanFailure.value && browse.scanKind.value === 'free'"
+            class="wizard__error"
+            role="alert"
+          >
+            {{ t('partitionFiles.scan.free.failed', { reason: formatHostError(browse.scanFailure.value) }) }}
+          </p>
+        </template>
+        <p v-else-if="currentScan" class="wizard__note">
           {{
             t('partitionFiles.scan.summary', {
               records: currentScan.records.toLocaleString(locale),
@@ -262,7 +344,6 @@ async function openSource() {
             {{ t('partitionFiles.scan.unreadable', { count: currentScan.unreadable.toLocaleString(locale) }, currentScan.unreadable) }}
           </template>
         </p>
-        <p v-if="isSourceDisk" class="wizard__hint">{{ t('partitionFiles.browse.liveHint') }}</p>
         <p v-if="browse.isUnresponsive.value" class="wizard__error" role="alert">
           {{ t('common.unresponsive') }}
         </p>
@@ -280,13 +361,29 @@ async function openSource() {
             :sector-size="browse.opened.value?.sectorSize ?? 512"
             :can-browse="browse.isOpen.value"
             :reveal-path="openedFolder ?? undefined"
+            :reload-key="filesReloadKey"
           />
         </div>
+        <!-- 固定的说明放在文件区下面，顶部只留来源、进度与出错 -->
+        <p v-if="canScanFree" id="undelete-free-hint" class="wizard__visually-hidden">{{ t('partitionFiles.scan.free.hint') }}</p>
+        <p v-if="isSourceDisk" class="wizard__hint">{{ t('partitionFiles.browse.liveHint') }}</p>
       </div>
     </form>
   </section>
 </template>
 
 <style scoped>
+.undelete__top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-xs) var(--space-md);
+}
 
+/* 来源与分区先收缩换行，按钮留在右端 */
+.undelete__top > dl {
+  flex: 1 1 0;
+  min-width: 0;
+}
 </style>

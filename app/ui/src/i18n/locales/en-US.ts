@@ -3,7 +3,6 @@ import type zhCN from './zh-CN'
 const enUS: typeof zhCN = {
   app: {
     name: 'Yisi Disk Tools',
-    subtitle: 'Disk data recovery',
   },
   locale: {
     label: 'Language',
@@ -15,6 +14,7 @@ const enUS: typeof zhCN = {
     overview: 'Home',
     problems: 'What went wrong',
     allFeatures: 'All features',
+    settings: 'Settings',
     about: 'About',
     back: 'Back',
   },
@@ -157,8 +157,8 @@ const enUS: typeof zhCN = {
     undelete: {
       name: 'Recover deleted files',
       summary: 'Browse the folders on a partition, find deleted files and copy them, with their names and folders, to another disk.',
-      suits: 'The partition is still recognized as File Allocation Table (FAT), Extended File Allocation Table (exFAT) or New Technology File System (NTFS), little has been written since the deletion, and you want to keep the original names.',
-      limits: 'Does not help once the partition has been formatted, will not open or is lost; files deleted on SSDs have often been wiped already.',
+      suits: 'The partition is still recognized as File Allocation Table (FAT), Extended File Allocation Table (exFAT), New Technology File System (NTFS) or a Linux extended file system (ext2/3/4), little has been written since the deletion, and you want to keep the original names.',
+      limits: 'Does not help once the partition has been formatted, will not open or is lost; files deleted on SSDs have often been wiped already; ext3 and ext4 clear where a file was when deleting it, so only its name can be listed.',
     },
     carve: {
       name: 'Deep recovery by file type',
@@ -196,6 +196,11 @@ const enUS: typeof zhCN = {
       suits: 'The disk has bad sectors or read errors and the data matters: image it first and recover from the image.',
       limits: 'You need another disk with at least as much free space as the source disk.',
     },
+  },
+  settings: {
+    title: 'Settings',
+    intro: 'Settings for the whole program; they take effect at once and are kept the next time you open it.',
+    localeHint: 'Which language the interface uses.',
   },
   about: {
     title: 'About Yisi Disk Tools',
@@ -643,6 +648,8 @@ const enUS: typeof zhCN = {
     chm: 'Compiled HTML help (CHM)',
     emf: 'EMF metafile',
     wmf: 'WMF metafile',
+    iso: 'Disc image (ISO)',
+    flac: 'FLAC lossless audio',
   },
   // Name of an entry in the format picker: when a format may be saved under several extensions, describe the whole format
   fileFormats: {
@@ -664,6 +671,13 @@ const enUS: typeof zhCN = {
     swf: 'Flash movies (SWF, uncompressed only)',
   },
   carve: {
+    // Where an incomplete file (partial recovery) breaks off
+    incomplete: {
+      sourceEnd: 'Still going when the end of the disk (or image) was reached',
+      unreadable: 'Unreadable sectors follow',
+      overwritten: 'Another file starts inside it; the rest was probably overwritten',
+      broken: 'Its structure stops making sense part way; the rest is probably other data',
+    },
     steps: {
       source: 'Source',
       formats: 'Formats',
@@ -684,6 +698,9 @@ const enUS: typeof zhCN = {
       saveWhileScanning: 'Save found files to the folder below while scanning',
       saveWhileScanningHint:
         'By default the scan only reads and writes nothing; afterwards you preview, select and "Save as". When you want everything back and there are many files, turn this on to avoid reading the source a second time when saving.',
+      keepIncomplete: 'Also list incomplete files (partial recovery)',
+      keepIncompleteHint:
+        'Files whose second half was overwritten, is unreadable or runs past the end of the disk are saved up to the point where their structure still checks out, marked "Incomplete" and named with .incomplete. They may not open, or only their first part may be usable (for example the top of a photo or the beginning of a video).',
     },
     output: {
       label: 'Save to',
@@ -695,6 +712,7 @@ const enUS: typeof zhCN = {
     },
     run: {
       formats: 'Formats',
+      formatCount: '{count} format (show) | {count} formats (show all)',
       output: 'Save to',
       restart: 'Scan again',
       resume: 'Continue scan',
@@ -711,8 +729,12 @@ const enUS: typeof zhCN = {
       },
       report: {
         files: 'Found',
+        incomplete: 'Incomplete among them',
         unreadable: 'Unreadable areas',
       },
+      incomplete: 'Incomplete files',
+      incompleteOn: 'Listed',
+      incompleteOff: 'Not listed',
     },
     history: {
       title: 'Previous scans',
@@ -748,6 +770,7 @@ const enUS: typeof zhCN = {
         'Click a group to expand or collapse it, click a file to see its details, double-click to open it; right-click (or the Menu key) for more actions. Use the checkboxes or Space to select files for "Save as"; checking a group selects all of it.',
       check: 'Select {name}',
       checkGroup: 'Select the whole group {name}',
+      incomplete: 'Incomplete',
     },
     preview: {
       notSavedHint:
@@ -759,6 +782,9 @@ const enUS: typeof zhCN = {
       size: 'Size',
       start: 'Start',
       end: 'End',
+      state: 'Completeness',
+      incomplete: 'Incomplete: {reason}',
+      incompleteHint: 'Only the part whose structure still checks out was kept; it may not open, or only its first part may be usable.',
       open: 'Open',
       saveAs: 'Save as…',
     },
@@ -874,13 +900,13 @@ const enUS: typeof zhCN = {
       role: 'Type',
       start: 'Start',
       size: 'Size',
-      none: 'No partition can be browsed. File Allocation Table (FAT12/16/32), Extended File Allocation Table (exFAT) and New Technology File System (NTFS) are supported; otherwise try deep recovery by file type.',
+      none: 'No partition can be browsed. File Allocation Table (FAT12/16/32), Extended File Allocation Table (exFAT), New Technology File System (NTFS) and the Linux extended file systems (ext2/3/4) are supported; otherwise try deep recovery by file type.',
       scanHint:
         'For an NTFS partition, Next first scans the MFT (master file table) for deleted files. A large partition may take from tens of seconds to minutes; you can cancel at any time.',
       reason: {
         ntfs: 'the master file table cannot be read',
         bitlocker: 'encrypted; contents cannot be read',
-        ext: 'not supported yet',
+        ext: 'the superblock or block group descriptors are wrong; it cannot be opened',
         unknown: 'file system not recognised',
         unreadable: 'boot sector unreadable',
         invalid: 'boot sector parameters are invalid',
@@ -965,12 +991,23 @@ const enUS: typeof zhCN = {
       summary: 'The Master File Table (MFT) has {records} records. Deleted files and folders found: {deleted}.',
       orphans: '{count} of them has lost its original folder and is listed under "Files without their folder". | {count} of them have lost their original folder and are listed under "Files without their folder".',
       unreadable: '{count} Master File Table (MFT) record could not be read; files in it cannot be found. | {count} Master File Table (MFT) records could not be read; files in them cannot be found.',
+      free: {
+        hint: 'When a deleted folder has also lost its record in its parent folder, neither the folder nor the files in it can be reached by browsing. Reading the free space of this partition can recognize such folders by their contents and list them under "Files without their folder" in the root. It reads as much as the free space, which can take a long time on a large partition; you can cancel at any time.',
+        action: 'Look for files whose folder is gone',
+        starting: 'Walking the folders and counting the free space…',
+        running: 'Reading the free space for files whose folder is gone: {done} / {total} ({percent}%)',
+        failed: 'Reading the free space failed: {reason}',
+        summary: 'Read {bytes} of free space and found {folders} folder whose place is gone ({entries} items), listed under "Files without their folder" in the root. Its original name is gone, so it is named after its position. | Read {bytes} of free space and found {folders} folders whose place is gone ({entries} items), listed under "Files without their folder" in the root. Their original names are gone, so they are named after their positions.',
+        none: 'Read {bytes} of free space; no folders whose place is gone were found. For files that are still missing, try "Deep recovery by file type".',
+        unreadable: '{count} cluster could not be read. | {count} clusters could not be read.',
+      },
     },
     state: {
       live: '',
       intact: 'Deleted · likely intact',
       overwritten: 'Deleted · overwritten',
       unknown: 'Deleted · uncertain',
+      cleared: 'Deleted · location cleared',
     },
     unsupported: {
       compressed: 'New Technology File System (NTFS) compressed · not supported',
@@ -980,17 +1017,18 @@ const enUS: typeof zhCN = {
     },
     unsupportedDetail: {
       compressed: 'Stored with New Technology File System (NTFS) compression in an unusual compression unit size that cannot be decompressed; the original contents cannot be read.',
-      encrypted: 'Encrypted with Encrypting File System (EFS); what can be read is ciphertext.',
+      encrypted: 'Encrypted (Encrypting File System (EFS) on Windows, or fscrypt on Linux); what can be read is ciphertext.',
       systemCompressed: 'Stored with Windows system compression (WOF / CompactOS), but the algorithm is unknown or the contents are not in this file (WIMBoot keeps them in a WIM file).',
-      reparse: 'A symbolic link, junction or cloud placeholder; the contents are not here.',
+      reparse: 'A symbolic link, junction or cloud placeholder; the contents are not here (a Linux symbolic link only holds the path it points to).',
     },
     stateDetail: {
       orphans:
-        'Virtual folder, not on the volume: the folders these deleted files were in are gone (their MFT records were reused by other files), so they are collected here',
+        'Virtual folder, not on the volume: the folders these deleted files were in can no longer be found, so they are collected here. On New Technology File System (NTFS) the folder\'s MFT record was reused by another file; on File Allocation Table (FAT) and Extended File Allocation Table (exFAT) the entry recording it in its parent folder was cleared or overwritten, and it was recognized by its contents while reading the free space. Its original name is gone, so it is named after its position',
       live: 'Not deleted',
       intact: 'Deleted. The space it used is not taken by another file, so it is likely intact',
       overwritten: 'Deleted. Part of the space it used now belongs to another file; its contents are at least partly overwritten',
       unknown: 'Deleted. Whether it can be fully recovered cannot be told (for example the first cluster is uncertain or the cluster chain is broken)',
+      cleared: 'Deleted. When it was deleted the file system cleared its length and data location (as ext3 and ext4 do), so only its name can be listed and its contents cannot be read; they may still be on the disk, so try deep recovery by file type',
     },
     details: {
       title: 'Details',
@@ -1021,6 +1059,7 @@ const enUS: typeof zhCN = {
         starting: 'Starting the copy…',
         running: 'Copied {done} / {total} ({percent}%), {count} file | Copied {done} / {total} ({percent}%), {count} files',
         scanning: 'Scanning the Master File Table (MFT) for deleted files in the folders ({percent}%)…',
+        scanningFree: 'Reading the free space for files whose folder is gone ({percent}%)…',
         completed: 'Copy finished',
         failed: 'Copy failed',
         cancelled: 'Cancelled; files already copied stay in the destination',
@@ -1037,7 +1076,7 @@ const enUS: typeof zhCN = {
       results: 'Results',
     },
     intro:
-      'Looks on the disk or image for FAT, exFAT and NTFS boot sectors (including the backup copies partitions keep), checks the file system structures and lists the partitions it finds. You can then browse their files and save them to another disk.',
+      'Looks on the disk or image for FAT, exFAT and NTFS boot sectors and ext2/3/4 (Linux extended file system) superblocks (including the backup copies partitions keep), checks the file system structures and lists the partitions it finds. You can then browse their files and save them to another disk.',
     diskHint:
       'Reading a physical disk needs administrator rights. It is read-only and does not change the disk. A deep search reads the whole disk, which can take hours on a large disk; you can pause or stop at any time. If the disk has reported read errors, make an image first and search the image.',
     mode: {
@@ -1069,7 +1108,7 @@ const enUS: typeof zhCN = {
         deep: 'Deep search.',
       },
       summary: 'Found {count} partition. | Found {count} partitions.',
-      none: 'No File Allocation Table (FAT), Extended File Allocation Table (exFAT) or New Technology File System (NTFS) partitions were found. You can still try "Recover files by type" for the files.',
+      none: 'No File Allocation Table (FAT), Extended File Allocation Table (exFAT), New Technology File System (NTFS) or Linux extended file system (ext2/3/4) partitions were found. You can still try "Recover files by type" for the files.',
       table: 'Current partition table: {scheme}.',
       scheme: {
         mbr: 'MBR',
@@ -1083,7 +1122,7 @@ const enUS: typeof zhCN = {
       stopped: 'The search stopped at {position} ({percent}%); only partitions found before that are listed.',
       deep: 'Deep search',
       label: 'Search result',
-      deepHint: 'Did not find the partition you need? Use "Deep search" at the top right: it reads the whole disk from start to end and takes hours on a large disk.',
+      deepHint: 'For when the partition you need was not found: reads the whole disk from start to end and searches again; it takes hours on a large disk.',
       readOnly:
         'Searching and browsing are read-only and do not change the disk. Save the files you need to another disk first; afterwards a "lost" partition can be written back to the partition table.',
       opening: 'Opening for browsing…',
@@ -1093,6 +1132,7 @@ const enUS: typeof zhCN = {
       preparing: 'Preparing the plan to write it back…',
       hint: 'A "lost" partition can be written back to the partition table: a backup is saved first, nothing is written until you confirm, and it can be rolled back. Windows mounts it afterwards and may write to it, so save the files you need first.',
       volumeUnsupported: 'A single drive letter is selected, so the partition table cannot be changed: choose the whole disk.',
+      extUnsupported: 'Partitions with a Linux extended file system (ext) can only be browsed and their files saved to another disk; writing them back to the partition table is not offered yet.',
       inTable: 'This partition is in the partition table (partition {number}), so it is not lost and there is nothing to write back: if Windows can read it, it already has a drive letter. If it will not open or asks to be formatted, use "Repair a partition that will not open" to repair it in place, without saving files elsewhere.',
       structureOnly: 'Both boot sectors of this partition are gone; it was found by its master file table ($MFT) and is browsed with worked-out settings. Where the partition originally ended cannot be worked out exactly, so writing it back to the partition table is not offered. Save the files you need to another disk first.',
       outcome: '{action}: {outcome}',
@@ -1498,13 +1538,14 @@ const enUS: typeof zhCN = {
     partition: {
       caption: 'Choose the partition to check',
       start: 'Start check',
-      none: 'No partition can be checked. File Allocation Table (FAT12/16/32) and Extended File Allocation Table (exFAT) get a full check; New Technology File System (NTFS) is checked but not repaired (except the master file table copy).',
+      none: 'No partition can be checked. File Allocation Table (FAT12/16/32) and Extended File Allocation Table (exFAT) get a full check; New Technology File System (NTFS) is checked but not repaired (except the master file table copy); the Linux extended file systems (ext2/3/4) can only be browsed for file recovery, not checked.',
       hint: 'The check reads only file system metadata (boot region, file allocation table, directories), not file contents, and usually takes a few seconds to a few minutes.',
       note: {
         ntfs: 'checked; only the master file table copy can be repaired',
         unknown: 'not recognised; the check will try the backup boot sector',
         unreadable: 'boot sector unreadable; the check will try the backup',
         bitlocker: 'encrypted, cannot be checked',
+        ext: 'browse and recover files only; not checked',
         other: 'not supported yet',
       },
     },

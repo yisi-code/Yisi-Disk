@@ -8,12 +8,13 @@ use crate::bpb::ExfatBpb;
 use crate::clusters::{Chain, Clusters, FatWidth, Run};
 use crate::entry::{ClusterRef, Entry, FileAttributes, FileRef, Listing, Location, Stamp, State};
 use crate::format::{
-    ATTR_DIRECTORY, DIR_ENTRY_SIZE as ENTRY, EXFAT_TYPE_BITMAP, EXFAT_TYPE_FILE, EXFAT_TYPE_LABEL,
-    ExfatSet, exfat_entry_set, exfat_label,
+    ATTR_DIRECTORY, DIR_ENTRY_SIZE as ENTRY, EXFAT_IN_USE, EXFAT_TYPE_BITMAP, EXFAT_TYPE_FILE,
+    EXFAT_TYPE_LABEL, ExfatSet, exfat_entry_set, exfat_label,
 };
+use crate::orphans::{FreeSpace, Look, ScanSlot};
 use crate::reader::FileReader;
 use crate::region::{ChunkCache, Region};
-use crate::{FsError, MAX_DIR_BYTES, MAX_ENTRIES, bpb};
+use crate::{FsError, MAX_DIR_BYTES, MAX_ENTRIES, ScanSummary, bpb};
 
 /// 分配位图一次读进内存的上限（对应 20 亿个簇），超过时按块缓存。
 const MAX_LOADED_BITMAP: u64 = 256 << 20;
@@ -37,6 +38,8 @@ pub(crate) struct Exfat {
     bitmap_runs: Vec<Run>,
     bitmap_length: u64,
     bitmap: Mutex<Option<Arc<Bitmap>>>,
+    /// 读空闲簇找出的、原来的目录已找不到的文件夹。
+    scan: ScanSlot,
 }
 
 impl Exfat {
@@ -75,9 +78,10 @@ impl Exfat {
             bitmap_runs: Vec::new(),
             bitmap_length: 0,
             bitmap: Mutex::new(None),
+            scan: ScanSlot::default(),
         };
         // 根目录里的分配位图项与卷标项
-        let root = volume.dir_bytes(&volume.root())?;
+        let (root, _) = volume.dir_contents(&volume.root())?;
         for raw in root.as_chunks::<ENTRY>().0 {
             match raw.first().copied() {
                 Some(0) | None => break,
@@ -130,18 +134,38 @@ impl Exfat {
     }
 
     pub fn list(&self, dir: &FileRef) -> Result<Listing, FsError> {
+        self.list_runs(dir).map(|(listing, _)| listing)
+    }
+
+    /// 扫一遍空闲簇，找出原来的目录已找不到的文件夹（[`crate::orphans`]）。
+    pub fn scan(
+        &self,
+        progress: &mut dyn FnMut(u64, u64) -> bool,
+    ) -> Result<Option<ScanSummary>, FsError> {
+        self.scan.run(self, progress)
+    }
+
+    pub fn is_scanned(&self) -> bool {
+        self.scan.get().is_some()
+    }
+
+    fn list_dir(&self, dir: &FileRef) -> Result<(Listing, Vec<Run>), FsError> {
         if !dir.is_dir {
             return Err(FsError::BadRef);
         }
+        if dir.is_orphans() {
+            return Ok((self.scan.listing(&self.clusters), Vec::new()));
+        }
         let overwritten = dir.deleted && self.is_allocated(dir.clusters()?.first_cluster)?;
         if overwritten {
-            return Ok(Listing {
+            let listing = Listing {
                 entries: Vec::new(),
                 truncated: false,
                 overwritten: true,
-            });
+            };
+            return Ok((listing, Vec::new()));
         }
-        let bytes = self.dir_bytes(dir)?;
+        let (bytes, runs) = self.dir_contents(dir)?;
         let mut entries = Vec::new();
         let mut truncated = false;
         let mut index = 0;
@@ -168,11 +192,18 @@ impl Exfat {
             index += set.entries;
             entries.push(self.entry(set, dir.deleted)?);
         }
-        Ok(Listing {
+        if !dir.deleted
+            && dir.location == self.root().location
+            && let Some(orphans) = self.scan.root_entry()
+        {
+            entries.push(orphans);
+        }
+        let listing = Listing {
             entries,
             truncated,
             overwritten: false,
-        })
+        };
+        Ok((listing, runs))
     }
 
     pub fn open_file(&self, file: &FileRef) -> Result<FileReader, FsError> {
@@ -199,7 +230,8 @@ impl Exfat {
         })
     }
 
-    fn dir_bytes(&self, dir: &FileRef) -> Result<Vec<u8>, FsError> {
+    /// 目录的内容与它占的簇。
+    fn dir_contents(&self, dir: &FileRef) -> Result<(Vec<u8>, Vec<Run>), FsError> {
         let limit = if dir.size == 0 {
             // 根目录没有记录长度，沿链读到结束
             MAX_DIR_BYTES
@@ -213,7 +245,82 @@ impl Exfat {
         } else {
             self.clusters.chain(at.first_cluster, needed)?.runs
         };
-        self.clusters.read_runs(&runs, limit)
+        let bytes = self.clusters.read_runs(&runs, limit)?;
+        Ok((bytes, runs))
+    }
+
+    /// 整簇都是目录项：至少有一组完整、校验和对得上的文件目录项集合（[`exfat_entry_set`]，各项取值合理，见
+    /// [`Self::set_ok`]）；开头可以是上一个簇里那一组剩下的次项，末尾可以是跨到下一个簇的一组的开头（在的那几项
+    /// 都要是使用中标记一致的次项）；结束标记之后全为 0；此外不许有别的东西。
+    fn look_dir(&self, bytes: &[u8]) -> Look {
+        let slots = bytes.as_chunks::<ENTRY>().0;
+        let mut sets = 0u32;
+        let mut ended = false;
+        let mut index = 0;
+        while let Some(raw) = slots.get(index) {
+            let kind = raw[0];
+            if ended || kind == 0 {
+                if raw.iter().any(|&byte| byte != 0) {
+                    return Look::Other;
+                }
+                ended = true;
+                index += 1;
+                continue;
+            }
+            if kind & 0x7F == EXFAT_TYPE_FILE & 0x7F {
+                let set = exfat_entry_set(slots, index);
+                if set.problems.is_empty() && set.has_stream && self.set_ok(&set) {
+                    sets = sets.saturating_add(1);
+                    index += set.entries;
+                    continue;
+                }
+                let recorded = usize::from(raw[1]);
+                let spills = (2..=18).contains(&recorded)
+                    && index + recorded >= slots.len()
+                    && slots
+                        .get(index + 1..)
+                        .unwrap_or_default()
+                        .iter()
+                        .all(|next| next[0] & 0x40 != 0 && (next[0] ^ kind) & EXFAT_IN_USE == 0);
+                if spills {
+                    break;
+                }
+                return Look::Other;
+            }
+            // 上一个簇里那一组剩下的次项：流扩展、文件名、厂商扩展与分配项
+            let leading = sets == 0 && matches!(kind & 0x7F, 0x40 | 0x41 | 0x60 | 0x61);
+            if !leading {
+                return Look::Other;
+            }
+            index += 1;
+        }
+        if sets == 0 {
+            return Look::Other;
+        }
+        Look::Body {
+            ended,
+            entries: sets,
+            strong: true,
+        }
+    }
+
+    /// 一组目录项的取值合理：属性只用规范定义的几位；长度为 0 时首簇为 0，否则首簇合法、长度装得进簇区、
+    /// 有效数据长度不超过长度；目录的长度是整簇、不超过规范上限 256 MiB。
+    fn set_ok(&self, set: &ExfatSet) -> bool {
+        const ATTRIBUTE_BITS: u16 = 0x37;
+        const MAX_DIR_LENGTH: u64 = 256 << 20;
+        if set.attributes & !ATTRIBUTE_BITS != 0 || set.valid_length > set.data_length {
+            return false;
+        }
+        if set.data_length == 0 {
+            return set.first_cluster == 0;
+        }
+        let fits = self.clusters.is_valid(set.first_cluster)
+            && self.clusters.clusters_for(set.data_length) <= u64::from(self.clusters.count);
+        let is_dir = set.attributes & u16::from(ATTR_DIRECTORY) != 0;
+        fits && (!is_dir
+            || (set.data_length.is_multiple_of(self.clusters.cluster_size)
+                && set.data_length <= MAX_DIR_LENGTH))
     }
 
     fn entry(&self, set: ExfatSet, parent_deleted: bool) -> Result<Entry, FsError> {
@@ -341,5 +448,71 @@ impl Exfat {
         let bitmap = Arc::new(bitmap);
         *slot = Some(Arc::clone(&bitmap));
         Ok(bitmap)
+    }
+}
+
+impl FreeSpace for Exfat {
+    fn clusters(&self) -> &Clusters {
+        &self.clusters
+    }
+
+    fn root(&self) -> FileRef {
+        Exfat::root(self)
+    }
+
+    fn list_runs(&self, dir: &FileRef) -> Result<(Listing, Vec<Run>), FsError> {
+        self.list_dir(dir)
+    }
+
+    fn is_free(&self, cluster: u32) -> Result<bool, FsError> {
+        Ok(!self.is_allocated(cluster)?)
+    }
+
+    fn look(&self, _cluster: u32, bytes: &[u8]) -> Look {
+        self.look_dir(bytes)
+    }
+
+    /// 子目录占的簇：不走 FAT 链的连续存放；其余的沿 FAT 链（删除后表项一般还在），链读不出时只算首簇。
+    fn subdirs(&self, bytes: &[u8]) -> Vec<Run> {
+        let slots = bytes.as_chunks::<ENTRY>().0;
+        let mut runs = Vec::new();
+        let mut index = 0;
+        while let Some(raw) = slots.get(index) {
+            if raw[0] == 0 {
+                break;
+            }
+            if raw[0] & 0x7F != EXFAT_TYPE_FILE & 0x7F {
+                index += 1;
+                continue;
+            }
+            let set = exfat_entry_set(slots, index);
+            if !set.problems.is_empty() || !set.has_stream {
+                index += 1;
+                continue;
+            }
+            index += set.entries;
+            if set.attributes & u16::from(ATTR_DIRECTORY) == 0
+                || !self.clusters.is_valid(set.first_cluster)
+            {
+                continue;
+            }
+            let needed = self.clusters.clusters_for(set.data_length).max(1);
+            let found = if set.no_fat_chain {
+                self.clusters.contiguous(set.first_cluster, needed).0
+            } else {
+                self.clusters
+                    .chain(set.first_cluster, needed)
+                    .map(|chain| chain.runs)
+                    .unwrap_or_default()
+            };
+            if found.is_empty() {
+                runs.push(Run {
+                    first: set.first_cluster,
+                    count: 1,
+                });
+            }
+            runs.extend(found);
+        }
+        runs
     }
 }

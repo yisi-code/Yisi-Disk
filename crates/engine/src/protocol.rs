@@ -52,8 +52,11 @@ pub const BROWSE_OPEN: &str = "repair.open";
 pub const LIST_FILES: &str = "repair.listFiles";
 /// 预览浏览中的一个文件：参数 [`PreviewFsParams`]，结果是 [`FilePreview`]，规则与 [`PREVIEW_FILE`] 相同。
 pub const PREVIEW_FS_FILE: &str = "repair.previewFile";
-/// 找出浏览中的一个分区里已删除的项（NTFS 要扫一遍 MFT，其他文件系统立即答复）：参数 [`ScanParams`]，
-/// 扫完答复 [`ScanResult`]。扫描期间浏览任务发 [`PROGRESS`]（`stage` 为 `scanMft`）。同一个分区扫过之后直接答复上次的结果。
+/// 找出浏览中的一个分区里已删除的项：参数 [`ScanParams`]，扫完答复 [`ScanResult`]。NTFS 扫一遍 MFT
+/// （[`PartitionInfo::needs_scan`]，不扫列不出已删除的项）；FAT / exFAT 按需读一遍目录树没用到的空闲簇，找出原来的
+/// 目录已找不到的文件夹（[`PartitionInfo::optional_scan`]），列在根目录下的「找不到原目录的文件」里。
+/// 扫描期间浏览任务发 [`PROGRESS`]（`stage` 为 `scanMft` 或 `scanFree`，总字节还不知道时 `total` 为 0）。
+/// 同一个分区扫过之后直接答复上次的结果。
 pub const SCAN_DELETED: &str = "repair.scanDeleted";
 /// 停止正在进行的 [`SCAN_DELETED`]：参数 [`ScanParams`]，立即返回空对象；那次扫描答复 `cancelled: true`。
 pub const CANCEL_SCAN: &str = "repair.cancelScan";
@@ -265,7 +268,8 @@ pub struct Progress {
     pub job_id: String,
     pub done: u64,
     pub total: u64,
-    /// 任务里的哪个阶段；只有一个阶段的任务不给。浏览与复制是 `scanMft`（扫描 MFT，单位是字节），
+    /// 任务里的哪个阶段；只有一个阶段的任务不给。浏览与复制是 `scanMft`（扫描 MFT，单位是字节）或
+    /// `scanFree`（FAT / exFAT 读空闲簇，单位是字节），
     /// 制作镜像是轮次，文件系统检查见 [`FsCheckReport`]。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage: Option<String>,
@@ -377,6 +381,10 @@ pub struct CarveParams {
     /// 上次已经存好的文件（续扫又找到时）保留原来那份。
     #[serde(default)]
     pub continue_dir: Option<String>,
+    /// 部分恢复：没能完整的文件，格式插件说得出可靠的一段时也存下（只扫描时也报出），标成不完整
+    /// （[`FoundFile::incomplete`]，名字在扩展名前加 `.incomplete`）。不给时为 false，与以前一样只要完整的文件。
+    #[serde(default)]
+    pub keep_incomplete: bool,
 }
 
 /// 深度恢复的检查点（[`CHECKPOINT`]）：到此为止找到的文件都已经通知过，从 `resume_at` 接着扫不漏不重。
@@ -410,6 +418,34 @@ pub struct FoundFile {
     /// 在源上的起始偏移。
     pub offset: u64,
     pub length: u64,
+    /// 部分恢复存下的不完整文件：在哪里断了。完整的文件没有这一项（旧的扫描记录里也没有）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incomplete: Option<IncompleteReason>,
+}
+
+/// 不完整的文件（部分恢复）在哪里断了。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum IncompleteReason {
+    /// 读到源的末尾还没结束，或文件头说的结尾超出了源的末尾。
+    SourceEnd,
+    /// 遇到读不出的块。
+    Unreadable,
+    /// 文件的范围里出现了别的文件头，后面多半已经被别的文件覆盖。
+    Overwritten,
+    /// 结构走到一半对不上了，后面多半已是别的数据（被覆盖，或文件不是连续存放的）。
+    Broken,
+}
+
+impl From<yisi_carve::Incomplete> for IncompleteReason {
+    fn from(reason: yisi_carve::Incomplete) -> Self {
+        match reason {
+            yisi_carve::Incomplete::SourceEnd => Self::SourceEnd,
+            yisi_carve::Incomplete::Unreadable => Self::Unreadable,
+            yisi_carve::Incomplete::Overwritten => Self::Overwritten,
+            yisi_carve::Incomplete::Broken => Self::Broken,
+        }
+    }
 }
 
 /// 深度恢复的结果。
@@ -418,8 +454,12 @@ pub struct FoundFile {
 pub struct CarveSummary {
     /// 实际存放结果的目录；只扫描时为空。
     pub output_dir: Option<String>,
+    /// 找到的文件数与字节数，含不完整的。
     pub files: u64,
     pub bytes: u64,
+    /// 其中不完整的文件数（部分恢复）。
+    #[serde(default)]
+    pub incomplete: u64,
     /// 按扩展名统计。
     pub by_type: BTreeMap<String, TypeTotal>,
     pub unreadable_bytes: u64,
@@ -454,6 +494,10 @@ pub struct ExtractItem {
     /// 保存成的文件名（另存为时用户起的）；不给时用恢复时起的名字。引擎会替换掉系统不允许的字符。
     #[serde(default)]
     pub name: Option<String>,
+    /// 扫描时是不完整的文件（[`FoundFile::incomplete`] 原样带回）：保存时按部分恢复重新核对，
+    /// 起点与长度和扫描时一致才保存。
+    #[serde(default)]
+    pub incomplete: Option<IncompleteReason>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -570,6 +614,9 @@ pub struct PartitionInfo {
     /// 列出已删除的项之前要先 [`SCAN_DELETED`]（NTFS）。
     #[serde(default)]
     pub needs_scan: bool,
+    /// 可以按需 [`SCAN_DELETED`]（FAT、exFAT）：读一遍空闲簇，找出原来的目录已找不到的文件夹。
+    #[serde(default)]
+    pub optional_scan: bool,
     /// 卷上的时间是 UTC（NTFS）；否则是写入时的本地时间（FAT、exFAT）。
     #[serde(default)]
     pub times_utc: bool,
@@ -617,13 +664,14 @@ pub struct FsEntry {
     pub modified: Option<String>,
     pub created: Option<String>,
     pub deleted: bool,
-    /// live、intact（删除了，看起来完整）、overwritten（已被覆盖）、unknown（无法判断）之一。
+    /// live、intact（删除了，看起来完整）、overwritten（已被覆盖）、unknown（无法判断）、
+    /// cleared（删除时文件系统清空了长度与数据位置，读不出；ext3 / ext4）之一。
     pub state: String,
     /// 定位信息，原样传回给 [`LIST_FILES`]、[`PREVIEW_FS_FILE`]、[`COPY_FILES`]。
     pub file: String,
     /// 数据在源上的起始字节偏移；没有数据、或还不知道时为空。
     pub position: Option<u64>,
-    /// 存放方式暂不支持读出：compressed、encrypted、systemCompressed、reparse 之一。
+    /// 存放方式暂不支持读出：compressed、encrypted、systemCompressed、reparse（链接，含 ext 的符号链接）之一。
     #[serde(default)]
     pub unsupported: Option<String>,
     /// NTFS 的 MFT 记录号。
@@ -646,22 +694,26 @@ pub struct ScanParams {
     pub partition: u32,
 }
 
-/// 扫描结果。不需要扫描的文件系统各项为 0。
+/// 扫描结果。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanResult {
     /// 被 [`CANCEL_SCAN`] 或关闭浏览停下了；其余各项为 0，下次重新扫。
     pub cancelled: bool,
-    /// MFT 里的记录数、在用的记录数。
+    /// MFT 里的记录数、在用的记录数（FAT、exFAT 为 0）。
     pub records: u64,
     pub in_use: u64,
-    /// 已删除、还留着内容的文件与目录记录数，以及它们的名字数（有硬链接的文件有几个名字）。
+    /// 已删除、还留着内容的文件与目录记录数（FAT、exFAT 为 0），以及它们的名字数（有硬链接的文件有几个名字；
+    /// FAT、exFAT 是认出的文件夹里的文件与子文件夹项数）。
     pub deleted: u64,
     pub deleted_names: u64,
-    /// 原来的目录已找不到、列在「找不到原目录的文件」里的名字数。
+    /// 列在「找不到原目录的文件」里的项数：NTFS 是名字数，FAT、exFAT 是文件夹数。
     pub orphans: u64,
-    /// 读不出的记录数。
+    /// 读不出的记录数；FAT、exFAT 是读不出的簇数。
     pub unreadable: u64,
+    /// FAT、exFAT：读过的空闲空间字节数。
+    #[serde(default)]
+    pub free_bytes: u64,
     pub elapsed_ms: u64,
 }
 

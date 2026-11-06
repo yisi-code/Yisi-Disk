@@ -4,6 +4,7 @@
 //! 记录清单存在程序文件夹下 `data` 里的 `carve-history.json`（读写规则见 [`record_file`]）；找到的文件追加写进
 //! `carve-history\<记录 ID>.jsonl`，引擎每发来一批写一行（一个 JSON 数组），不整份重写。记录由任务观察者
 //! [`CarveRecorder`] 按引擎的通知更新：找到的文件、检查点（从哪里接着扫不漏不重）、终结状态。
+//! 部分恢复存下的不完整文件在清单里带着 `incomplete`（原因），完整的没有这一项。
 
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -43,6 +44,9 @@ pub struct CarveRecord {
     /// 界面给的来源描述（型号、容量、镜像文件名等），源没接上时也认得出是哪一个。
     pub source_label: String,
     pub extensions: Vec<String>,
+    /// 部分恢复：不完整的文件也存下（接着扫时照样）。以前的记录没有这一项，按不存算。
+    #[serde(default)]
+    pub keep_incomplete: bool,
     /// 边扫边保存时实际的目录（`recovered-…`）；只扫描时为空。
     pub output_dir: Option<String>,
     pub status: CarveStatus,
@@ -315,6 +319,7 @@ mod tests {
     use std::sync::Arc;
 
     use serde_json::json;
+    use yisi_engine::protocol::IncompleteReason;
 
     use super::*;
 
@@ -333,6 +338,7 @@ mod tests {
             },
             source_label: "d.img".to_owned(),
             extensions: vec!["jpg".to_owned()],
+            keep_incomplete: false,
             output_dir: None,
             status: CarveStatus::Running,
             resume_at: 0,
@@ -386,6 +392,33 @@ mod tests {
             (completed.status, completed.resume_at),
             (CarveStatus::Completed, 5000)
         );
+    }
+
+    /// 不完整的文件在清单里带着原因，完整的没有；以前的记录（没有 `keepIncomplete`）照样读得出。
+    #[test]
+    fn incomplete_files_keep_their_reason_and_old_records_still_load() {
+        let history = history("incomplete");
+        history.begin(record("scan-3")).unwrap();
+        let recorder = CarveRecorder::new(Arc::clone(&history), &record("scan-3"));
+        recorder.event(
+            "found",
+            &json!({"files": [
+                found(512),
+                {"name": "f0000000002.incomplete.jpg", "extension": "jpg", "offset": 1024,
+                 "length": 700, "incomplete": "broken"},
+            ]}),
+        );
+        let files = history.files("scan-3").unwrap();
+        let reasons: Vec<_> = files.iter().map(|file| file.incomplete).collect();
+        assert_eq!(reasons, [None, Some(IncompleteReason::Broken)]);
+
+        let old = json!([{
+            "id": "old-1", "target": {"kind": "image", "path": "d.img"}, "sourceLabel": "d.img",
+            "extensions": ["jpg"], "outputDir": null, "status": "completed", "resumeAt": 10,
+            "size": 10, "files": 0, "startedAtMs": 1, "updatedAtMs": 1
+        }]);
+        let records: Vec<CarveRecord> = serde_json::from_value(old).unwrap();
+        assert!(!records[0].keep_incomplete);
     }
 
     #[test]

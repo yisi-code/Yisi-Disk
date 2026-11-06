@@ -194,6 +194,11 @@ impl Structure for Mp3Structure {
         }
     }
 
+    /// 部分恢复：一帧帧接得上的帧够多才保存，到断点为止。
+    fn intact(&self, cut: u64) -> Option<u64> {
+        self.enough().then_some(cut)
+    }
+
     fn step(&mut self, event: Event<'_>) -> Step {
         let (at, bytes) = match event {
             Event::Found { at } => {

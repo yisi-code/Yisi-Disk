@@ -11,6 +11,8 @@ use yisi_part::bytes::le32;
 
 /// RIFF 头：`RIFF`、长度、形式类型。
 const HEADER_LEN: u64 = 12;
+/// RIFF 头之后第一个块的头（类型与长度）的结尾：断点在这之后才有真正的内容。
+const FIRST_CHUNK_END: u64 = HEADER_LEN + 8;
 
 /// 一种 RIFF 格式：形式类型与它允许的第一块。
 #[derive(Clone, Copy)]
@@ -20,6 +22,8 @@ pub struct RiffFormat {
     first_chunks: &'static [&'static [u8; 4]],
     /// 后面可以接扩展用的 RIFF（AVI 的 `AVIX`）。
     extension_form: Option<&'static [u8; 4]>,
+    /// 截短时保存断点之前的一段：音视频的前半段照样能放（WAV、AVI）；WebP 截短了基本打不开，不做。
+    partial: bool,
 }
 
 static AVI_INFO: FormatInfo = FormatInfo {
@@ -54,6 +58,7 @@ pub const AVI: RiffFormat = RiffFormat {
     form: b"AVI ",
     first_chunks: &[b"LIST"],
     extension_form: Some(b"AVIX"),
+    partial: true,
 };
 
 pub const WAV: RiffFormat = RiffFormat {
@@ -61,6 +66,7 @@ pub const WAV: RiffFormat = RiffFormat {
     form: b"WAVE",
     first_chunks: &[b"fmt ", b"JUNK", b"bext", b"LIST", b"fact", b"PAD "],
     extension_form: None,
+    partial: true,
 };
 
 pub const WEBP: RiffFormat = RiffFormat {
@@ -68,6 +74,7 @@ pub const WEBP: RiffFormat = RiffFormat {
     form: b"WEBP",
     first_chunks: &[b"VP8 ", b"VP8L", b"VP8X"],
     extension_form: None,
+    partial: false,
 };
 
 static SIGNATURES: [Signature; 1] = [Signature {
@@ -102,6 +109,7 @@ impl FileFormat for RiffFormat {
                 RiffStructure {
                     end: riff_end(0, size),
                     extension_form: self.extension_form,
+                    partial: self.partial,
                 },
             )) as Box<dyn Recovering>
         })
@@ -112,6 +120,8 @@ struct RiffStructure {
     /// 已知部分的结尾。
     end: u64,
     extension_form: Option<&'static [u8; 4]>,
+    /// 截短时保存断点之前的一段。
+    partial: bool,
 }
 
 impl Structure for RiffStructure {
@@ -123,6 +133,11 @@ impl Structure for RiffStructure {
             },
             None => Step::Done(self.end),
         }
+    }
+
+    /// 部分恢复：第一个块的头之后才保存，到断点为止（内容核对不了，与完整时一样只看头里的长度）。
+    fn intact(&self, cut: u64) -> Option<u64> {
+        (self.partial && cut > FIRST_CHUNK_END).then_some(cut)
     }
 
     fn step(&mut self, event: Event<'_>) -> Step {

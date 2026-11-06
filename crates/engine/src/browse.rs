@@ -1,4 +1,4 @@
-//! 浏览分区：读分区表、按需打开卷、扫描已删除的项（NTFS 扫 MFT）、列目录（排好序缓存、分页给出）、
+//! 浏览分区：读分区表、按需打开卷、扫描已删除的项（NTFS 扫 MFT，FAT / exFAT 读空闲簇）、列目录（排好序缓存、分页给出）、
 //! 预览文件。不在分区表里的分区（丢失分区搜索找到的）可以按位置打开，之后同样浏览。只读源盘。
 
 use std::collections::HashMap;
@@ -24,8 +24,18 @@ use crate::runtime::error_chain;
 const PAGE_BYTES: usize = 768 * 1024;
 /// 最多缓存这么多个目录的排序结果，满了整个清空。
 const MAX_CACHED_DIRS: usize = 64;
-/// 扫描进度里的阶段名。
+/// 扫描进度里的阶段名：NTFS 扫 MFT，FAT / exFAT 读空闲簇。
 pub const STAGE_SCAN_MFT: &str = "scanMft";
+pub const STAGE_SCAN_FREE: &str = "scanFree";
+
+/// 卷的扫描在进度里叫什么（浏览与复制共用）。
+pub fn scan_stage(volume: &Volume) -> &'static str {
+    if volume.optional_scan() {
+        STAGE_SCAN_FREE
+    } else {
+        STAGE_SCAN_MFT
+    }
+}
 /// 一个会话里最多按位置打开这么多个分区。
 const MAX_RANGES: usize = 1000;
 
@@ -152,12 +162,13 @@ impl Session {
                 .and_then(|volume| volume.label().map(str::to_owned)),
             browsable: volume.is_some(),
             needs_scan: volume.as_ref().is_some_and(|volume| volume.needs_scan()),
+            optional_scan: volume.as_ref().is_some_and(|volume| volume.optional_scan()),
             times_utc: volume.as_ref().is_some_and(|volume| volume.times_utc()),
         }
     }
 
-    /// 找出分区里已删除的项：NTFS 扫一遍 MFT，期间发进度；被停下时答复 `cancelled`。
-    /// 扫完清掉这个分区已缓存的目录，之后列目录才带上已删除的项。
+    /// 找出分区里已删除的项：NTFS 扫一遍 MFT，FAT / exFAT 读一遍空闲簇，期间发进度；被停下时答复 `cancelled`。
+    /// 扫完清掉这个分区已缓存的目录，之后列目录才带上扫出来的项。
     pub fn scan(&self, partition: u32) -> Result<ScanResult, ErrorObject> {
         let volume = self.volume(partition)?;
         let stop = Arc::clone(
@@ -166,8 +177,9 @@ impl Session {
                 .or_insert_with(|| Arc::new(AtomicBool::new(false))),
         );
         let started = Instant::now();
+        let stage = scan_stage(&volume);
         let outcome = volume.scan(&mut |done, total| {
-            self.progress.send(Some(STAGE_SCAN_MFT), done, total);
+            self.progress.send(Some(stage), done, total);
             !stop.load(Ordering::Relaxed) && !self.closing.load(Ordering::Relaxed)
         });
         {
@@ -190,6 +202,7 @@ impl Session {
                 deleted_names: 0,
                 orphans: 0,
                 unreadable: 0,
+                free_bytes: 0,
                 elapsed_ms,
             });
         };
@@ -202,6 +215,7 @@ impl Session {
             deleted_names: summary.deleted_names,
             orphans: summary.orphans,
             unreadable: summary.unreadable,
+            free_bytes: summary.free_bytes,
             elapsed_ms,
         })
     }
@@ -507,6 +521,7 @@ fn state_key(state: State) -> &'static str {
         State::Intact => "intact",
         State::Overwritten => "overwritten",
         State::Unknown => "unknown",
+        State::Cleared => "cleared",
     }
 }
 

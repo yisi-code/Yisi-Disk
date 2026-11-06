@@ -63,6 +63,8 @@ impl FileFormat for Gif {
                 GifStructure {
                     phase: Phase::Screen,
                     images: 0,
+                    in_image: false,
+                    complete_images: 0,
                 },
             )) as Box<dyn Recovering>
         })
@@ -87,6 +89,10 @@ enum Phase {
 struct GifStructure {
     phase: Phase,
     images: u32,
+    /// 正在走图像数据的子块。
+    in_image: bool,
+    /// 数据子块走完了的图像数。
+    complete_images: u32,
 }
 
 impl GifStructure {
@@ -104,6 +110,11 @@ impl GifStructure {
 impl Structure for GifStructure {
     fn first(&self) -> Step {
         Step::Need { at: 6, len: 7 }
+    }
+
+    /// 部分恢复：至少一张图像的数据走完了才保存，到断点为止。
+    fn intact(&self, cut: u64) -> Option<u64> {
+        (self.complete_images > 0).then_some(cut)
     }
 
     fn step(&mut self, event: Event<'_>) -> Step {
@@ -159,10 +170,14 @@ impl Structure for GifStructure {
                 if !(2..=12).contains(&first) {
                     return Step::Invalid;
                 }
+                self.in_image = true;
                 self.sub_blocks(at + 1)
             }
             Phase::SubBlock => {
                 if first == 0 {
+                    if std::mem::take(&mut self.in_image) {
+                        self.complete_images += 1;
+                    }
                     self.block(at + 1)
                 } else {
                     self.sub_blocks(at + 1 + u64::from(first))

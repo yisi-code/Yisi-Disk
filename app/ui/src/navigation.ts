@@ -61,7 +61,7 @@ export const PROBLEMS: Problem[] = [
   { key: 'failingDisk', features: ['badSectors', 'image', 'undelete', 'carve'] },
 ]
 
-export type NavPage = 'overview' | ProblemKey | 'allFeatures' | 'about'
+export type NavPage = 'overview' | ProblemKey | 'allFeatures' | 'settings' | 'about'
 
 /** 从别的视图回到导航页时焦点落在哪里：页面标题，或进入功能前点的那张卡片 */
 export type FocusRequest = { target: 'title' } | { target: 'feature'; feature: FeatureKey }

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import FsBrowser, { type FileFilter, type TreeItem } from './FsBrowser.vue'
+import FsBrowser, { type TreeItem } from './FsBrowser.vue'
 import FsEntryDetails from './FsEntryDetails.vue'
 import JobControls from './JobControls.vue'
 import FailureList from './FailureList.vue'
@@ -23,6 +23,7 @@ import {
   type PartitionInfo,
   type PartitionRef,
 } from '../services/host'
+import { isShownBy, type FileFilter } from '../utils/fileFilter'
 import { formatBytes, formatSeconds } from '../utils/format'
 
 /**
@@ -53,6 +54,8 @@ const props = defineProps<{
   boot?: BootCopy
   /** 打开后直接定位到这个文件夹（选文件夹找回时），并默认只列已删除的 */
   revealPath?: string[]
+  /** 变了就重新列出文件、清掉选择（例如扫描后根目录多出「找不到原目录的文件」） */
+  reloadKey?: number
 }>()
 /** 复制进行中：父组件据此禁用返回、离开 */
 const isBusy = defineModel<boolean>('busy', { default: false })
@@ -110,6 +113,9 @@ const copyStatusText = computed(() => {
       if (copy.stage.value === 'scanMft') {
         return t('partitionFiles.copy.status.scanning', { percent: copy.percent.value })
       }
+      if (copy.stage.value === 'scanFree') {
+        return t('partitionFiles.copy.status.scanningFree', { percent: copy.percent.value })
+      }
       return t('partitionFiles.copy.status.running', {
         ...copy.progressParams.value,
         count: copy.succeeded.value.length,
@@ -130,11 +136,23 @@ const isCopyStatusShown = computed(
 )
 
 watch(
-  [() => props.jobId, () => props.partition.number],
+  [() => props.jobId, () => props.partition.number, () => props.reloadKey],
   () => {
     selectedItem.value = null
     checkedItems.value = new Map()
   },
+)
+
+// 筛选后看不见的项不再算作勾选，「另存为（N 项）」只数看得见的
+watch(
+  fileFilter,
+  (filter) => {
+    const kept = [...checkedItems.value].filter(([, item]) => isShownBy(filter, item.entry))
+    if (kept.length !== checkedItems.value.size) {
+      checkedItems.value = new Map(kept)
+    }
+  },
+  { deep: true },
 )
 
 watch(selectedItem, () => {
@@ -268,6 +286,7 @@ async function revealOutput() {
       :partition="partition.number"
       :filter="fileFilter"
       :reveal-path="revealPath"
+      :reload-key="reloadKey"
       @open="openItem"
       @revealed="revealMissing = $event"
     >

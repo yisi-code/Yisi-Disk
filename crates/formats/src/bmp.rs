@@ -31,8 +31,8 @@ static SIGNATURES: [Signature; 1] = [Signature {
     bytes: b"BM",
 }];
 
-/// 文件头说的总长度，各项都合理时才给出。
-fn file_length(block: &[u8]) -> Option<u64> {
+/// 文件头说的总长度与像素数据的起点，各项都合理时才给出。
+fn file_length(block: &[u8]) -> Option<(u64, u64)> {
     let size = le32(block, 2)?;
     let reserved = le32(block, 6)?;
     let pixels_at = le32(block, 10)?;
@@ -72,7 +72,7 @@ fn file_length(block: &[u8]) -> Option<u64> {
             return None;
         }
     }
-    Some(u64::from(size))
+    Some((u64::from(size), u64::from(pixels_at)))
 }
 
 impl FileFormat for Bmp {
@@ -85,10 +85,11 @@ impl FileFormat for Bmp {
     }
 
     fn header_check(&self, block: &[u8]) -> Option<Box<dyn Recovering>> {
-        let length = file_length(block)?;
+        let (length, pixels_at) = file_length(block)?;
+        // 截短时保存到断点：位图从最下面一行存起，留下的是图像的下半部分
         Some(Box::new(Walker::new(
             INFO.max_size,
-            KnownLength::new(length),
+            KnownLength::new(length).intact_after(pixels_at),
         )))
     }
 }

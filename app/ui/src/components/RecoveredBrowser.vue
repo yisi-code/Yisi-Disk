@@ -443,6 +443,13 @@ function fileDetail(file: FoundFile): string {
             <span class="tree-list__name">
               {{ row.file.name }}
             </span>
+            <span
+              v-if="row.file.incomplete"
+              class="tree-list__badge recovered-browser__incomplete"
+              :title="t(`carve.incomplete.${row.file.incomplete}`)"
+            >
+              {{ t('carve.browser.incomplete') }}
+            </span>
             <span class="recovered-browser__meta">{{ fileDetail(row.file) }}</span>
             <span class="tree-list__size">{{ formatBytes(row.file.length) }}</span>
           </template>
@@ -493,6 +500,12 @@ function fileDetail(file: FoundFile): string {
   padding-left: var(--space-sm);
   font-weight: 600;
   cursor: pointer;
+}
+
+/* 不完整的文件：文字标签，不只靠颜色 */
+.recovered-browser__incomplete {
+  color: var(--color-danger);
+  border-color: var(--color-danger);
 }
 
 .recovered-browser__meta {

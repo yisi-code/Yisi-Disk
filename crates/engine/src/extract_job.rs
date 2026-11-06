@@ -1,6 +1,7 @@
 //! 保存「先只扫描」时选中的文件：把源上每个文件所在的那一段当作一块小设备，只启用它的格式，
 //! 再跑一遍深度恢复。保存时因此会重做一遍格式校验；找到的文件起点、长度与扫描时一致才算保存成功，
-//! 否则（源上的内容变了）不保留。
+//! 否则（源上的内容变了）不保留。扫描时不完整的文件按部分恢复重跑：那一段在这块小设备的末尾断开，
+//! 插件给出的那一段（或正好在这里结束的完整文件）起点、长度与扫描时一致就保存。
 //!
 //! 文件直接存进用户选的目录：先在目录里的暂存子目录中恢复、校验，通过的再移到目录下，名字用另存为时起的
 //! 或恢复时起的；与已有文件重名时加序号，不覆盖。暂存子目录在任务结束时删掉。
@@ -42,10 +43,9 @@ pub fn run(
             reporter.flush();
             return Ok(JobOutcome::Cancelled);
         }
-        let name = item
-            .name
-            .clone()
-            .unwrap_or_else(|| yisi_carve::recovered_name(item.offset, &item.extension));
+        let name = item.name.clone().unwrap_or_else(|| {
+            yisi_carve::recovered_name(item.offset, &item.extension, item.incomplete.is_some())
+        });
         match extract_one(
             device,
             registry,
@@ -159,6 +159,7 @@ fn extract_one(
         block_size: device.sector_size(),
         enabled,
         start: 0,
+        keep_incomplete: item.incomplete.is_some(),
     };
     let window = Window::new(device, item.offset, item.length);
     let mut sink = DirectorySink::with_origin(output_dir, item.offset)
@@ -195,6 +196,8 @@ fn extract_one(
             "源上的内容与扫描时不同：现在长 {} 字节，扫描时 {} 字节",
             file.length, item.length
         ))
+    } else if item.incomplete.is_some() {
+        Err("源上这一段认不出扫描时那个不完整的文件了，内容可能在扫描后变了".to_owned())
     } else {
         Err("源上这一段已不是完整的文件，内容可能在扫描后变了".to_owned())
     }))

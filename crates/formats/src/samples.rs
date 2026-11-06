@@ -1043,11 +1043,21 @@ pub fn asf(video: bool, packets: usize) -> Vec<u8> {
 
 /// CAB：一个文件夹、`files` 个文件，一个 CFDATA 块装 `data_len` 字节（不压缩）。
 pub fn cab(files: usize, data_len: usize) -> Vec<u8> {
+    cab_with(files, data_len, None)
+}
+
+/// 带数字签名的 CAB：CFHEADER 带 20 字节的预留区记着签名的位置与长度，`signature_len` 字节的签名附在 cbCabinet 之后。
+pub fn cab_signed(files: usize, data_len: usize, signature_len: usize) -> Vec<u8> {
+    cab_with(files, data_len, Some(signature_len))
+}
+
+fn cab_with(files: usize, data_len: usize, signature_len: Option<usize>) -> Vec<u8> {
     let mut noise = Noise::new(0x0043_4142);
     let names: Vec<Vec<u8>> = (0..files)
         .map(|index| format!("file{index}.txt\0").into_bytes())
         .collect();
-    let files_at = 36 + 8;
+    let reserve = if signature_len.is_some() { 4 + 20 } else { 0 };
+    let files_at = 36 + reserve + 8;
     let data_at = files_at + names.iter().map(|name| 16 + name.len()).sum::<usize>();
     let total = data_at + 8 + data_len;
     let mut out = b"MSCF\0\0\0\0".to_vec();
@@ -1058,9 +1068,18 @@ pub fn cab(files: usize, data_len: usize) -> Vec<u8> {
     out.extend_from_slice(&[3, 1]);
     put16(&mut out, 1);
     put16(&mut out, files as u16);
-    put16(&mut out, 0); // 标志
+    put16(&mut out, if signature_len.is_some() { 0x0004 } else { 0 }); // 标志
     put16(&mut out, 0x1234); // 分卷组号
     put16(&mut out, 0);
+    if let Some(signature_len) = signature_len {
+        // cbCFHeader、cbCFFolder、cbCFData，预留区：标记、签名偏移、签名长度、8 个 0
+        put16(&mut out, 20);
+        out.extend_from_slice(&[0, 0]);
+        out.extend_from_slice(&[0, 0, 0x10, 0]);
+        put32(&mut out, total as u32);
+        put32(&mut out, signature_len as u32);
+        out.extend_from_slice(&[0; 8]);
+    }
     // CFFOLDER
     put32(&mut out, data_at as u32);
     put16(&mut out, 1);
@@ -1080,6 +1099,9 @@ pub fn cab(files: usize, data_len: usize) -> Vec<u8> {
     put16(&mut out, data_len as u16);
     put16(&mut out, data_len as u16);
     out.extend(noise.bytes(data_len));
+    if let Some(signature_len) = signature_len {
+        out.extend(noise.bytes(signature_len));
+    }
     out
 }
 
@@ -1687,4 +1709,330 @@ pub fn wmf(placeable: bool, records: usize) -> Vec<u8> {
     put16(&mut out, checksum);
     out.extend(body);
     out
+}
+
+/// ISO 9660 镜像的布局：逻辑块大小、有没有 Joliet 的补充卷描述符与 El Torito 的引导记录。
+pub struct IsoLayout {
+    pub block_size: u16,
+    pub joliet: bool,
+    pub boot_record: bool,
+}
+
+impl Default for IsoLayout {
+    fn default() -> Self {
+        Self {
+            block_size: 2048,
+            joliet: false,
+            boot_record: false,
+        }
+    }
+}
+
+/// 两字节、四字节的数值，先小端、再大端各写一遍。
+fn put_both16(out: &mut Vec<u8>, value: u16) {
+    put16(out, value);
+    put_be16(out, value);
+}
+
+fn put_both32(out: &mut Vec<u8>, value: u32) {
+    put32(out, value);
+    put_be32(out, value);
+}
+
+/// ISO 9660：32 KiB 系统区（全 0），主卷描述符、（引导记录、Joliet 补充卷描述符、）结束符，根目录在第 20 个扇区，
+/// 之后是随机数据，一共 40 个 2048 字节的扇区。
+pub fn iso(layout: &IsoLayout) -> Vec<u8> {
+    const SECTOR: usize = 2048;
+    let mut noise = Noise::new(0x0049_534F);
+    let total = 40 * SECTOR;
+    let block_size = usize::from(layout.block_size);
+    let mut out = vec![0u8; 16 * SECTOR];
+    let root_extent = (20 * SECTOR / block_size) as u32;
+    let descriptor = |kind: u8, version: u8| {
+        let mut sector = vec![kind];
+        sector.extend_from_slice(b"CD001");
+        sector.push(version);
+        sector
+    };
+    // 主卷描述符
+    let mut pvd = descriptor(1, 1);
+    pvd.push(0);
+    pvd.extend_from_slice(&[b' '; 32]); // 系统标识
+    let mut volume = b"YISI_TEST".to_vec();
+    volume.resize(32, b' ');
+    pvd.extend(volume);
+    pvd.extend_from_slice(&[0; 8]);
+    put_both32(&mut pvd, (total / block_size) as u32);
+    pvd.extend_from_slice(&[0; 32]);
+    put_both16(&mut pvd, 1); // 卷集大小
+    put_both16(&mut pvd, 1); // 卷序号
+    put_both16(&mut pvd, layout.block_size);
+    put_both32(&mut pvd, 10); // 路径表大小
+    put32(&mut pvd, root_extent + 1); // 小端路径表的位置
+    put32(&mut pvd, 0);
+    put_be32(&mut pvd, root_extent + 2); // 大端路径表的位置
+    put32(&mut pvd, 0);
+    // 根目录记录
+    pvd.push(34);
+    pvd.push(0);
+    put_both32(&mut pvd, root_extent);
+    put_both32(&mut pvd, SECTOR as u32);
+    pvd.extend_from_slice(&[126, 1, 2, 3, 4, 5, 0]); // 记录日期
+    pvd.extend_from_slice(&[0x02, 0, 0]);
+    put_both16(&mut pvd, 1);
+    pvd.extend_from_slice(&[1, 0]);
+    pvd.resize(881, b' ');
+    pvd.push(1); // 文件结构版本
+    pvd.resize(SECTOR, 0);
+    out.extend(pvd);
+    if layout.boot_record {
+        let mut boot = descriptor(0, 1);
+        boot.extend_from_slice(b"EL TORITO SPECIFICATION");
+        boot.resize(SECTOR, 0);
+        out.extend(boot);
+    }
+    if layout.joliet {
+        let mut svd = descriptor(2, 1);
+        svd.extend(noise.bytes(80));
+        svd.resize(SECTOR, 0);
+        out.extend(svd);
+    }
+    let mut terminator = descriptor(255, 1);
+    terminator.resize(SECTOR, 0);
+    out.extend(terminator);
+    let rest = total - out.len();
+    out.extend(noise.bytes(rest));
+    out
+}
+
+/// FLAC 的布局：声道数、帧数、变长块（帧头记采样序号）、封面图片的长度、STREAMINFO 里记不记最大帧长。
+/// 每帧 576 个采样，最后一帧 100 个；16 位、44.1 kHz。各帧轮流用四种子帧（常数、原样、带浪费位的二阶固定预测、
+/// 四阶线性预测）、几种双声道写法、帧头里写或不写采样率与位深，残差里有普通的 Rice 分区与转义成原样的分区。
+pub struct FlacLayout {
+    pub channels: u8,
+    pub frames: usize,
+    pub variable: bool,
+    pub picture: usize,
+    pub max_frame_known: bool,
+}
+
+impl Default for FlacLayout {
+    fn default() -> Self {
+        Self {
+            channels: 2,
+            frames: 5,
+            variable: false,
+            picture: 0,
+            max_frame_known: true,
+        }
+    }
+}
+
+/// 高位在前的位写入器。
+struct BitWriter {
+    bytes: Vec<u8>,
+    bits: usize,
+}
+
+impl BitWriter {
+    fn put(&mut self, value: u64, count: u32) {
+        for index in (0..count).rev() {
+            if self.bits.is_multiple_of(8) {
+                self.bytes.push(0);
+            }
+            let bit = ((value >> index) & 1) as u8;
+            let last = self.bytes.len() - 1;
+            self.bytes[last] |= bit << (7 - self.bits % 8);
+            self.bits += 1;
+        }
+    }
+
+    fn unary(&mut self, zeros: u64) {
+        for _ in 0..zeros {
+            self.put(0, 1);
+        }
+        self.put(1, 1);
+    }
+}
+
+/// 帧号或采样序号的变长写法（与 UTF-8 一样）。
+fn flac_coded_number(value: u64) -> Vec<u8> {
+    if value < 0x80 {
+        return vec![value as u8];
+    }
+    let mut extra = 1;
+    while value >> (6 * extra) >= 1 << (6 - extra) {
+        extra += 1;
+    }
+    let lead = (0xFF00u16 >> (extra + 1)) as u8;
+    let mut out = vec![lead | (value >> (6 * extra)) as u8];
+    for index in (0..extra).rev() {
+        out.push(0x80 | ((value >> (6 * index)) & 0x3F) as u8);
+    }
+    out
+}
+
+/// Rice 编码的残差：`count` 个，参数 `parameter`。
+fn flac_rice(writer: &mut BitWriter, noise: &mut Noise, count: u64, parameter: u32) {
+    for _ in 0..count {
+        writer.unary(noise.next_u64() % 4);
+        writer.put(noise.next_u64(), parameter);
+    }
+}
+
+fn flac_frame(layout: &FlacLayout, index: usize, noise: &mut Noise) -> Vec<u8> {
+    let last = index + 1 == layout.frames;
+    let block: u32 = if last { 100 } else { 576 };
+    let mut out = vec![0xFF, 0xF8 | u8::from(layout.variable)];
+    let block_code = if last { 6 } else { 2 };
+    let rate_code = if index.is_multiple_of(2) { 9 } else { 0 };
+    out.push((block_code << 4) | rate_code);
+    let channel_code = if layout.channels == 2 {
+        [1u8, 8, 9, 10][index % 4]
+    } else {
+        layout.channels - 1
+    };
+    let depth_code = if index.is_multiple_of(3) { 0 } else { 4 };
+    out.push((channel_code << 4) | (depth_code << 1));
+    let number = if layout.variable {
+        index as u64 * 576
+    } else {
+        index as u64
+    };
+    out.extend(flac_coded_number(number));
+    if last {
+        out.push((block - 1) as u8);
+    }
+    out.push(crate::flac::crc8(&out));
+
+    let mut writer = BitWriter {
+        bytes: out,
+        bits: 0,
+    };
+    writer.bits = writer.bytes.len() * 8;
+    let side = match channel_code {
+        8 | 10 => Some(1),
+        9 => Some(0),
+        _ => None,
+    };
+    for channel in 0..layout.channels {
+        let depth = 16 + u32::from(side == Some(channel));
+        writer.put(0, 1);
+        match (index + usize::from(channel)) % 4 {
+            0 => {
+                writer.put(0, 6);
+                writer.put(0, 1);
+                writer.put(noise.next_u64(), depth);
+            }
+            1 => {
+                writer.put(1, 6);
+                writer.put(0, 1);
+                for _ in 0..block {
+                    writer.put(noise.next_u64(), depth);
+                }
+            }
+            2 => {
+                // 二阶固定预测，浪费 2 位（一元编码的 1 个 0）
+                writer.put(8 + 2, 6);
+                writer.put(1, 1);
+                writer.unary(1);
+                let depth = depth - 2;
+                writer.put(noise.next_u64(), depth * 2);
+                // 4 位参数，两个分区：第一个按 Rice、第二个转义成每个 7 位的原样
+                writer.put(0, 2);
+                writer.put(1, 4);
+                writer.put(3, 4);
+                flac_rice(&mut writer, noise, u64::from(block / 2 - 2), 3);
+                writer.put(0xF, 4);
+                writer.put(7, 5);
+                for _ in 0..block / 2 {
+                    writer.put(noise.next_u64(), 7);
+                }
+            }
+            _ => {
+                // 四阶线性预测，系数精度 12 位，移位 9
+                writer.put(31 + 4, 6);
+                writer.put(0, 1);
+                for _ in 0..4 {
+                    writer.put(noise.next_u64(), depth);
+                }
+                writer.put(11, 4);
+                writer.put(9, 5);
+                writer.put(noise.next_u64(), 12 * 4);
+                // 5 位参数，四个分区，最后一个转义成 0 位（全是 0 的残差）
+                writer.put(1, 2);
+                writer.put(2, 4);
+                let per = u64::from(block / 4);
+                writer.put(7, 5);
+                flac_rice(&mut writer, noise, per - 4, 7);
+                writer.put(0, 5);
+                flac_rice(&mut writer, noise, per, 0);
+                writer.put(17, 5);
+                flac_rice(&mut writer, noise, per, 17);
+                writer.put(0x1F, 5);
+                writer.put(0, 5);
+            }
+        }
+    }
+    let padding = (8 - writer.bits % 8) % 8;
+    writer.put(0, padding as u32);
+    let mut frame = writer.bytes;
+    let crc = crate::flac::crc16(&frame);
+    put_be16(&mut frame, crc);
+    frame
+}
+
+fn flac_build(layout: &FlacLayout) -> (Vec<u8>, Vec<usize>) {
+    let mut noise = Noise::new(0x0046_4C41);
+    let frames: Vec<Vec<u8>> = (0..layout.frames)
+        .map(|index| flac_frame(layout, index, &mut noise))
+        .collect();
+    let total = (layout.frames as u64 - 1) * 576 + 100;
+    let (min_frame, max_frame) = if layout.max_frame_known {
+        (
+            frames.iter().map(Vec::len).min().unwrap_or(0) as u32,
+            frames.iter().map(Vec::len).max().unwrap_or(0) as u32,
+        )
+    } else {
+        (0, 0)
+    };
+    let mut out = b"fLaC".to_vec();
+    // STREAMINFO
+    out.extend_from_slice(&[0, 0, 0, 34]);
+    put_be16(&mut out, 576);
+    put_be16(&mut out, 576);
+    out.extend_from_slice(&min_frame.to_be_bytes()[1..]);
+    out.extend_from_slice(&max_frame.to_be_bytes()[1..]);
+    let packed = (44_100u64 << 44) | (u64::from(layout.channels - 1) << 41) | (15u64 << 36) | total;
+    out.extend_from_slice(&packed.to_be_bytes());
+    out.extend(noise.bytes(16)); // MD5
+    let block = |out: &mut Vec<u8>, kind: u8, last: bool, body: &[u8]| {
+        out.push(kind | if last { 0x80 } else { 0 });
+        out.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+        out.extend_from_slice(body);
+    };
+    block(&mut out, 4, false, &noise.bytes(20));
+    if layout.picture > 0 {
+        let mut picture = noise.bytes(layout.picture);
+        picture[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        block(&mut out, 6, false, &picture);
+    }
+    block(&mut out, 3, false, &noise.bytes(18));
+    block(&mut out, 1, true, &[0; 10]);
+    let mut starts = Vec::new();
+    for frame in frames {
+        starts.push(out.len());
+        out.extend(frame);
+    }
+    (out, starts)
+}
+
+/// FLAC 样本，见 [`FlacLayout`]。
+pub fn flac(layout: &FlacLayout) -> Vec<u8> {
+    flac_build(layout).0
+}
+
+/// [`flac`] 样本里每一帧的起点。
+pub fn flac_frame_starts(layout: &FlacLayout) -> Vec<usize> {
+    flac_build(layout).1
 }

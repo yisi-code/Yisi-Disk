@@ -83,6 +83,8 @@ impl FileFormat for Zip {
                     phase: Phase::Record,
                     mimetype: None,
                     names: Names::default(),
+                    local_open: false,
+                    confirmed: 0,
                 },
             )) as Box<dyn Recovering>
         })
@@ -173,6 +175,10 @@ struct ZipStructure {
     /// 按 `mimetype` 的内容定的扩展名。
     mimetype: Option<&'static str>,
     names: Names,
+    /// 读过本地文件头、还没看到它的数据之后接着的记录。
+    local_open: bool,
+    /// 数据之后接上了认得的记录的本地文件数。
+    confirmed: u32,
 }
 
 impl ZipStructure {
@@ -225,6 +231,12 @@ impl Structure for ZipStructure {
         self.mimetype.or_else(|| self.names.extension())
     }
 
+    /// 部分恢复：至少一个本地文件的数据之后接上了认得的记录才保存，到断点为止。
+    /// 没有中央目录，解压软件要按本地文件头一个个读（多数有「修复」或「按本地头解压」的办法）。
+    fn intact(&self, cut: u64) -> Option<u64> {
+        (self.confirmed > 0).then_some(cut)
+    }
+
     fn step(&mut self, event: Event<'_>) -> Step {
         let (at, bytes) = match event {
             Event::Found { at } => return self.record_at(at),
@@ -235,6 +247,18 @@ impl Structure for ZipStructure {
                 let Some(signature) = le32(bytes, 0) else {
                     return Step::Invalid;
                 };
+                let known = matches!(
+                    signature,
+                    LOCAL_FILE
+                        | CENTRAL_DIRECTORY
+                        | END_OF_CENTRAL_DIRECTORY
+                        | ZIP64_END
+                        | ZIP64_LOCATOR
+                        | DATA_DESCRIPTOR
+                );
+                if known && std::mem::take(&mut self.local_open) {
+                    self.confirmed += 1;
+                }
                 let (phase, len) = match signature {
                     LOCAL_FILE => (Phase::LocalFile, 30),
                     CENTRAL_DIRECTORY => (Phase::CentralDirectory, 46),
@@ -266,6 +290,7 @@ impl Structure for ZipStructure {
                     extra,
                     extra_start: at + 30 + u64::from(name),
                 };
+                self.local_open = true;
                 if name == 0 {
                     return self.after_name(local, false);
                 }

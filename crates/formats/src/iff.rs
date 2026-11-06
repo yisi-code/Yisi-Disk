@@ -23,6 +23,8 @@ pub struct IffFormat {
     signatures: &'static [Signature],
     prefix: &'static [u8],
     forms: &'static [Form],
+    /// 截短时保存断点之前的一段（AIFF 的前半段照样能放；DjVu 不做）。
+    partial: bool,
 }
 
 static AIFF_INFO: FormatInfo = FormatInfo {
@@ -60,6 +62,7 @@ pub const AIFF: IffFormat = IffFormat {
         (b"AIFF", None, AIFF_CHUNKS),
         (b"AIFC", Some("aifc"), AIFF_CHUNKS),
     ],
+    partial: true,
 };
 
 pub const DJVU: IffFormat = IffFormat {
@@ -70,6 +73,7 @@ pub const DJVU: IffFormat = IffFormat {
     }],
     prefix: b"AT&T",
     forms: &[(b"DJVU", None, &[b"INFO"]), (b"DJVM", None, &[b"DIRM"])],
+    partial: false,
 };
 
 impl FileFormat for IffFormat {
@@ -98,10 +102,12 @@ impl FileFormat for IffFormat {
             && u64::from(first_size) + 8 + 4 <= u64::from(size);
         plausible.then(|| {
             let length = riff_end(at as u64, size);
-            Box::new(Walker::new(
-                self.info.max_size,
-                KnownLength::new(length).with_extension(*extension),
-            )) as Box<dyn Recovering>
+            let mut structure = KnownLength::new(length).with_extension(*extension);
+            if self.partial {
+                // 第一个块的头之后才有真正的内容
+                structure = structure.intact_after(at as u64 + 12 + 8);
+            }
+            Box::new(Walker::new(self.info.max_size, structure)) as Box<dyn Recovering>
         })
     }
 }

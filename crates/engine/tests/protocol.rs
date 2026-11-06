@@ -11,9 +11,9 @@ use yisi_engine::protocol::{
     BROWSE_OPEN, BrowseOpened, CANCEL, CANCEL_SCAN, CANCELLED, CAPABILITIES, CARVE_EXTRACT,
     CARVE_START, COMPLETED, COPIED, COPY_FILES, CarveSummary, CopiedFile, CopySummary, FOUND,
     FS_CHECK, FileListPage, FilePreview, FoundFile, FsCheckReport, HEARTBEAT, IMAGE_CREATE,
-    IMAGE_RESUME, IMAGING, ImageStarted, ImageSummary, JobImaging, LIST_FILE_TYPES, LIST_FILES,
-    PAUSE, PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS, READ_SCAN, RESUME, ReadMapCell,
-    ReadScanReport, SCAN_DELETED, ScanResult, error_code,
+    IMAGE_RESUME, IMAGING, ImageStarted, ImageSummary, IncompleteReason, JobImaging,
+    LIST_FILE_TYPES, LIST_FILES, PAUSE, PREVIEW_FILE, PREVIEW_FS_FILE, PREVIEW_RANGE, PROGRESS,
+    READ_SCAN, RESUME, ReadMapCell, ReadScanReport, SCAN_DELETED, ScanResult, error_code,
 };
 use yisi_formats::samples;
 use yisi_io::{BadMap, SegmentState};
@@ -861,6 +861,111 @@ fn scan_only_then_preview_and_save_selected_files() {
     assert!(again.wait_exit().success());
 }
 
+/// 只扫描时打开部分恢复：后半段被覆盖的 WAV 报成不完整（带原因），另存时按部分恢复重新核对，
+/// 存成 `.incomplete.wav`；不打开时它不出现，完整的文件照旧。
+#[test]
+fn scan_only_reports_incomplete_files_and_saves_them() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-scan-incomplete");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // WAV 只剩前 3000 字节（头里说的长得多），紧接着是一个完整的 ZIP
+    let wav = samples::riff(b"WAVE", &[(b"fmt ", 16), (b"data", 20_000)]);
+    let zip = samples::zip(&[("a.txt", 3000, true)], b"");
+    let mut image = vec![0x20u8; 1024];
+    image.extend_from_slice(&wav[..3000]);
+    image.resize(image.len().div_ceil(512) * 512, 0x20);
+    let zip_at = image.len();
+    image.extend_from_slice(&zip);
+    image.resize(image.len().div_ceil(512) * 512 + 2048, 0x20);
+    let image_path = dir.join("disk.img");
+    std::fs::write(&image_path, &image).unwrap();
+    let source = json!({"type": "image", "path": image_path, "sectorSize": 512});
+
+    let scan = |job_id: &str, keep: Option<bool>| {
+        let mut engine = Engine::start();
+        let mut params = json!({"jobId": job_id, "source": source});
+        if let Some(keep) = keep {
+            params["keepIncomplete"] = json!(keep);
+        }
+        engine.call(CARVE_START, params).unwrap();
+        let notifications = engine.notifications_until(COMPLETED);
+        let found: Vec<FoundFile> = notifications
+            .iter()
+            .filter(|(method, _)| method == FOUND)
+            .flat_map(|(_, params)| {
+                serde_json::from_value::<Vec<FoundFile>>(params["files"].clone()).unwrap()
+            })
+            .collect();
+        let summary: CarveSummary =
+            serde_json::from_value(notifications.last().unwrap().1["result"].clone()).unwrap();
+        assert!(engine.wait_exit().success());
+        (found, summary)
+    };
+
+    // 不给 keepIncomplete（旧界面）：只有完整的 ZIP
+    let (found, summary) = scan("scan-old-abcdef", None);
+    let offsets: Vec<_> = found.iter().map(|file| file.offset).collect();
+    assert_eq!(offsets, [zip_at as u64]);
+    assert_eq!((summary.files, summary.incomplete), (1, 0));
+
+    let (found, summary) = scan("scan-keep-abcdef", Some(true));
+    assert_eq!((summary.files, summary.incomplete), (2, 1));
+    let wav = &found[0];
+    assert_eq!(
+        (wav.offset, wav.incomplete, wav.name.as_str()),
+        (
+            1024,
+            Some(IncompleteReason::Overwritten),
+            "f0000000002.incomplete.wav"
+        )
+    );
+    assert_eq!(wav.length, zip_at as u64 - 1024);
+    assert_eq!(
+        (found[1].offset, found[1].incomplete),
+        (zip_at as u64, None)
+    );
+    // 完整的文件在通知里没有 incomplete 这一项
+    let raw = serde_json::to_value(&found[1]).unwrap();
+    assert!(raw.get("incomplete").is_none());
+
+    // 另存：带上 incomplete 时按部分恢复重新核对，存成扫描时的名字
+    let output = dir.join("saved");
+    let mut saver = Engine::start();
+    saver
+        .call(
+            CARVE_EXTRACT,
+            json!({"jobId": "save-incomplete", "source": source, "outputDir": output, "items": [
+                {"offset": wav.offset, "length": wav.length, "extension": "wav", "incomplete": "overwritten"},
+                // 不说是不完整的：按完整文件核对，对不上
+                {"offset": wav.offset, "length": wav.length, "extension": "wav"},
+            ]}),
+        )
+        .unwrap();
+    let notifications = saver.notifications_until(COMPLETED);
+    let saved: Vec<CopiedFile> = notifications
+        .iter()
+        .filter(|(method, _)| method == COPIED)
+        .flat_map(|(_, params)| {
+            serde_json::from_value::<Vec<CopiedFile>>(params["files"].clone()).unwrap()
+        })
+        .collect();
+    let outcome: Vec<_> = saved
+        .iter()
+        .map(|file| (file.path.as_str(), file.error.is_none()))
+        .collect();
+    assert_eq!(
+        outcome,
+        [
+            ("f0000000002.incomplete.wav", true),
+            ("f0000000002.wav", false)
+        ]
+    );
+    let content = std::fs::read(output.join("f0000000002.incomplete.wav")).unwrap();
+    assert!(content[..] == image[1024..zip_at]);
+    assert!(saver.wait_exit().success());
+}
+
 /// `keep.txt` 带的备用数据流。
 const ZONE_IDENTIFIER: &[u8] = b"[ZoneTransfer]\r\nZoneId=3\r\n";
 
@@ -1078,6 +1183,160 @@ fn ntfs_partition_is_scanned_listed_and_copied() {
             UNIX_EPOCH + Duration::from_secs(SAMPLE_WALL_TIME as u64)
         );
     }
+    assert!(copier.wait_exit().success());
+}
+
+/// MBR 里两个 Linux 分区：1 号是 ext2（Docs 里一个现存、一个删除了的文件），2 号是 ext4（一个删除了的文件）。
+fn ext_image(dir: &Path) -> (String, Vec<u8>, Vec<u8>) {
+    use yisi_fs::samples::{EXT_ROOT, ExtFlavor, ExtImage, Layout, pattern};
+    use yisi_part::samples::{MbrEntry, mbr_disk};
+
+    let mut ext2 = ExtImage::new(ExtFlavor::Ext2);
+    ext2.set_label("linux home");
+    let docs = ext2.mkdir(EXT_ROOT, "Docs");
+    let live = pattern(1, 9000);
+    ext2.add_file(docs, "a.bin", &live, Layout::Fragmented);
+    let gone = pattern(2, 20_000);
+    let placed = ext2.add_file(docs, "deleted.bin", &gone, Layout::Contiguous);
+    ext2.delete(docs, "deleted.bin", placed);
+    let ext2 = ext2.finish();
+
+    let mut ext4 = ExtImage::new(ExtFlavor::Ext4);
+    ext4.add_file(EXT_ROOT, "keep.txt", b"keep", Layout::Contiguous);
+    let placed = ext4.add_file(EXT_ROOT, "gone.bin", &pattern(3, 5000), Layout::Contiguous);
+    ext4.delete(EXT_ROOT, "gone.bin", placed);
+    let ext4 = ext4.finish();
+
+    let first = 2048usize;
+    let second = first + ext2.len() / 512;
+    let mut image = mbr_disk(
+        second * 512 + ext4.len(),
+        &[
+            MbrEntry::new(0x83, first as u32, (ext2.len() / 512) as u32),
+            MbrEntry::new(0x83, second as u32, (ext4.len() / 512) as u32),
+        ],
+    );
+    image[first * 512..][..ext2.len()].copy_from_slice(&ext2);
+    image[second * 512..][..ext4.len()].copy_from_slice(&ext4);
+    let path = dir.join("ext.img");
+    std::fs::write(&path, &image).unwrap();
+    (path.to_string_lossy().into_owned(), live, gone)
+}
+
+#[test]
+fn ext_partitions_are_listed_and_deleted_files_copied() {
+    use yisi_fs::samples::EXT_SAMPLE_SECONDS;
+
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-ext");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (image, live, gone) = ext_image(&dir);
+    let source = json!({"type": "image", "path": image, "sectorSize": 512});
+
+    let mut engine = Engine::start();
+    let opened: BrowseOpened = serde_json::from_value(
+        engine
+            .call(BROWSE_OPEN, json!({"jobId": "e1", "source": source}))
+            .unwrap(),
+    )
+    .unwrap();
+    let described: Vec<_> = opened
+        .partitions
+        .iter()
+        .map(|partition| {
+            (
+                partition.filesystem.as_str(),
+                partition.label.as_deref(),
+                partition.browsable,
+                partition.needs_scan,
+                partition.times_utc,
+            )
+        })
+        .collect();
+    assert_eq!(
+        described,
+        [
+            ("ext", Some("linux home"), true, false, true),
+            ("ext", Some("ext sample"), true, false, true),
+        ]
+    );
+    let list = |engine: &mut Engine, partition: u32, dir: Option<&str>| -> FileListPage {
+        serde_json::from_value(
+            engine
+                .call(
+                    LIST_FILES,
+                    json!({"jobId": "e1", "partition": partition, "dir": dir, "offset": 0, "limit": 100}),
+                )
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let root = list(&mut engine, 1, None);
+    let docs = root
+        .entries
+        .iter()
+        .find(|entry| entry.name == "Docs")
+        .unwrap()
+        .file
+        .clone();
+    let inside = list(&mut engine, 1, Some(&docs));
+    let states: Vec<_> = inside
+        .entries
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry.deleted, entry.state.as_str()))
+        .collect();
+    assert_eq!(
+        states,
+        [("a.bin", false, "live"), ("deleted.bin", true, "intact")]
+    );
+    // ext4 删除时清空了位置：状态是 cleared
+    let ext4_root = list(&mut engine, 2, None);
+    let cleared = ext4_root
+        .entries
+        .iter()
+        .find(|entry| entry.name == "gone.bin")
+        .unwrap();
+    assert_eq!((cleared.deleted, cleared.state.as_str()), (true, "cleared"));
+    engine.call(CANCEL, json!({"jobId": "e1"})).unwrap();
+    engine.notifications_until(CANCELLED);
+    assert!(engine.wait_exit().success());
+
+    // 复制 Docs：删除的文件一起复制出来，带上卷上记的修改时间（UTC）
+    let partition = &opened.partitions[0];
+    let partition_ref =
+        json!({"number": 1, "offset": partition.offset, "length": partition.length});
+    let mut copier = Engine::start();
+    copier
+        .call(
+            COPY_FILES,
+            json!({"jobId": "copy-ext", "source": source, "outputDir": dir, "partition": partition_ref,
+                   "items": [{"file": docs, "path": ["Docs"]}]}),
+        )
+        .unwrap();
+    let notifications = copier.notifications_until(COMPLETED);
+    let mut copied: Vec<_> = notifications
+        .iter()
+        .filter(|(method, _)| method == COPIED)
+        .flat_map(|(_, params)| {
+            serde_json::from_value::<Vec<CopiedFile>>(params["files"].clone()).unwrap()
+        })
+        .map(|file| (file.path, file.size))
+        .collect();
+    copied.sort();
+    assert_eq!(
+        copied,
+        [
+            ("Docs/a.bin".to_owned(), 9000),
+            ("Docs/deleted.bin".to_owned(), 20_000)
+        ]
+    );
+    let output = dir.join("restored-copy-ext").join("Docs");
+    assert_eq!(std::fs::read(output.join("a.bin")).unwrap(), live);
+    assert_eq!(std::fs::read(output.join("deleted.bin")).unwrap(), gone);
+    assert_eq!(
+        modified(&output.join("deleted.bin")),
+        UNIX_EPOCH + Duration::from_secs(EXT_SAMPLE_SECONDS as u64)
+    );
     assert!(copier.wait_exit().success());
 }
 
@@ -2575,4 +2834,158 @@ fn the_check_lists_repairs_and_free_clusters_can_be_read() {
     // 只读：镜像没被改动
     assert_eq!(std::fs::read(&image).unwrap(), bytes);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 一个 FAT16 镜像（不分区）：删掉的文件夹在根目录里的那一项已被改成别的，沿目录树找不到它。
+fn orphan_fat_image(dir: &Path) -> (String, u32, Vec<u8>) {
+    use yisi_fs::samples::{FatImage, FatType, Layout, pattern};
+
+    let mut fat = FatImage::new(FatType::Fat16);
+    let root = fat.root();
+    fat.add_file(root, "keep.txt", b"keep", Layout::Contiguous);
+    let lost = fat.mkdir(root, "Lost");
+    let photo = pattern(9, 3000);
+    let placed = fat.add_file(lost.as_dir(), "photo.jpg", &photo, Layout::Contiguous);
+    fat.delete(&placed);
+    fat.delete(&lost);
+    fat.patch_short_entry(&lost, 11, &[0x20]);
+    fat.patch_short_entry(&lost, 26, &[0, 0]);
+    let path = dir.join("orphans.img");
+    std::fs::write(&path, fat.finish()).unwrap();
+    (
+        path.to_string_lossy().into_owned(),
+        lost.first_cluster(),
+        photo,
+    )
+}
+
+#[test]
+fn fat_orphaned_folders_are_scanned_listed_and_copied() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-fat-orphans");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (image, cluster, photo) = orphan_fat_image(&dir);
+    let source = json!({"type": "image", "path": image, "sectorSize": 512});
+
+    let mut engine = Engine::start();
+    let opened: BrowseOpened = serde_json::from_value(
+        engine
+            .call(BROWSE_OPEN, json!({"jobId": "f1", "source": source}))
+            .unwrap(),
+    )
+    .unwrap();
+    let partition = &opened.partitions[0];
+    assert_eq!(
+        (
+            partition.filesystem.as_str(),
+            partition.needs_scan,
+            partition.optional_scan
+        ),
+        ("fat16", false, true)
+    );
+    let list = |engine: &mut Engine, dir: Option<&str>| -> FileListPage {
+        serde_json::from_value(
+            engine
+                .call(
+                    LIST_FILES,
+                    json!({"jobId": "f1", "partition": 1, "dir": dir, "offset": 0, "limit": 100}),
+                )
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let before = list(&mut engine, None);
+    assert!(
+        before
+            .entries
+            .iter()
+            .all(|entry| entry.virtual_dir.is_none())
+    );
+
+    let (result, notifications) =
+        engine.call_noting(SCAN_DELETED, json!({"jobId": "f1", "partition": 1}));
+    let result: ScanResult = serde_json::from_value(result.unwrap()).unwrap();
+    assert!(!result.cancelled);
+    assert_eq!((result.orphans, result.deleted_names), (1, 1));
+    assert!(result.free_bytes > 0);
+    let last = notifications
+        .iter()
+        .rfind(|(method, _)| method == PROGRESS)
+        .unwrap();
+    assert_eq!(last.1["stage"], "scanFree");
+    assert_eq!(last.1["done"], last.1["total"]);
+
+    // 扫完之后根目录带上「找不到原目录的文件」，里面是按首簇命名的文件夹
+    let root = list(&mut engine, None);
+    let virtual_dir = root
+        .entries
+        .iter()
+        .find(|entry| entry.virtual_dir.as_deref() == Some("orphans"))
+        .unwrap();
+    assert_eq!(
+        (virtual_dir.name.as_str(), virtual_dir.deleted),
+        ("$Orphans", false)
+    );
+    let orphans_token = virtual_dir.file.clone();
+    let orphans = list(&mut engine, Some(&orphans_token));
+    assert_eq!(orphans.entries.len(), 1);
+    let folder = &orphans.entries[0];
+    assert_eq!(folder.name, format!("dir-{cluster}"));
+    assert!(folder.deleted && folder.is_dir);
+    let inside = list(&mut engine, Some(&folder.file));
+    let found = &inside.entries[0];
+    assert_eq!(
+        (found.name.as_str(), found.state.as_str(), found.size),
+        ("photo.jpg", "intact", photo.len() as u64)
+    );
+
+    engine.call(CANCEL, json!({"jobId": "f1"})).unwrap();
+    engine.notifications_until(CANCELLED);
+    assert!(engine.wait_exit().success());
+
+    // 复制整个虚拟目录：复制引擎先读一遍空闲簇
+    let partition_ref =
+        json!({"number": 1, "offset": partition.offset, "length": partition.length});
+    let mut copier = Engine::start();
+    copier
+        .call(
+            COPY_FILES,
+            json!({"jobId": "copy-fat", "source": source, "outputDir": dir, "partition": partition_ref,
+                   "items": [{"file": orphans_token, "path": ["Lost files"]}]}),
+        )
+        .unwrap();
+    let notifications = copier.notifications_until(COMPLETED);
+    assert!(
+        notifications
+            .iter()
+            .any(|(method, params)| method == PROGRESS && params["stage"] == "scanFree")
+    );
+    let copied: Vec<CopiedFile> = notifications
+        .iter()
+        .filter(|(method, _)| method == COPIED)
+        .flat_map(|(_, params)| {
+            serde_json::from_value::<Vec<CopiedFile>>(params["files"].clone()).unwrap()
+        })
+        .collect();
+    let folder_name = format!("dir-{cluster}");
+    let expected = format!("Lost files/{folder_name}/photo.jpg");
+    assert_eq!(
+        copied
+            .iter()
+            .map(|file| (file.path.as_str(), file.error.is_none()))
+            .collect::<Vec<_>>(),
+        [(expected.as_str(), true)]
+    );
+    let output = dir.join("restored-copy-fat");
+    assert_eq!(
+        std::fs::read(
+            output
+                .join("Lost files")
+                .join(&folder_name)
+                .join("photo.jpg")
+        )
+        .unwrap(),
+        photo
+    );
+    assert!(copier.wait_exit().success());
 }

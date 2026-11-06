@@ -436,6 +436,7 @@ mod tests {
             label: None,
             browsable: true,
             needs_scan: true,
+            optional_scan: false,
             times_utc: true,
         }
     }

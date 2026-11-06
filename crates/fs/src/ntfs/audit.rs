@@ -1,6 +1,9 @@
 //! NTFS 一致性核对（只读，文件系统检查用）：顺序读一遍 MFT，核对每条记录与 `$MFT` 的记录位图、文件与上级目录、
 //! 目录索引里的项与记录；再把各记录运行表用到的簇排序，找出几个文件共用的簇，并与 `$Bitmap` 逐簇对比。
 //! 这里只给出事实，问题怎么说、有多严重由检查决定。
+//!
+//! 卷正在使用时（系统盘），读记录与读位图之间文件可能被建、被删，结论会对不上。要报出的「会丢数据」那几类
+//! （记录位图漏标、`$Bitmap` 漏标、交叉链接）在报出之前不走缓存再读一次那条记录与那几位，已经变了的不报。
 
 use super::index;
 use super::record::{BITMAP, Body, DATA, NAMESPACE_DOS, Record, decode_runs, split_ref};
@@ -402,11 +405,27 @@ impl<'a> Auditor<'a> {
     /// 上级目录要是在用、序号对得上的目录；记录位图漏标的文件此时换成路径。
     fn check_parents(&mut self) {
         let unmarked = std::mem::take(&mut self.unmarked_records);
+        // 记录位图是一开始读的：之后新建的文件也会「在用、位图里空闲」，重读一次位图再判断
+        let fresh = if unmarked.items.is_empty() {
+            None
+        } else {
+            self.record_bitmap()
+        };
+        let mut dropped = 0u64;
         for &record in &unmarked.items {
+            let marked_now = fresh.as_deref().is_some_and(|bytes| {
+                bytes
+                    .get((record / 8) as usize)
+                    .is_some_and(|byte| byte & (1 << (record % 8)) != 0)
+            });
+            if marked_now || !self.still_live(record) {
+                dropped += 1;
+                continue;
+            }
             let path = self.path(record);
             self.audit.not_in_record_bitmap.items.push(path);
         }
-        self.audit.not_in_record_bitmap.total = unmarked.total;
+        self.audit.not_in_record_bitmap.total = unmarked.total - dropped;
 
         // 有几个名字（硬链接）的文件只列一次
         let mut orphans: Vec<u64> = self
@@ -571,14 +590,22 @@ impl<'a> Auditor<'a> {
         self.audit.lost_clusters = compare.lost_clusters;
         self.audit.lost_ranges = compare.lost_ranges;
         self.audit.first_lost = compare.first_lost;
-        self.audit.not_in_bitmap.total = compare.unmarked.total;
+        let mut dropped = 0u64;
         for (first, count) in compare.unmarked.items {
-            let path = owner_of(&claims, first).map_or_else(String::new, |owner| self.path(owner));
+            let owner = owner_of(&claims, first);
+            let changed = owner.is_some_and(|owner| !self.still_live(owner))
+                || !still_unmarked(&bitmap, first, count);
+            if changed {
+                dropped += 1;
+                continue;
+            }
+            let path = owner.map_or_else(String::new, |owner| self.path(owner));
             self.audit
                 .not_in_bitmap
                 .items
                 .push(UnmarkedClusters { first, count, path });
         }
+        self.audit.not_in_bitmap.total = compare.unmarked.total - dropped;
         self.audit.clusters_checked = true;
         true
     }
@@ -597,7 +624,11 @@ impl<'a> Auditor<'a> {
         let mut reach: Option<Claim> = None;
         for claim in claims {
             if let Some(previous) = reach {
-                if claim.lcn < previous.end() && claim.owner != previous.owner {
+                if claim.lcn < previous.end()
+                    && claim.owner != previous.owner
+                    && self.still_live(previous.owner)
+                    && self.still_live(claim.owner)
+                {
                     let end = claim.end().min(previous.end());
                     let (path, other_path) = (self.path(previous.owner), self.path(claim.owner));
                     self.audit.shared.push(SharedClusters {
@@ -613,6 +644,20 @@ impl<'a> Auditor<'a> {
             }
             reach = Some(*claim);
         }
+    }
+
+    /// 这条记录现在还是读 MFT 时的那个在用的文件（不走缓存重读；读不出时按原来的结论）。
+    fn still_live(&self, record: u64) -> bool {
+        let size = self.ntfs.record_size;
+        let Some(offset) = record.checked_mul(size) else {
+            return false;
+        };
+        let mut raw = vec![0u8; size as usize];
+        if self.ntfs.mft.read_at(offset, &mut raw).is_err() {
+            return true;
+        }
+        let sequence = self.state(record).sequence;
+        Record::parse(raw, record).is_some_and(|now| now.in_use() && now.sequence == sequence)
     }
 
     /// 记录的路径：沿 `$FILE_NAME` 里的上级目录往上找到根目录。
@@ -750,6 +795,24 @@ impl Compare {
             Mismatch::Unmarked => self.unmarked.push((first, count)),
         }
     }
+}
+
+/// 重读 `$Bitmap`（不走缓存）：从 `first` 起的 `count` 个簇现在还都是空闲的。段太长（超过 1 MiB 的位图）或
+/// 读不出时按原来的结论。
+fn still_unmarked(bitmap: &super::stream::Stream, first: u64, count: u64) -> bool {
+    let (start, end) = (first / 8, first.saturating_add(count).div_ceil(8));
+    if end.saturating_sub(start) > BLOCK {
+        return true;
+    }
+    let mut bytes = vec![0u8; (end - start) as usize];
+    if bitmap.read_at(start, &mut bytes).is_err() {
+        return true;
+    }
+    (first..first.saturating_add(count)).all(|cluster| {
+        bytes
+            .get((cluster / 8 - start) as usize)
+            .is_some_and(|byte| byte & (1 << (cluster % 8)) == 0)
+    })
 }
 
 /// 用到簇 `cluster` 的文件（按起点排序的段里往前找）。

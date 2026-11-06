@@ -198,6 +198,26 @@
   margin: 0;
 }
 
+/* 浏览与结果页顶部的来源、分区：排成一行（放不下再换行），把高度让给文件区；
+   每一对标签与值包在一个 div 里，换行时标签不会和值分开 */
+.wizard__details--inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-xs) var(--space-lg);
+}
+
+.wizard__details--inline > div {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.wizard__details--inline dt {
+  flex: none;
+}
+
 .wizard__path-text {
   overflow-wrap: anywhere;
   user-select: text;
@@ -469,6 +489,16 @@
 
 .tree-list__time {
   min-width: 132px;
+}
+
+/* 行里的文字标签（已删除、隐藏、不完整等）：带边框的小字，颜色由使用方按含义加 */
+.tree-list__badge {
+  flex: none;
+  padding: 0 var(--space-xs);
+  font-size: var(--font-size-small);
+  font-weight: normal;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
 }
 
 .tree-list__footer {

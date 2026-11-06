@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, useId, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import FoundPartitionItem from './FoundPartitionItem.vue'
-import MftScanProgress from './MftScanProgress.vue'
+import DeletedScanProgress from './DeletedScanProgress.vue'
 import PartitionFiles from './PartitionFiles.vue'
 import SourcePicker from './SourcePicker.vue'
 import WizardSteps from './WizardSteps.vue'
@@ -92,14 +92,15 @@ const isPartitionBusy = computed(
 /** 镜像文件与整块磁盘可以写回分区表；卷上没有分区表 */
 const canWrite = computed(() => canWritePlan(search.target.value))
 
-/** 选中的是「丢失」、又不与别的候选重叠的分区：可以写回分区表 */
+/** 选中的是「丢失」、又不与别的候选重叠的分区：可以写回分区表（ext 分区只浏览、另存，不写回） */
 const canWriteBack = computed(() => {
   const candidate = selectedCandidate.value
   return (
     candidate !== null &&
     candidate.relation === 'lost' &&
     !candidate.overlapsCandidate &&
-    candidate.foundBy !== 'structure'
+    candidate.foundBy !== 'structure' &&
+    candidate.filesystem !== 'ext'
   )
 })
 
@@ -137,11 +138,14 @@ const statusText = computed(() => {
   return ''
 })
 
-/** 选中的分区不能写回的原因：按结构找到的长度推不准，分区表里已有的不需要写回 */
+/** 选中的分区不能写回的原因：按结构找到的长度推不准，ext 分区暂不写回，分区表里已有的不需要写回 */
 const candidateNote = computed(() => {
   const candidate = selectedCandidate.value
   if (candidate?.foundBy === 'structure') {
     return t('findPartitions.write.structureOnly')
+  }
+  if (candidate?.filesystem === 'ext' && candidate.relation === 'lost') {
+    return t('findPartitions.write.extUnsupported')
   }
   if (candidate?.relation === 'inTable') {
     return t('findPartitions.write.inTable', { number: candidate.tablePartition ?? '' })
@@ -337,7 +341,7 @@ async function openSelected() {
     return
   }
   if (partition.browsable && partition.needsScan && !browse.scanResults.value.has(partition.number)) {
-    const result = await browse.scan(partition.number)
+    const result = await browse.scan(partition)
     if (serial !== openSerial || result === null) {
       return
     }
@@ -376,6 +380,8 @@ async function openSelected() {
             v-if="canSearchDeeper"
             class="wizard__button wizard__button--secondary"
             type="button"
+            :title="t('findPartitions.results.deepHint')"
+            :aria-describedby="`${domPrefix}-deep-hint`"
             :disabled="target === null || isPartitionBusy"
             @click="searchDeep"
           >
@@ -495,16 +501,16 @@ async function openSelected() {
       </div>
 
       <div v-else class="wizard__panel wizard__fill">
-        <dl class="wizard__details">
-          <dt>{{ t('common.source') }}</dt>
-          <dd class="wizard__path-text">{{ sourceText }}</dd>
-          <dt>{{ t('findPartitions.results.label') }}</dt>
-          <dd>
-            {{ summaryText }}
-            <span v-if="canSearchDeeper" class="wizard__hint">{{ t('findPartitions.results.deepHint') }}</span>
-          </dd>
+        <dl class="wizard__details wizard__details--inline">
+          <div>
+            <dt>{{ t('common.source') }}</dt>
+            <dd class="wizard__path-text">{{ sourceText }}</dd>
+          </div>
+          <div>
+            <dt>{{ t('findPartitions.results.label') }}</dt>
+            <dd>{{ summaryText }}</dd>
+          </div>
         </dl>
-        <p class="wizard__hint wizard__hint--warning">{{ t('findPartitions.results.readOnly') }}</p>
         <div v-if="lastRecord" class="find-partitions__outcome">
           <p :class="lastRecord.outcome.done ? 'wizard__note' : 'wizard__error'" role="status">
             {{
@@ -624,7 +630,7 @@ async function openSelected() {
               <p v-else-if="isOpeningPartition" class="wizard__note">
                 {{ t('findPartitions.files.opening') }}
               </p>
-              <MftScanProgress v-else-if="browse.isScanning.value" :browse="browse" />
+              <DeletedScanProgress v-else-if="browse.isScanning.value" :browse="browse" />
               <template v-else>
                 <p v-if="openError" class="wizard__error" role="alert">
                   {{ t('findPartitions.files.openFailed', { reason: formatHostError(openError) }) }}
@@ -652,6 +658,12 @@ async function openSelected() {
             <div></div>
           </section>
         </div>
+        <!-- 固定的说明放在最下面，顶部只留来源、结果与写盘的结论 -->
+        <!-- 深度搜索的说明悬停按钮可看；这一份给读屏软件读 -->
+        <p v-if="canSearchDeeper" :id="`${domPrefix}-deep-hint`" class="wizard__visually-hidden">
+          {{ t('findPartitions.results.deepHint') }}
+        </p>
+        <p class="wizard__hint wizard__hint--warning">{{ t('findPartitions.results.readOnly') }}</p>
       </div>
     </form>
   </section>
