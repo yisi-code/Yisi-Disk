@@ -20,8 +20,8 @@
 
 ## 下载与运行
 
-1. 打开 [最新版本](https://github.com/yisi-code/Yisi-Disk/releases/latest)，下载 `yisi-磁盘工具-<版本>-windows-x64.zip`。
-2. 解压到任意位置（不要放在要恢复数据的那块盘上），得到 `yisi-磁盘工具-<版本>-windows-x64` 文件夹，双击里面的 `yisi-磁盘工具.exe` 运行。
+1. 打开 [最新版本](https://github.com/yisi-code/Yisi-Disk/releases/latest)，下载 `yisi-disk-tools-v<版本>-windows-x64.zip`（GitHub 的下载文件名不能带中文，所以压缩包用英文名）。
+2. 解压到任意位置（不要放在要恢复数据的那块盘上），得到 `yisi-磁盘工具-v<版本>-windows-x64` 文件夹，双击里面的 `yisi-磁盘工具.exe` 运行。
 3. 文件夹里的 `yisi-engine.exe`、`yisi-broker.exe` 由主程序按需启动，三个程序要放在一起。
 4. 程序写的东西（做过的镜像、写盘记录与备份、打开文件时的临时副本、界面缓存）都放在程序文件夹里的 `data` 文件夹，不写到系统的 AppData。所以程序文件夹要放在能写入的位置；删掉整个文件夹就是彻底删除。
 
