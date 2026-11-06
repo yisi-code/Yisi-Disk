@@ -252,7 +252,7 @@ rpc ← engine、broker、宿主（宿主另外引用 engine、broker 的库部�
 
 | 目录 | 包名 | 职责 |
 |---|---|---|
-| `crates/io` | `yisi-io` | 块设备抽象；Windows/macOS/Linux 后端；raw、分段 raw、E01（按签名认格式 `image_format` / `open_image`，E01 只读 `EwfImage`，第 5.2 节）；Adler-32（`adler32`）；按偏移取整数（`bytes`，在依赖的最底层，`yisi_part::bytes` 转出它）；读缓存；坏扇区读取策略；能识别坏区的镜像（第 5.6 节）；写入计划的数据、核对与预演用的叠加视图（`plan`，没有写操作，第 4.2 节）；从头到尾顺序读一遍设备（`scan_device`，读取扫描与丢失分区的深度搜索共用）；两段是否重叠（`ranges_overlap`，首尾相接不算）；写入段收尾（`merge_writes`：按偏移排、去掉内容没变的、首尾相接的合并成一段）；输出文件名的后缀与「先写临时文件、落盘后再改名换上去」（`with_suffix` / `temp_path` / `write_then_replace`）；NTFS 时间起点（`NT_UNIX_EPOCH_SECONDS`）；物理磁盘路径规则；输出不在源盘上的判断 |
+| `crates/io` | `yisi-io` | 块设备抽象；Windows/macOS/Linux 后端；raw、分段 raw、E01（按签名认格式 `image_format` / `open_image`，E01 只读 `EwfImage`，第 5.2 节）；Adler-32（`adler32`）；按偏移取整数（`bytes`，在依赖的最底层，`yisi_part::bytes` 转出它）；读缓存；坏扇区读取策略；能识别坏区的镜像（第 5.6 节）；写入计划的数据、核对与预演用的叠加视图（`plan`，没有写操作，第 4.2 节）；从头到尾顺序读一遍设备（`scan_device`，读取扫描与丢失分区的深度搜索共用）；两段是否重叠（`ranges_overlap`，首尾相接不算）；写入段收尾（`merge_writes`：按偏移排、去掉内容没变的、首尾相接的合并成一段）；输出文件名的后缀与「先写临时文件、落盘后再改名换上去」（`with_suffix` / `temp_path` / `write_then_replace`）；NTFS 时间起点（`NT_UNIX_EPOCH_SECONDS`）；物理磁盘路径规则；输出不在源盘上的判断；程序内更新用到的系统调用：WinHTTP 发 GET（`http_get`）、CNG 核对 ECDSA P-256 签名（`verify_p256`）、等进程退出（`wait_for_process_exit`） |
 | `crates/part` | `yisi-part` | 分区表的解析、校验与自动识别；改写分区表（加分区、改类型，`plan_table_edit`，只生成要写的扇区，第 5.9 节）；CRC-32（GPT、PNG 与 gzip 共用，数据分批到达时用 `crc32_continue` 接着算）；按偏移取大端、小端整数（`bytes`，各 crate 共用；实现在 `yisi-io`，这里原样转出）；引导扇区与 MBR 的最底层规则（`boot_sector`：结尾 `55 AA`、跳转指令开头、每扇区字节数的合法值、FAT 介质描述符、MBR 分区表位置），`fs` 与 `repair` 判读同一份 |
 | `crates/fs` | `yisi-fs` | 文件系统识别；目录读取（含已删除的项）与文件提取（第 5.8 节）；找备份引导扇区、按备份打开卷（第 5.10 节）；空闲空间位图；引导扇区与超级块的检查和重建；分区在设备上的只读范围与分块缓存（`Region`：偏移以分区开头为 0，读越界报错，`Chunks` 把反复查询的元数据按 64 KiB 一段缓存起来） |
 | `crates/formats` | `yisi-formats` | 文件格式插件与注册表 |
@@ -829,7 +829,7 @@ FAT、exFAT 依据微软公开的规范实现；NTFS 没有官方规范，依据
 
 - **全部功能**：七个功能平铺成卡片，能用的在前，给已经知道要用什么的用户直达。卡片按窗口宽度自动排两到四列（每列至少 340px）。
 - **设置**（`SettingsPanel`）：整个程序的设置，选了就生效，存进 WebView 的 `localStorage`（`i18n/index.ts` 的 `saveLocale`，键 `yisi.locale`），下次打开还是这样；读不到或存的值不认识时按系统语言。目前只有界面语言，以后的全局设置都放这里，不再放顶栏。
-- **关于**：程序名与一段介绍、程序版本、恢复引擎是否可用（每次打开现查 `engine.capabilities`）；引擎版本与支持的操作折叠在「技术细节」里。版本旁的「检查新版本」（`useUpdateCheck`）只在点按时用 `fetch` 问一次 GitHub 的 `releases/latest`（界面安全策略的 `connect-src` 只多放行 `api.github.com`，20 秒超时），按数字段比较版本号；有新版本时宿主命令 `open_releases_page` 用默认浏览器打开发布页（网址写死在宿主里，界面不能让宿主打开任意网址）。不自动检查、不自动下载安装，其余时候程序不联网。
+- **关于**：程序名与一段介绍、程序版本、恢复引擎是否可用（每次打开现查 `engine.capabilities`）；引擎版本与支持的操作折叠在「技术细节」里。版本旁的「检查新版本」与有新版本时的「下载并更新」（`useUpdateCheck`，宿主命令 `update_check`、`update_install`，做法见第 7 章「程序内更新」）；「打开下载页」（`open_releases_page`，网址写死在宿主里）留作更新失败或没有签名时的退路。界面自己不联网，安全策略的 `connect-src` 只有 IPC。
 
 功能卡片写明功能做什么、适合的情况与局限（做不到的事、使用前提、用不上的情形，标签是「局限」而不是「不适合」，免得前提条件被读成「不适合」的情形）。还没做的功能、引擎不支持的功能（`navigation.ts` 的 `FEATURE_METHODS` 记着每个功能要用的方法，按 `engine.capabilities` 判断）与引擎起不来时的全部功能，卡片变淡、虚线边框，带「开发中」「不支持」「不能用」文字标签与原因，不只靠颜色区分；能力在第一次用到时查一次、全程序共用（`useEngineCapabilities`，关于页打开时刷新），还没查到时当作支持。引擎打不开物理磁盘的平台（能力里没有 `disk.list`）上，来源只能选镜像文件；仍然可以用 Tab 聚焦，标 `aria-disabled="true"`，读屏软件先读到原因，点击不进入。问题、功能与推荐顺序集中在 `navigation.ts`，文案在 `problems.*`、`features.*` 下（症状与注意事项是字符串数组，条数随语言可以不同）。
 
@@ -972,6 +972,12 @@ FAT、exFAT 依据微软公开的规范实现；NTFS 没有官方规范，依据
 - 丢失分区搜索用 `job_start_partition_search`（源与搜法 `mode`），转成 `repair.search`；`job.partitions` 转成 kind 为 partitions 的事件。
 - 做过的镜像（`image_history`）：任务开始后把镜像位置、当时选的源、引擎答复的来源标识与容量、来源描述、时间记进 `data` 里的 `image-history.json`（先写临时文件再改名；最多 30 条，最近用的在前，路径在 Windows 上不分大小写）。`image_history_list` 读记录、经 `image.describe` 给出各自现在的状态；`image_history_remove` 只删记录；`image_reveal` 在文件夹中显示镜像，只认列表里记着的路径（否则 `imageRecordNotFound`）；`image_history_relocate` 要求新位置的状态是 ok、来源标识与容量与记录一致才改（否则 `imageRelocateInvalid`、`imageRelocateMismatch`）。记不下来不影响做镜像，只是下次不能从列表里选。
 - 复制出的文件用 `copied_open`、`copied_reveal` 打开或在文件夹中显示：只接受任务 ID 加引擎报告的相对路径，每一级都是普通名字（不含 `:`），最后一级不以 `.part` 结尾，解析（含联接与符号链接）后必须仍在该任务的输出目录之内（与恢复出的文件同一个函数）。找回的文件来路不明，`.exe`、`.bat`、`.cmd`、`.ps1`、`.vbs`、`.js`、`.hta`、`.msi`、`.lnk`、`.url`、`.reg`、`.scr` 等可执行、脚本或会改系统设置的类型不交给系统打开（`executableBlocked`），只能在文件夹中显示。
+- 程序内更新（`update.rs`）：只在用户点「检查新版本」「下载并更新」时联网，不自动检查、不在后台下载。
+  - 发布：Release 里有压缩包 `yisi-disk-tools-v<版本>-windows-x64.zip`（GitHub 的资产名不能带中文）和签名清单 `.zip.sig`。清单是几行文本（格式行、版本、文件名、大小、SHA256），最后一行是 ECDSA P-256 / SHA-256 签名（r、s 各 32 字节的十六进制），签名覆盖它之前的全部字节。私钥只在发版的机器上，程序里内置公钥（`PUBLIC_KEY`）。
+  - 安装：问 `releases/latest` → 下载清单，签名对、文件名与版本与发布一致、版本比当前新才继续（防止把旧的已签名版本当新版本发来）→ 下载压缩包，大小与 SHA256 必须与清单一致，GitHub 给的摘要也要一致 → 解压，只收顶层文件夹 `yisi-磁盘工具-v<版本>-windows-x64` 下的六个已知文件（三个程序必须有；本地头与中央目录的名字必须相同；核对 CRC-32），别的名字、子目录、`..` 一律拒绝 → 写到 `data/update/v<版本>` → 程序文件逐个改名为 `.old`（运行中的程序也能改名）再换上新的，任何一步失败都改回去。有任务在运行时（`Engines::is_busy`）不更新。
+  - 重启：宿主启动新的程序文件，带上 `--after-update <旧进程 PID>` 后退出；新进程先等旧进程退出（最多 30 秒，两个进程不能同时占着 WebView2 的数据目录），再建窗口；每次启动都删掉 `.old` 与 `data/update`。`data` 里的记录不动。
+  - 下载只认 `https://github.com/yisi-code/Yisi-Disk/releases/download/` 下的地址；环境变量 `YISI_UPDATE_API` 设为 `http://127.0.0.1:<端口>/…` 时改问本机的假发布源（走查用），资产也只认同一个源，签名照样核对。
+  - 系统调用（WinHTTP、CNG、等进程）在 `yisi_io` 里，宿主保持 `forbid(unsafe_code)`。
 
 ---
 

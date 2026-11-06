@@ -4867,8 +4867,10 @@ name = "yisi-app"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "miniz_oxide 0.8.9",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -4878,6 +4880,7 @@ dependencies = [
  "yisi-broker",
  "yisi-engine",
  "yisi-io",
+ "yisi-part",
  "yisi-rpc",
 ]
 

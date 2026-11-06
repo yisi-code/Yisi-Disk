@@ -9,6 +9,7 @@ mod engines;
 mod image_history;
 mod record_file;
 mod shell;
+mod update;
 mod write_plans;
 
 use std::sync::Arc;
@@ -53,6 +54,27 @@ fn app_info(app: AppHandle) -> AppInfo {
 
 /// 本项目的发布页。网址写死在这里，界面只能请求打开它，不能让宿主打开任意网址。
 const RELEASES_PAGE: &str = "https://github.com/yisi-code/Yisi-Disk/releases/latest";
+
+/// 检查新版本：问 GitHub 最新发布的版本号（只在用户点按时调用）。
+#[tauri::command(async)]
+fn update_check(app: AppHandle) -> Result<update::UpdateInfo, HostError> {
+    update::check(&app.package_info().version.to_string())
+}
+
+/// 下载并换上新版本（签名、版本、大小与 SHA256 都核对过才换），然后重启。有任务在运行时不更新。
+#[tauri::command(async)]
+fn update_install(app: AppHandle, engines: State<'_, Engines>) -> Result<String, HostError> {
+    let version = update::install(&app.package_info().version.to_string(), engines.is_busy())?;
+    // 先把结果答复给界面，再重启
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        if let Err(error) = update::restart(&handle) {
+            tracing::error!(?error, "更新后重启失败");
+        }
+    });
+    Ok(version)
+}
 
 /// 用默认浏览器打开发布页（「关于」里检查到新版本后去下载）。
 #[tauri::command]
@@ -691,6 +713,10 @@ fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
+    // 更新后由旧进程启动：先等旧进程退出（两个进程不能同时占着界面的数据目录），再删换下来的旧文件
+    let args: Vec<String> = std::env::args().collect();
+    update::after_update(&args);
+    update::clean_up();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Engines::default())
@@ -747,6 +773,8 @@ fn main() -> anyhow::Result<()> {
         .invoke_handler(tauri::generate_handler![
             app_info,
             open_releases_page,
+            update_check,
+            update_install,
             engine_capabilities,
             disk_list,
             carve_file_types,

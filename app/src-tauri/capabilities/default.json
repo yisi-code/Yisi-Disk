@@ -6,6 +6,8 @@
   "permissions": [
     "allow-app-info",
     "allow-open-releases-page",
+    "allow-update-check",
+    "allow-update-install",
     "allow-engine-capabilities",
     "allow-disk-list",
     "allow-carve-file-types",

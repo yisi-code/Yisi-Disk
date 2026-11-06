@@ -637,6 +637,22 @@ export function openReleasesPage(): Promise<void> {
   return invoke<void>('open_releases_page')
 }
 
+export interface UpdateInfo {
+  current: string
+  latest: string
+  available: boolean
+}
+
+/** 问 GitHub 最新发布的版本号（宿主联网，只在用户点按时调用） */
+export function checkUpdate(): Promise<UpdateInfo> {
+  return invoke<UpdateInfo>('update_check')
+}
+
+/** 下载、核对签名与摘要、换上新版本，返回装上的版本号；之后宿主自己重启程序 */
+export function installUpdate(): Promise<string> {
+  return invoke<string>('update_install')
+}
+
 export function getEngineCapabilities(): Promise<EngineCapabilities> {
   return invoke<EngineCapabilities>('engine_capabilities')
 }

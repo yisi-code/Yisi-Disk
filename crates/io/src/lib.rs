@@ -12,6 +12,7 @@ mod disk_path;
 mod error;
 mod ewf;
 mod file;
+mod http;
 mod image;
 mod imaging;
 #[cfg(windows)]
@@ -19,6 +20,7 @@ mod ioctl;
 mod local_time;
 mod metered;
 mod plan;
+mod process;
 mod range;
 mod raw;
 mod read;
@@ -26,6 +28,7 @@ mod read;
 pub mod samples;
 mod scan;
 #[cfg(windows)]
+mod signature;
 mod sparse;
 #[cfg(windows)]
 mod volume;
@@ -46,6 +49,7 @@ pub use disk_path::{
 pub use error::IoError;
 pub use ewf::EwfImage;
 pub use file::{temp_path, with_suffix, write_then_replace};
+pub use http::{HttpError, http_get};
 pub use image::{ImageFormat, OpenedImage, image_format, open_image};
 pub use imaging::{
     BadMap, ImageStore, ImagingControl, ImagingOptions, ImagingOutcome, MapError, MapHeader,
@@ -60,10 +64,12 @@ pub use plan::{
     DeviceIdentity, MAX_PLAN_BYTES, MAX_WRITES, Overlay, PlanError, SectorWrite, WritePlan,
     image_identity, merge_writes,
 };
+pub use process::wait_for_process_exit;
 pub use range::ranges_overlap;
 pub use raw::RawImage;
 pub use scan::{SCAN_BLOCK, ScanControl, scan_device};
 #[cfg(windows)]
+pub use signature::verify_p256;
 pub use sparse::{is_sparse, make_sparse};
 #[cfg(windows)]
 pub use volume::{
