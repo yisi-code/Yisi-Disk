@@ -632,15 +632,17 @@ export function getAppInfo(): Promise<AppInfo> {
   return invoke<AppInfo>('app_info')
 }
 
-/** 用默认浏览器打开本项目的发布页（网址由宿主决定） */
-export function openReleasesPage(): Promise<void> {
-  return invoke<void>('open_releases_page')
+/** 用默认浏览器打开本项目的发布页（网址由宿主决定）：source 为 gitee 时打开 Gitee 镜像的，其余打开 GitHub 的 */
+export function openReleasesPage(source?: string): Promise<void> {
+  return invoke<void>('open_releases_page', { source })
 }
 
 export interface UpdateInfo {
   current: string
   latest: string
   available: boolean
+  /** 有最新版本、答复最快的发布源（github、gitee），下载时先从它下 */
+  source: string
 }
 
 /** 问 GitHub 最新发布的版本号（宿主联网，只在用户点按时调用） */
@@ -651,6 +653,25 @@ export function checkUpdate(): Promise<UpdateInfo> {
 /** 下载、核对签名与摘要、换上新版本，返回装上的版本号；之后宿主自己重启程序 */
 export function installUpdate(): Promise<string> {
   return invoke<string>('update_install')
+}
+
+/**
+ * 更新的进度：phase 为 download（下载，done / total 是字节数）或 install（安装：step 依次为 verify 核对签名与摘要、
+ * extract 解压、replace 换上，done / total 是这一步的件数）
+ */
+export interface UpdateProgress {
+  phase: 'download' | 'install'
+  step: string
+  done: number
+  total: number
+  /** 从哪个发布源下载（github、gitee）；太慢或出错时宿主会换下一个源，这里跟着变 */
+  source: string
+}
+
+const UPDATE_PROGRESS_EVENT = 'update-progress'
+
+export function onUpdateProgress(handler: (progress: UpdateProgress) => void): Promise<UnlistenFn> {
+  return listen<UpdateProgress>(UPDATE_PROGRESS_EVENT, (event) => handler(event.payload))
 }
 
 export function getEngineCapabilities(): Promise<EngineCapabilities> {

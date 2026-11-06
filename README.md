@@ -20,7 +20,7 @@
 
 ## 下载与运行
 
-1. 打开 [最新版本](https://github.com/yisi-code/Yisi-Disk/releases/latest)，下载 `yisi-disk-tools-v<版本>-windows-x64.zip`（GitHub 的下载文件名不能带中文，所以压缩包用英文名）。
+1. 打开 [最新版本](https://github.com/yisi-code/Yisi-Disk/releases/latest)（GitHub 慢时可以用 Gitee 上的镜像：[gitee.com/yisi-code/yisi-disk](https://gitee.com/yisi-code/yisi-disk/releases)，内容相同），下载 `yisi-disk-tools-v<版本>-windows-x64.zip`（下载文件名不能带中文，所以压缩包用英文名）。
 2. 解压到任意位置（不要放在要恢复数据的那块盘上），得到 `yisi-磁盘工具-v<版本>-windows-x64` 文件夹，双击里面的 `yisi-磁盘工具.exe` 运行。
 3. 文件夹里的 `yisi-engine.exe`、`yisi-broker.exe` 由主程序按需启动，三个程序要放在一起。
 4. 以后有新版本时，在「关于」里点「检查新版本」→「下载并更新」：程序核对新版本的签名、大小与摘要后换上并重启，`data` 里的记录不动；有任务在运行时不能更新。也可以照第 1 步手动下载、解压替换。v0.2.0 及更早的版本没有这个功能，要手动换到 v0.3.0 一次。

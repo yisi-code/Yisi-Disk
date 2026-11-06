@@ -1,6 +1,9 @@
 //! 程序内更新：只在用户点「检查新版本」「下载并更新」时联网，不自动检查、不在后台下载。
 //!
-//! 流程：问 GitHub 最新发布 → 下载签名清单（`.sig`），用内置公钥核对签名、清单里的版本必须比当前新 →
+//! 发布源有两个：GitHub 与它在 Gitee 上的镜像（有些地区连 GitHub 很慢）。两边同时问，取最新的版本，同一版本按
+//! 答复快慢排先后；下载太慢（估计还要一分钟以上）或出错时换下一个源。两边下来的东西都过同一套签名核对。
+//!
+//! 流程：问最新发布 → 下载签名清单（`.sig`），用内置公钥核对签名、清单里的版本必须比当前新 →
 //! 下载压缩包，大小与 SHA256 必须与清单一致（GitHub 给出的摘要也要一致）→ 解到程序文件夹的 `data/update`，
 //! 只收程序包里那几个已知的文件 → 把旧的程序文件改名为 `.old`、换上新的，任何一步失败都改回去 →
 //! 重启：新进程等旧进程退出后再建窗口，然后删掉 `.old` 与解压目录。
@@ -10,18 +13,28 @@
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::engines::{HostError, data_dir, program_dir};
 
-/// 查最新发布的地址。
+/// GitHub：查最新发布的地址；资产只认这个前缀下的下载地址（会再跳转到它的存储，WinHTTP 照常跟随，但不许从
+/// https 跳到 http）；发布页。
 const LATEST_RELEASE_API: &str = "https://api.github.com/repos/yisi-code/Yisi-Disk/releases/latest";
-/// 发布资产只认这个前缀下的下载地址（GitHub 会再跳转到它的存储，WinHTTP 照常跟随，但不许从 https 跳到 http）。
 const DOWNLOAD_PREFIX: &str = "https://github.com/yisi-code/Yisi-Disk/releases/download/";
-/// 本机走查用：设为 `http://127.0.0.1:<端口>/...` 时改问本机的假发布源，资产也只认同一个源。签名照样要核对，
-/// 所以它只能装上用私钥签过的包。
+const GITHUB_PAGE: &str = "https://github.com/yisi-code/Yisi-Disk/releases/latest";
+/// Gitee 镜像：同样的三项。
+const GITEE_LATEST_API: &str = "https://gitee.com/api/v5/repos/yisi-code/yisi-disk/releases/latest";
+const GITEE_DOWNLOAD_PREFIX: &str = "https://gitee.com/yisi-code/yisi-disk/releases/download/";
+const GITEE_PAGE: &str = "https://gitee.com/yisi-code/yisi-disk/releases";
+/// 下载满这么久之后，按当前速度估计剩下的还要超过 `SLOW_REMAINING` 就换下一个源；这么久一个字节都没收到也换。
+const SLOW_AFTER: Duration = Duration::from_secs(8);
+const SLOW_REMAINING: Duration = Duration::from_secs(60);
+const STALLED_AFTER: Duration = Duration::from_secs(15);
+/// 本机走查用：设为 `http://127.0.0.1:<端口>/...`（可以逗号分隔写几个）时改问本机的假发布源，资产也只认各自
+/// 同一个源。签名照样要核对，所以它只能装上用私钥签过的包。
 const LOCAL_API_ENV: &str = "YISI_UPDATE_API";
 const LOCAL_ORIGIN_PREFIX: &str = "http://127.0.0.1:";
 
@@ -60,12 +73,49 @@ pub const AFTER_UPDATE_ARG: &str = "--after-update";
 /// 同一时刻只做一次更新。
 static INSTALLING: AtomicBool = AtomicBool::new(false);
 
+/// 更新的进度：`phase` 为 `download`（下载新版本，`done` / `total` 是字节数）或 `install`（安装新版本：
+/// `step` 依次为 `verify` 核对签名与摘要、`extract` 解压、`replace` 换上，`done` / `total` 是这一步的件数）。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateProgress {
+    pub phase: &'static str,
+    pub step: &'static str,
+    pub done: u64,
+    pub total: u64,
+    /// 从哪个源下载的（`github`、`gitee`、本机走查时 `local`）。
+    pub source: &'static str,
+}
+
+impl UpdateProgress {
+    fn download(source: &'static str, done: u64, total: u64) -> Self {
+        Self {
+            phase: "download",
+            step: "archive",
+            done,
+            total,
+            source,
+        }
+    }
+
+    fn install(source: &'static str, step: &'static str, done: usize, total: usize) -> Self {
+        Self {
+            phase: "install",
+            step,
+            done: done as u64,
+            total: total as u64,
+            source,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateInfo {
     pub current: String,
     pub latest: String,
     pub available: bool,
+    /// 有最新版本、答复最快的源，下载时先从它下。
+    pub source: &'static str,
 }
 
 /// 比较两个版本号（`v0.2.0`、`0.10.1`，只比数字段；`-beta` 之类的后缀不参与）。
@@ -93,32 +143,150 @@ pub fn compare_versions(a: &str, b: &str) -> Ordering {
     Ordering::Equal
 }
 
-/// 发布源：GitHub，或本机走查用的假源（只许 127.0.0.1）。
+/// 发布源：GitHub、Gitee 镜像，或本机走查用的假源（只许 127.0.0.1，设了它就只用它）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Source {
+    name: &'static str,
     api: String,
     /// 资产下载地址必须以它开头。
     asset_prefix: String,
 }
 
 impl Source {
-    fn from_env() -> Self {
-        match std::env::var(LOCAL_API_ENV) {
-            Ok(api) if api.starts_with(LOCAL_ORIGIN_PREFIX) => {
+    fn github() -> Self {
+        Self {
+            name: "github",
+            api: LATEST_RELEASE_API.to_owned(),
+            asset_prefix: DOWNLOAD_PREFIX.to_owned(),
+        }
+    }
+
+    fn gitee() -> Self {
+        Self {
+            name: "gitee",
+            api: GITEE_LATEST_API.to_owned(),
+            asset_prefix: GITEE_DOWNLOAD_PREFIX.to_owned(),
+        }
+    }
+
+    fn all_from_env() -> Vec<Self> {
+        let local = std::env::var(LOCAL_API_ENV)
+            .map(|value| Self::local(&value))
+            .unwrap_or_default();
+        if local.is_empty() {
+            vec![Self::github(), Self::gitee()]
+        } else {
+            local
+        }
+    }
+
+    /// 本机走查用的假源：逗号分隔的几个 `http://127.0.0.1:<端口>/…`（最多三个，用来走查换源），别的地址不认。
+    fn local(value: &str) -> Vec<Self> {
+        const NAMES: [&str; 3] = ["local", "local-2", "local-3"];
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|api| api.starts_with(LOCAL_ORIGIN_PREFIX))
+            .zip(NAMES)
+            .map(|(api, name)| {
                 let origin_end = api[LOCAL_ORIGIN_PREFIX.len()..]
                     .find('/')
                     .map_or(api.len(), |at| LOCAL_ORIGIN_PREFIX.len() + at);
                 Self {
+                    name,
                     asset_prefix: format!("{}/", &api[..origin_end]),
-                    api,
+                    api: api.to_owned(),
                 }
-            }
-            _ => Self {
-                api: LATEST_RELEASE_API.to_owned(),
-                asset_prefix: DOWNLOAD_PREFIX.to_owned(),
-            },
+            })
+            .collect()
+    }
+}
+
+/// 发布页：`gitee` 时打开 Gitee 镜像的，其余打开 GitHub 的。网址都写死在这里。
+pub fn releases_page(source: Option<&str>) -> &'static str {
+    if source == Some("gitee") {
+        GITEE_PAGE
+    } else {
+        GITHUB_PAGE
+    }
+}
+
+/// 一个源的答复：发布内容（或错误）与用时。
+struct Answer {
+    source: Source,
+    release: Result<Release, HostError>,
+    elapsed: Duration,
+}
+
+/// 同时问各个源的最新发布。
+fn ask_all(sources: Vec<Source>) -> Vec<Answer> {
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = sources
+            .into_iter()
+            .map(|source| {
+                scope.spawn(move || {
+                    let started = Instant::now();
+                    let release = http_get(&source.api, MAX_API_BYTES, true, &mut |_| true)
+                        .and_then(|json| parse_release(&json, &source));
+                    Answer {
+                        source,
+                        release,
+                        elapsed: started.elapsed(),
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|handle| handle.join().ok())
+            .collect()
+    })
+}
+
+/// 取各源里最新的版本；有这个版本的源按答复快慢排先后。都失败时把各源的错误合在一起报。
+fn rank(answers: Vec<Answer>) -> Result<Vec<(Source, Release)>, HostError> {
+    let mut failures = Vec::new();
+    let mut ok: Vec<(Source, Release, Duration)> = Vec::new();
+    for answer in answers {
+        match answer.release {
+            Ok(release) => ok.push((answer.source, release, answer.elapsed)),
+            Err(error) => failures.push((answer.source.name, error)),
         }
     }
+    let Some(latest) = ok
+        .iter()
+        .map(|(_, release, _)| release.version.clone())
+        .max_by(|a, b| compare_versions(a, b))
+    else {
+        let detail = failures
+            .iter()
+            .map(|(name, error)| format!("{name}：{}", error.detail))
+            .collect::<Vec<_>>()
+            .join("；");
+        let code = failures
+            .first()
+            .map_or("updateNetwork", |(_, error)| error.code);
+        return Err(HostError::new(code, detail));
+    };
+    ok.retain(|(_, release, _)| compare_versions(&release.version, &latest) == Ordering::Equal);
+    ok.sort_by_key(|(_, _, elapsed)| *elapsed);
+    Ok(ok
+        .into_iter()
+        .map(|(source, release, _)| (source, release))
+        .collect())
+}
+
+/// 下载是不是太慢、该换源了：下了 `SLOW_AFTER` 之后按平均速度估计剩下的超过 `SLOW_REMAINING`，或者
+/// `STALLED_AFTER` 还一个字节都没收到。
+fn too_slow(elapsed: Duration, received: u64, total: u64) -> bool {
+    if received == 0 {
+        return elapsed >= STALLED_AFTER;
+    }
+    if elapsed < SLOW_AFTER || received >= total {
+        return false;
+    }
+    let remaining = (total - received) as f64 * elapsed.as_secs_f64() / received as f64;
+    remaining > SLOW_REMAINING.as_secs_f64()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -413,7 +581,11 @@ fn destination(file: &str, program_dir: &Path, main_exe: &Path) -> PathBuf {
 
 /// 把 `staged` 里的新文件换到各自的位置：原文件先改名为 `.old`（正在运行的程序也能改名），新文件再挪过去。
 /// 任何一步失败都把已经换过的改回去，返回错误；程序文件夹保持原样。
-fn replace(staged: &[(PathBuf, PathBuf)]) -> Result<(), HostError> {
+/// 每换好一个文件调用一次 `replaced`（参数是已换好的个数）。
+fn replace(
+    staged: &[(PathBuf, PathBuf)],
+    replaced: &mut dyn FnMut(usize),
+) -> Result<(), HostError> {
     // 已经做完的步骤：(目标, 原文件有没有被改名为 .old)
     let mut done: Vec<(&Path, bool)> = Vec::new();
     let result = staged.iter().try_for_each(|(new, target)| {
@@ -426,7 +598,9 @@ fn replace(staged: &[(PathBuf, PathBuf)]) -> Result<(), HostError> {
             std::fs::rename(target, &old)?;
         }
         done.push((target, had_old));
-        std::fs::rename(new, target)
+        std::fs::rename(new, target)?;
+        replaced(done.len());
+        Ok::<(), std::io::Error>(())
     });
     if let Err(error) = result {
         for (target, had_old) in done.into_iter().rev() {
@@ -454,31 +628,68 @@ pub fn clean_up() {
 }
 
 pub fn check(current: &str) -> Result<UpdateInfo, HostError> {
-    let source = Source::from_env();
-    let release = parse_release(&http_get(&source.api, MAX_API_BYTES, true)?, &source)?;
+    let ranked = rank(ask_all(Source::all_from_env()))?;
+    let (source, release) = ranked
+        .into_iter()
+        .next()
+        .ok_or_else(|| HostError::new("updateNoRelease", ""))?;
     Ok(UpdateInfo {
         current: current.to_owned(),
         available: compare_versions(&release.version, current) == Ordering::Greater,
         latest: release.version,
+        source: source.name,
     })
 }
 
 /// 下载、核对、换上新版本，返回装上的版本号；之后由调用方重启。`busy` 为真（有任务在运行）时不更新。
-pub fn install(current: &str, busy: bool) -> Result<String, HostError> {
+/// 进度经 `report` 报告：先是下载（按字节，约每 1% 一次），再是安装的三步。
+pub fn install(
+    current: &str,
+    busy: bool,
+    report: &dyn Fn(UpdateProgress),
+) -> Result<String, HostError> {
     if busy {
         return Err(HostError::new("updateBusy", ""));
     }
     if INSTALLING.swap(true, AtomicOrdering::SeqCst) {
         return Err(HostError::new("updateBusy", "正在更新"));
     }
-    let result = install_inner(current);
+    let result = install_inner(current, report);
     INSTALLING.store(false, AtomicOrdering::SeqCst);
     result
 }
 
-fn install_inner(current: &str) -> Result<String, HostError> {
-    let source = Source::from_env();
-    let release = parse_release(&http_get(&source.api, MAX_API_BYTES, true)?, &source)?;
+fn install_inner(current: &str, report: &dyn Fn(UpdateProgress)) -> Result<String, HostError> {
+    let ranked = rank(ask_all(Source::all_from_env()))?;
+    let mut first_error = None;
+    for (index, (source, release)) in ranked.iter().enumerate() {
+        let can_switch = index + 1 < ranked.len();
+        match download(source, release, current, can_switch, report) {
+            Ok((manifest, archive)) => return install_files(source, &manifest, &archive, report),
+            Err(error) => {
+                tracing::warn!(source = source.name, ?error, "从这个源更新没成，换下一个");
+                // 「太慢换源」不如后面那个源的具体错误有用
+                if first_error
+                    .as_ref()
+                    .is_none_or(|known: &HostError| known.code == "updateSlow")
+                {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+    Err(first_error.unwrap_or_else(|| HostError::new("updateNoRelease", "")))
+}
+
+/// 从一个源下载签名清单与压缩包，核对清单签名与压缩包的大小、摘要。`can_switch` 为真（还有别的源）时，
+/// 下得太慢就中止，返回 `updateSlow`。
+fn download(
+    source: &Source,
+    release: &Release,
+    current: &str,
+    can_switch: bool,
+    report: &dyn Fn(UpdateProgress),
+) -> Result<(Manifest, Vec<u8>), HostError> {
     let signature = release
         .signature
         .as_ref()
@@ -487,11 +698,48 @@ fn install_inner(current: &str) -> Result<String, HostError> {
         .archive
         .as_ref()
         .ok_or_else(|| HostError::new("updateNoRelease", release.archive_name.clone()))?;
-    let manifest = parse_manifest(&http_get(&signature.url, MAX_SIGNATURE_BYTES, false)?)?;
-    check_manifest(&manifest, &release, current)?;
-    let archive = http_get(&archive_asset.url, manifest.size as usize, false)?;
+    let manifest = parse_manifest(&http_get(
+        &signature.url,
+        MAX_SIGNATURE_BYTES,
+        false,
+        &mut |_| true,
+    )?)?;
+    check_manifest(&manifest, release, current)?;
+
+    // ① 下载：总量取签名清单里记的大小；约每 1% 报一次；太慢且有别的源时中止
+    let total = manifest.size;
+    report(UpdateProgress::download(source.name, 0, total));
+    let started = Instant::now();
+    let mut reported = 0u64;
+    let mut slow = false;
+    let archive = http_get(&archive_asset.url, total as usize, false, &mut |received| {
+        let received = received as u64;
+        if received >= total || received.saturating_sub(reported) * 100 >= total {
+            reported = received;
+            report(UpdateProgress::download(source.name, received, total));
+        }
+        slow = can_switch && too_slow(started.elapsed(), received, total);
+        !slow
+    });
+    let archive = match archive {
+        Err(_) if slow => return Err(HostError::new("updateSlow", source.name)),
+        other => other?,
+    };
     check_archive(&archive, &manifest, archive_asset)?;
-    let files = extract(&archive, &manifest.version)?;
+    Ok((manifest, archive))
+}
+
+/// ② 安装：核对（签名在下载时已核对，这里核对程序包的内容）→ 解压 → 换上。
+fn install_files(
+    source: &Source,
+    manifest: &Manifest,
+    archive: &[u8],
+    report: &dyn Fn(UpdateProgress),
+) -> Result<String, HostError> {
+    let name = source.name;
+    report(UpdateProgress::install(name, "verify", 0, 1));
+    let files = extract(archive, &manifest.version)?;
+    report(UpdateProgress::install(name, "verify", 1, 1));
 
     let program =
         program_dir().map_err(|error| HostError::new("updateReplace", error.to_string()))?;
@@ -500,6 +748,8 @@ fn install_inner(current: &str) -> Result<String, HostError> {
     let staging = data_dir()
         .map(|data| data.join("update").join(format!("v{}", manifest.version)))
         .map_err(|error| HostError::new("updateReplace", error.to_string()))?;
+    let count = files.len();
+    report(UpdateProgress::install(name, "extract", 0, count));
     let write_staged = || -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
         if staging.exists() {
             std::fs::remove_dir_all(&staging)?;
@@ -507,17 +757,22 @@ fn install_inner(current: &str) -> Result<String, HostError> {
         std::fs::create_dir_all(&staging)?;
         files
             .iter()
-            .map(|(file, content)| {
+            .enumerate()
+            .map(|(index, (file, content))| {
                 let staged = staging.join(file);
                 std::fs::write(&staged, content)?;
+                report(UpdateProgress::install(name, "extract", index + 1, count));
                 Ok((staged, destination(file, &program, &main_exe)))
             })
             .collect()
     };
     let staged =
         write_staged().map_err(|error| HostError::new("updateReplace", error.to_string()))?;
-    replace(&staged)?;
-    Ok(manifest.version)
+    report(UpdateProgress::install(name, "replace", 0, count));
+    replace(&staged, &mut |done| {
+        report(UpdateProgress::install(name, "replace", done, count));
+    })?;
+    Ok(manifest.version.clone())
 }
 
 /// 启动更新后的程序并退出当前进程。新进程带上当前 PID，等当前进程退出后才建窗口。
@@ -570,8 +825,13 @@ fn verify_signature(
     }
 }
 
-/// GET 一个地址（WinHTTP），`api` 为真时带上 GitHub API 要的 Accept 头。
-fn http_get(url: &str, limit: usize, api: bool) -> Result<Vec<u8>, HostError> {
+/// GET 一个地址（WinHTTP），`api` 为真时带上 GitHub API 要的 Accept 头；`received` 见 `yisi_io::http_get`。
+fn http_get(
+    url: &str,
+    limit: usize,
+    api: bool,
+    received: &mut dyn FnMut(usize) -> bool,
+) -> Result<Vec<u8>, HostError> {
     #[cfg(windows)]
     {
         use yisi_io::HttpError;
@@ -581,7 +841,7 @@ fn http_get(url: &str, limit: usize, api: bool) -> Result<Vec<u8>, HostError> {
             &[]
         };
         let agent = format!("yisi-disk-tools/{}", env!("CARGO_PKG_VERSION"));
-        yisi_io::http_get(url, limit, headers, &agent).map_err(|error| match error {
+        yisi_io::http_get(url, limit, headers, &agent, received).map_err(|error| match error {
             HttpError::Status(status) => HostError::new("updateHttp", format!("{status} {url}")),
             HttpError::TooLarge(_) => HostError::new("updateMismatch", format!("{error} {url}")),
             other => HostError::new("updateNetwork", other.to_string()),
@@ -589,7 +849,7 @@ fn http_get(url: &str, limit: usize, api: bool) -> Result<Vec<u8>, HostError> {
     }
     #[cfg(not(windows))]
     {
-        let _ = (url, limit, api);
+        let _ = (url, limit, api, received);
         Err(HostError::new("unsupportedPlatform", ""))
     }
 }

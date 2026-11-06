@@ -9,10 +9,7 @@ fn signed_manifest() -> String {
 }
 
 fn github() -> Source {
-    Source {
-        api: LATEST_RELEASE_API.to_owned(),
-        asset_prefix: DOWNLOAD_PREFIX.to_owned(),
-    }
+    Source::github()
 }
 
 fn release_json(tag: &str, with_signature: bool) -> Vec<u8> {
@@ -31,6 +28,104 @@ fn release_json(tag: &str, with_signature: bool) -> Vec<u8> {
         }));
     }
     serde_json::to_vec(&serde_json::json!({ "tag_name": tag, "assets": assets })).unwrap()
+}
+
+fn answer(source: Source, tag: Option<&str>, millis: u64) -> Answer {
+    Answer {
+        release: match tag {
+            Some(tag) => parse_release(&release_json(tag, true), &github()),
+            None => Err(HostError::new("updateNetwork", "连不上")),
+        },
+        source,
+        elapsed: Duration::from_millis(millis),
+    }
+}
+
+#[test]
+fn the_newest_version_wins_and_sources_are_ordered_by_speed() {
+    // 两边版本相同：快的在前
+    let ranked = rank(vec![
+        answer(Source::github(), Some("v9.9.9"), 900),
+        answer(Source::gitee(), Some("v9.9.9"), 120),
+    ])
+    .unwrap();
+    let names: Vec<&str> = ranked.iter().map(|(source, _)| source.name).collect();
+    assert_eq!(names, ["gitee", "github"]);
+
+    // 镜像还没同步到最新版：只用有最新版的源，哪怕它慢
+    let ranked = rank(vec![
+        answer(Source::github(), Some("v9.9.10"), 900),
+        answer(Source::gitee(), Some("v9.9.9"), 120),
+    ])
+    .unwrap();
+    assert_eq!(ranked.len(), 1);
+    assert_eq!(ranked[0].0.name, "github");
+    assert_eq!(ranked[0].1.version, "9.9.10");
+
+    // 一个源连不上不影响另一个
+    let ranked = rank(vec![
+        answer(Source::github(), None, 15_000),
+        answer(Source::gitee(), Some("v9.9.9"), 300),
+    ])
+    .unwrap();
+    assert_eq!(ranked[0].0.name, "gitee");
+
+    // 都连不上：两边的原因都报出来
+    let error = rank(vec![
+        answer(Source::github(), None, 15_000),
+        answer(Source::gitee(), None, 15_000),
+    ])
+    .unwrap_err();
+    assert_eq!(error.code, "updateNetwork");
+    assert!(error.detail.contains("github") && error.detail.contains("gitee"));
+}
+
+#[test]
+fn local_sources_for_walkthroughs_accept_only_this_computer() {
+    let sources = Source::local("http://127.0.0.1:8766/latest, http://127.0.0.1:8767/latest");
+    let names: Vec<&str> = sources.iter().map(|source| source.name).collect();
+    assert_eq!(names, ["local", "local-2"]);
+    assert_eq!(sources[1].asset_prefix, "http://127.0.0.1:8767/");
+    assert!(Source::local("https://evil.example/latest").is_empty());
+    // 只是前缀相像的地址也不认
+    assert!(Source::local("http://127.0.0.10:80/latest").is_empty());
+}
+
+#[test]
+fn a_download_is_too_slow_when_the_rest_would_take_over_a_minute() {
+    let mib = 1 << 20;
+    // 刚开始不判
+    assert!(!too_slow(Duration::from_secs(3), 10_000, 6 * mib));
+    // 8 秒下了 1 MiB，剩 5 MiB 还要 40 秒：不换
+    assert!(!too_slow(Duration::from_secs(8), mib, 6 * mib));
+    // 8 秒只下了 512 KiB，剩下的要 88 秒：换
+    assert!(too_slow(Duration::from_secs(8), mib / 2, 6 * mib));
+    // 15 秒一个字节都没收到：换
+    assert!(!too_slow(Duration::from_secs(10), 0, 6 * mib));
+    assert!(too_slow(Duration::from_secs(15), 0, 6 * mib));
+    // 已经下完：不换
+    assert!(!too_slow(Duration::from_secs(120), 6 * mib, 6 * mib));
+}
+
+#[test]
+fn gitee_assets_and_pages_are_accepted_only_under_the_mirror() {
+    let name = archive_name("9.9.9");
+    let json = serde_json::to_vec(&serde_json::json!({
+        "tag_name": "v9.9.9",
+        "assets": [
+            { "name": name, "browser_download_url": format!("{GITEE_DOWNLOAD_PREFIX}v9.9.9/{name}") },
+            { "name": format!("{name}.sig"), "browser_download_url": format!("https://example.com/{name}.sig") },
+        ],
+    }))
+    .unwrap();
+    let release = parse_release(&json, &Source::gitee()).unwrap();
+    assert!(release.archive.is_some());
+    // 签名清单不在镜像的地址下：不认
+    assert!(release.signature.is_none());
+    assert_eq!(releases_page(Some("gitee")), GITEE_PAGE);
+    assert_eq!(releases_page(Some("github")), GITHUB_PAGE);
+    assert_eq!(releases_page(Some("别的")), GITHUB_PAGE);
+    assert_eq!(releases_page(None), GITHUB_PAGE);
 }
 
 #[test]
@@ -55,6 +150,7 @@ fn release_assets_are_found_only_under_the_allowed_prefix() {
 
     // 本机假源下，GitHub 的地址不认
     let local = Source {
+        name: "local",
         api: "http://127.0.0.1:8123/latest".into(),
         asset_prefix: "http://127.0.0.1:8123/".into(),
     };
@@ -269,11 +365,16 @@ fn files_are_swapped_and_old_ones_kept_aside() {
     std::fs::write(dir.join("app.exe"), b"old app").unwrap();
     std::fs::write(staging.join("app.exe"), b"new app").unwrap();
     std::fs::write(staging.join("LICENSE.md"), b"new license").unwrap();
-    replace(&[
-        (staging.join("app.exe"), dir.join("app.exe")),
-        (staging.join("LICENSE.md"), dir.join("LICENSE.md")),
-    ])
+    let mut reported = Vec::new();
+    replace(
+        &[
+            (staging.join("app.exe"), dir.join("app.exe")),
+            (staging.join("LICENSE.md"), dir.join("LICENSE.md")),
+        ],
+        &mut |done| reported.push(done),
+    )
     .unwrap();
+    assert_eq!(reported, [1, 2]);
     assert_eq!(std::fs::read(dir.join("app.exe")).unwrap(), b"new app");
     assert_eq!(std::fs::read(dir.join("app.exe.old")).unwrap(), b"old app");
     assert_eq!(
@@ -293,11 +394,16 @@ fn a_failed_swap_puts_everything_back() {
     std::fs::write(dir.join("engine.exe"), b"old engine").unwrap();
     std::fs::write(staging.join("app.exe"), b"new app").unwrap();
     // 第二个新文件不存在：换到这一步失败
-    let error = replace(&[
-        (staging.join("app.exe"), dir.join("app.exe")),
-        (staging.join("engine.exe"), dir.join("engine.exe")),
-    ])
+    let mut reported = Vec::new();
+    let error = replace(
+        &[
+            (staging.join("app.exe"), dir.join("app.exe")),
+            (staging.join("engine.exe"), dir.join("engine.exe")),
+        ],
+        &mut |done| reported.push(done),
+    )
     .unwrap_err();
+    assert_eq!(reported, [1]);
     assert_eq!(error.code, "updateReplace");
     assert_eq!(std::fs::read(dir.join("app.exe")).unwrap(), b"old app");
     assert_eq!(

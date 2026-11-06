@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 use tauri::webview::PageLoadEvent;
-use tauri::{AppHandle, Manager, State, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindowBuilder};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use yisi_engine::protocol::PartitionInfo;
 use yisi_engine::protocol::{BootCopy, BootDiagnosis, BootFix, ImageDescription, ImageInspection};
@@ -52,8 +52,8 @@ fn app_info(app: AppHandle) -> AppInfo {
     }
 }
 
-/// 本项目的发布页。网址写死在这里，界面只能请求打开它，不能让宿主打开任意网址。
-const RELEASES_PAGE: &str = "https://github.com/yisi-code/Yisi-Disk/releases/latest";
+/// 更新进度事件的名字，载荷是 `update::UpdateProgress`。
+const UPDATE_PROGRESS_EVENT: &str = "update-progress";
 
 /// 检查新版本：问 GitHub 最新发布的版本号（只在用户点按时调用）。
 #[tauri::command(async)]
@@ -64,7 +64,17 @@ fn update_check(app: AppHandle) -> Result<update::UpdateInfo, HostError> {
 /// 下载并换上新版本（签名、版本、大小与 SHA256 都核对过才换），然后重启。有任务在运行时不更新。
 #[tauri::command(async)]
 fn update_install(app: AppHandle, engines: State<'_, Engines>) -> Result<String, HostError> {
-    let version = update::install(&app.package_info().version.to_string(), engines.is_busy())?;
+    // 进度按 update-progress 事件发给界面：先下载、后安装，各自报各自的
+    let report = |progress: update::UpdateProgress| {
+        if let Err(error) = app.emit(UPDATE_PROGRESS_EVENT, progress) {
+            tracing::warn!(%error, "发不出更新进度");
+        }
+    };
+    let version = update::install(
+        &app.package_info().version.to_string(),
+        engines.is_busy(),
+        &report,
+    )?;
     // 先把结果答复给界面，再重启
     let handle = app.clone();
     std::thread::spawn(move || {
@@ -76,10 +86,11 @@ fn update_install(app: AppHandle, engines: State<'_, Engines>) -> Result<String,
     Ok(version)
 }
 
-/// 用默认浏览器打开发布页（「关于」里检查到新版本后去下载）。
+/// 用默认浏览器打开发布页（「关于」里检查到新版本后去下载）：`source` 为 `gitee` 时打开 Gitee 镜像的，
+/// 其余打开 GitHub 的；网址都写死在宿主里。
 #[tauri::command]
-fn open_releases_page() -> Result<(), HostError> {
-    tauri_plugin_opener::open_url(RELEASES_PAGE, None::<&str>)
+fn open_releases_page(source: Option<String>) -> Result<(), HostError> {
+    tauri_plugin_opener::open_url(update::releases_page(source.as_deref()), None::<&str>)
         .map_err(|error| HostError::new("openFailed", error.to_string()))
 }
 

@@ -16,6 +16,8 @@ pub enum HttpError {
     Status(u32),
     #[error("内容超过 {0} 字节")]
     TooLarge(usize),
+    #[error("调用方中止了下载")]
+    Stopped,
     #[error("这个平台不支持")]
     Unsupported,
 }
@@ -42,13 +44,15 @@ fn split_url(url: &str) -> Result<(bool, &str, u16, &str), HttpError> {
 }
 
 /// GET `url`，返回不超过 `limit` 字节的响应体；状态码不是 200 时报 [`HttpError::Status`]。`headers` 每项一行
-/// （不带换行），`user_agent` 是客户端名。
+/// （不带换行），`user_agent` 是客户端名；每收到一段数据调用一次 `received`，参数是到目前为止收到的字节数，
+/// 它返回 `false` 时中止下载（[`HttpError::Stopped`]），例如调用方嫌太慢、要换一个地址。
 #[cfg(windows)]
 pub fn http_get(
     url: &str,
     limit: usize,
     headers: &[&str],
     user_agent: &str,
+    received: &mut dyn FnMut(usize) -> bool,
 ) -> Result<Vec<u8>, HttpError> {
     use windows_sys::Win32::Networking::WinHttp::{
         WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_ADDREQ_FLAG_ADD, WINHTTP_FLAG_SECURE,
@@ -174,6 +178,9 @@ pub fn http_get(
         if body.len() > limit {
             return Err(HttpError::TooLarge(limit));
         }
+        if !received(body.len()) {
+            return Err(HttpError::Stopped);
+        }
     }
 }
 
@@ -183,6 +190,7 @@ pub fn http_get(
     _limit: usize,
     _headers: &[&str],
     _user_agent: &str,
+    _received: &mut dyn FnMut(usize) -> bool,
 ) -> Result<Vec<u8>, HttpError> {
     split_url(url)?;
     Err(HttpError::Unsupported)
