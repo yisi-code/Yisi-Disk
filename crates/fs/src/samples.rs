@@ -1,4 +1,4 @@
-//! 测试样本：按微软规范拼出的 FAT12/16/32 与 exFAT 镜像（NTFS 的在 `ntfs` 子模块），可以建目录、写文件（连续或碎片）、删除、
+//! 测试样本：按微软规范拼出的 FAT12/16/32 与 exFAT 镜像（NTFS 的在 `ntfs` 子模块，ext2/3/4 的在 `ext` 子模块），可以建目录、写文件（连续或碎片）、删除、
 //! 在删除的文件原来的位置写新文件。只在测试里使用，越界时直接 panic。
 #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::expect_used)]
 
@@ -11,6 +11,8 @@ use crate::boot_write::{ExfatBoot, FatBoot, exfat_boot_region, fat_boot, fat32_f
 use crate::fat::short_checksum;
 use crate::format::{FatWidth, exfat_set_checksum, fat_entry_span, put_fat_entry};
 
+mod ext;
+pub use ext::{EXT_ROOT, EXT_SAMPLE_NANOS, EXT_SAMPLE_SECONDS, ExtFlavor, ExtImage};
 mod ntfs;
 pub use ntfs::{
     BITMAP_LCN as NTFS_BITMAP_LCN, COMPRESSION_UNIT_CLUSTERS, CompressedUnit, NtfsImage,
@@ -254,13 +256,17 @@ impl FatImage {
         placed
     }
 
-    /// 像系统删除那样：目录项首字节改成 0xE5（长文件名各段也是），簇链清零。
+    /// 像系统删除那样：目录项首字节改成 0xE5（长文件名各段也是），簇链清零（目录连同装满后加上的簇）。
     pub fn delete(&mut self, placed: &Placed) {
         for index in placed.first_entry..placed.first_entry + placed.entry_count {
             let at = self.entry_offset(placed.dir, index);
             self.image[at] = 0xE5;
         }
-        for &cluster in &placed.clusters {
+        let clusters = match placed.created_dir.map(|dir| &self.dirs[dir.0].location) {
+            Some(DirLocation::Clusters(clusters)) => clusters.clone(),
+            _ => placed.clusters.clone(),
+        };
+        for cluster in clusters {
             self.fat[cluster as usize] = 0;
         }
     }
@@ -624,6 +630,13 @@ impl ExfatImage {
             let bit = cluster as usize - 2;
             self.bitmap[bit / 8] &= !(1 << (bit % 8));
         }
+    }
+
+    /// 改写一组目录项里第 `entry` 项（0 是文件项）的字节，不重算校验和：模拟目录项被改坏或被别的内容盖掉。
+    pub fn patch_entry(&mut self, placed: &Placed, entry: usize, offset: usize, bytes: &[u8]) {
+        assert!(entry < placed.entry_count);
+        let at = self.entry_offset(placed.dir, placed.first_entry + entry);
+        self.image[at + offset..at + offset + bytes.len()].copy_from_slice(bytes);
     }
 
     pub fn finish(mut self) -> Vec<u8> {

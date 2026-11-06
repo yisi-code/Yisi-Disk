@@ -88,6 +88,13 @@ const extent = computed(() => {
             <dt>{{ t('carve.preview.end') }}</dt>
             <dd>{{ extent.end }}</dd>
           </template>
+          <template v-if="file.incomplete">
+            <dt>{{ t('carve.preview.state') }}</dt>
+            <dd>
+              {{ t('carve.preview.incomplete', { reason: t(`carve.incomplete.${file.incomplete}`) }) }}
+              <span class="recovered-preview__note">{{ t('carve.preview.incompleteHint') }}</span>
+            </dd>
+          </template>
         </dl>
 
         <div class="detail-card__actions">
@@ -144,5 +151,11 @@ const extent = computed(() => {
 
 .recovered-preview__selectable {
   user-select: text;
+}
+
+.recovered-preview__note {
+  display: block;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-small);
 }
 </style>

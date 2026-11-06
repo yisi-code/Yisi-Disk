@@ -18,6 +18,7 @@ const RAR4_MAGIC: &[u8] = b"Rar!\x1A\x07\x00";
 /// RAR 5 的头最长 2 MiB，头长度字段最多 3 字节。
 const RAR5_MAX_HEADER: u64 = 2 << 20;
 const RAR5_ENCRYPTION: u64 = 4;
+const RAR5_FILE: u64 = 2;
 const RAR5_END: u64 = 5;
 const RAR5_HAS_EXTRA: u64 = 0x0001;
 const RAR5_HAS_DATA: u64 = 0x0002;
@@ -72,7 +73,10 @@ impl FileFormat for Rar {
 
     fn header_check(&self, block: &[u8]) -> Option<Box<dyn Recovering>> {
         let structure = if block.starts_with(RAR5_MAGIC) {
-            RarStructure::Rar5(Rar5::Start)
+            RarStructure::Rar5 {
+                phase: Rar5::Start,
+                files: 0,
+            }
         } else if block.starts_with(RAR4_MAGIC) {
             RarStructure::Rar4 {
                 phase: Rar4::Head,
@@ -104,14 +108,14 @@ enum Rar4 {
 }
 
 enum RarStructure {
-    Rar5(Rar5),
+    Rar5 { phase: Rar5, files: u32 },
     Rar4 { phase: Rar4, files: u32 },
 }
 
 impl RarStructure {
-    fn rar5(&mut self, at: u64, bytes: &[u8], phase: Rar5) -> Step {
-        let need = |structure: &mut Self, phase, at, len| {
-            *structure = RarStructure::Rar5(phase);
+    fn rar5(&mut self, at: u64, bytes: &[u8], phase: Rar5, files: u32) -> Step {
+        let need = |structure: &mut Self, phase, files, at, len| {
+            *structure = RarStructure::Rar5 { phase, files };
             Step::Need { at, len }
         };
         match phase {
@@ -119,16 +123,21 @@ impl RarStructure {
                 Some(&first) if first & 0x80 == 0 => need(
                     self,
                     Rar5::Header { len: 1 },
+                    files,
                     at,
                     4 + 1 + usize::from(first),
                 ),
-                Some(_) => need(self, Rar5::SizeField, at, 4 + 3),
+                Some(_) => need(self, Rar5::SizeField, files, at, 4 + 3),
                 None => Step::Invalid,
             },
             Rar5::SizeField => match vint(bytes.get(4..).unwrap_or_default()) {
-                Some((size, len)) if size <= RAR5_MAX_HEADER => {
-                    need(self, Rar5::Header { len }, at, 4 + len + size as usize)
-                }
+                Some((size, len)) if size <= RAR5_MAX_HEADER => need(
+                    self,
+                    Rar5::Header { len },
+                    files,
+                    at,
+                    4 + len + size as usize,
+                ),
                 _ => Step::Invalid,
             },
             Rar5::Header { len } => {
@@ -168,7 +177,13 @@ impl RarStructure {
                 match kind {
                     RAR5_END => Step::Done(end),
                     RAR5_ENCRYPTION => Step::Invalid,
-                    1..=3 => need(self, Rar5::Start, end, 5),
+                    1..=3 => need(
+                        self,
+                        Rar5::Start,
+                        files.saturating_add(u32::from(kind == RAR5_FILE)),
+                        end,
+                        5,
+                    ),
                     _ => Step::Invalid,
                 }
             }
@@ -210,13 +225,16 @@ impl RarStructure {
                         extra |= u64::from(le32(bytes, 32).unwrap_or(0)) << 32;
                     }
                 }
-                let end = at + bytes.len() as u64 + extra;
+                // 64 位的数据长度来自数据，加起来可能溢出
+                let Some(end) = (at + bytes.len() as u64).checked_add(extra) else {
+                    return Step::Invalid;
+                };
                 if kind == RAR4_END {
                     return Step::Done(end);
                 }
                 *self = RarStructure::Rar4 {
                     phase: Rar4::Head,
-                    files: files + u32::from(kind == RAR4_FILE),
+                    files: files.saturating_add(u32::from(kind == RAR4_FILE)),
                 };
                 Step::Need { at: end, len: 7 }
             }
@@ -236,7 +254,7 @@ impl RarStructure {
 impl Structure for RarStructure {
     fn first(&self) -> Step {
         match self {
-            RarStructure::Rar5(_) => Step::Need {
+            RarStructure::Rar5 { .. } => Step::Need {
                 at: RAR5_MAGIC.len() as u64,
                 len: 5,
             },
@@ -247,12 +265,18 @@ impl Structure for RarStructure {
         }
     }
 
+    /// 部分恢复：至少一个文件块的头核对过 CRC 才保存，到断点为止。
+    fn intact(&self, cut: u64) -> Option<u64> {
+        let (RarStructure::Rar5 { files, .. } | RarStructure::Rar4 { files, .. }) = self;
+        (*files > 0).then_some(cut)
+    }
+
     fn step(&mut self, event: Event<'_>) -> Step {
         let Event::Bytes { at, bytes } = event else {
             return Step::Invalid;
         };
         match *self {
-            RarStructure::Rar5(phase) => self.rar5(at, bytes, phase),
+            RarStructure::Rar5 { phase, files } => self.rar5(at, bytes, phase, files),
             RarStructure::Rar4 { phase, files } => self.rar4(at, bytes, phase, files),
         }
     }
@@ -316,5 +340,31 @@ mod tests {
         let mut bad = sample.clone();
         bad[7] ^= 0xFF; // 归档头的 CRC
         check(&bad, None);
+    }
+
+    /// RAR 4 的文件块带 64 位数据长度（高 32 位全 1）：CRC 对得上也不能让结尾的加法溢出。
+    #[test]
+    fn huge_rar4_file_sizes_do_not_overflow() {
+        let mut header = vec![0u8; 40];
+        header[2] = RAR4_FILE;
+        let flags = RAR4_LONG_BLOCK | RAR4_LARGE_FILE;
+        header[3..5].copy_from_slice(&flags.to_le_bytes());
+        header[5..7].copy_from_slice(&40u16.to_le_bytes());
+        header[7..11].copy_from_slice(&u32::MAX.to_le_bytes());
+        header[32..36].copy_from_slice(&u32::MAX.to_le_bytes());
+        let crc = crc32(&[&header[2..]]) as u16;
+        let mut structure = RarStructure::Rar4 {
+            phase: Rar4::Header {
+                crc,
+                kind: RAR4_FILE,
+                flags,
+            },
+            files: u32::MAX,
+        };
+        let step = structure.step(Event::Bytes {
+            at: 1 << 40,
+            bytes: &header,
+        });
+        assert!(matches!(step, Step::Invalid));
     }
 }

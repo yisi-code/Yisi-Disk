@@ -12,13 +12,15 @@ import {
   type HostError,
   type JobTarget,
   type PartitionInfo,
+  type ScanKind,
   type ScanResult,
 } from '../services/host'
 
 /**
  * 浏览分区的会话：引擎读出分区表后一直运行，直到关闭（取消任务）、引擎出错或宿主断开。
  * 无响应、意外退出沿用通用任务状态；离开页面时自动关闭。
- * NTFS 分区要先扫描 MFT 才列得出已删除的项：扫描期间的进度是这个任务的进度。
+ * NTFS 分区要先扫描 MFT 才列得出已删除的项；FAT / exFAT 分区可以按需读一遍空闲簇，找回原来的目录已找不到的文件夹。
+ * 扫描期间的进度是这个任务的进度。
  */
 export function useBrowse() {
   const opened = shallowRef<BrowseOpened | null>(null)
@@ -28,6 +30,8 @@ export function useBrowse() {
   const scanResults = shallowRef(new Map<number, ScanResult>())
   /** 正在扫描的分区 */
   const scanningPartition = ref<number | null>(null)
+  /** 正在做的是哪种扫描（扫描进度的文字据此选） */
+  const scanKind = ref<ScanKind>('mft')
   const isCancellingScan = ref(false)
   const scanFailure = ref<HostError | null>(null)
   // 浏览任务不会「完成」，只会被关闭或失败
@@ -93,20 +97,24 @@ export function useBrowse() {
     return openBrowseRange(jobId, offset, length, boot)
   }
 
-  /** 扫描分区里已删除的项；扫过的分区引擎直接给出上次的结果。被停下或失败时返回 null */
-  async function scan(partition: number): Promise<ScanResult | null> {
+  /**
+   * 扫描分区里已删除的项：NTFS 扫主文件表，FAT / exFAT（optionalScan）读空闲簇找原来的目录已找不到的文件夹。
+   * 扫过的分区引擎直接给出上次的结果。被停下或失败时返回 null
+   */
+  async function scan(partition: PartitionInfo): Promise<ScanResult | null> {
     const jobId = job.jobId.value
     if (jobId === null || !isOpen.value || isScanning.value) {
       return null
     }
     scanFailure.value = null
-    scanningPartition.value = partition
+    scanKind.value = partition.optionalScan ? 'free' : 'mft'
+    scanningPartition.value = partition.number
     try {
-      const result = await scanDeleted(jobId, partition)
+      const result = await scanDeleted(jobId, partition.number)
       if (result.cancelled) {
         return null
       }
-      scanResults.value = new Map(scanResults.value).set(partition, result)
+      scanResults.value = new Map(scanResults.value).set(partition.number, result)
       return result
     } catch (error) {
       // 关闭会话时引擎退出，扫描请求随之失败：这不算扫描出错
@@ -152,6 +160,7 @@ export function useBrowse() {
     isTransitioning,
     scanResults,
     scanningPartition,
+    scanKind,
     isScanning,
     isCancellingScan,
     scanFailure,

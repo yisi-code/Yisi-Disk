@@ -1,4 +1,4 @@
-//! 目录项与文件定位信息：FAT、exFAT、NTFS 共用。
+//! 目录项与文件定位信息：FAT、exFAT、NTFS、ext2/3/4 共用。
 
 /// 删除的文件还能不能完整找回，是从簇的占用情况推断的，不保证内容一定对。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,18 +11,21 @@ pub enum State {
     Overwritten,
     /// 已删除，无法判断：例如首簇不在合法范围、FAT32 首簇的高 16 位可能被清零、簇链断了。
     Unknown,
+    /// 已删除，删除时文件系统清掉了它的长度与数据位置（ext3 / ext4 清空 inode 里的块指针或 extent）：
+    /// 内容可能还在盘上，但按目录与 inode 找不到在哪里，读不出来。
+    Cleared,
 }
 
-/// 内容读不出来（或读出来不是原样）的存放方式。目前只有 NTFS 会有。
+/// 内容读不出来（或读出来不是原样）的存放方式。NTFS 都可能有；ext 只有加密（fscrypt）与符号链接。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unsupported {
     /// NTFS 压缩（LZNT1），但压缩单元不认得、解不开。
     Compressed,
-    /// EFS 加密：读出来是密文。
+    /// 加密（NTFS 的 EFS、ext4 的 fscrypt）：读出来是密文。
     Encrypted,
     /// Windows 的系统压缩（WOF），但算法不认得，或内容不在本文件里（WIMBoot 放在 WIM 文件中）。
     SystemCompressed,
-    /// 其他重分析点（符号链接、云端占位文件等）：内容不在这里。
+    /// 其他重分析点（符号链接、云端占位文件等）与 ext 的符号链接：内容不在这里。
     Reparse,
 }
 
@@ -30,9 +33,9 @@ impl std::fmt::Display for Unsupported {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Compressed => "新技术文件系统（NTFS）压缩",
-            Self::Encrypted => "加密文件系统（EFS）加密",
+            Self::Encrypted => "加密（NTFS 的 EFS 或 ext4 的 fscrypt）",
             Self::SystemCompressed => "系统压缩（WOF）",
-            Self::Reparse => "重分析点（链接或云端占位文件）",
+            Self::Reparse => "链接或云端占位文件（NTFS 的重分析点、ext 的符号链接）",
         })
     }
 }
@@ -45,6 +48,9 @@ pub enum Stamp {
     /// FAT / exFAT：DOS 格式，日期在高 16 位、时间在低 16 位，是写入时所在时区的本地时间。`utc_offset` 是 exFAT
     /// 另记的与 UTC 之差：第 7 位为 1 时有效，低 7 位是以 15 分钟为单位的有符号数；FAT 没有，记 0。
     Dos { stamp: u32, utc_offset: u8 },
+    /// ext2/3/4：`seconds` 是 1970-01-01 起的秒数，按有符号 32 位读（1901–2038 年）；`extra` 是 ext4 大 inode 里
+    /// 另记的扩展字段：低 2 位把秒数往后延（每 1 是 2^32 秒，到 2446 年），其余 30 位是秒以下的纳秒；没有时记 0。UTC。
+    Ext { seconds: u32, extra: u32 },
 }
 
 /// 换算成的时刻。
@@ -106,16 +112,24 @@ fn dos_civil(date: u16, time: u16) -> Option<Civil> {
 }
 
 impl Stamp {
-    /// `yyyy-MM-dd HH:mm:ss`，按卷上记的样子（NTFS 是 UTC，FAT / exFAT 是本地时间）；不合法时为 `None`。
+    /// `yyyy-MM-dd HH:mm:ss`，按卷上记的样子（NTFS 与 ext 是 UTC，FAT / exFAT 是本地时间）；不合法时为 `None`。
     pub fn text(&self) -> Option<String> {
         match *self {
             Self::Nt(value) => nt_time(value),
             Self::Dos { stamp, .. } => dos_time((stamp >> 16) as u16, stamp as u16),
+            Self::Ext { seconds, extra } => {
+                let (unix, _) = ext_time(seconds, extra)?;
+                Some(unix_civil(unix).text())
+            }
         }
     }
 
     pub fn moment(&self) -> Option<Moment> {
         match *self {
+            Self::Ext { seconds, extra } => {
+                let (seconds, nanos) = ext_time(seconds, extra)?;
+                Some(Moment::Utc { seconds, nanos })
+            }
             Self::Nt(value) => {
                 self.text()?;
                 let since = i128::from(value) - i128::from(NT_UNIX_EPOCH);
@@ -144,6 +158,7 @@ impl Stamp {
         match *self {
             Self::Nt(value) => format!("tn{value}"),
             Self::Dos { stamp, utc_offset } => format!("td{stamp}o{utc_offset}"),
+            Self::Ext { seconds, extra } => format!("te{seconds}x{extra}"),
         }
     }
 
@@ -151,11 +166,48 @@ impl Stamp {
         if let Some(value) = part.strip_prefix("tn") {
             return Some(Self::Nt(value.parse().ok()?));
         }
+        if let Some((seconds, extra)) = part
+            .strip_prefix("te")
+            .and_then(|rest| rest.split_once('x'))
+        {
+            return Some(Self::Ext {
+                seconds: seconds.parse().ok()?,
+                extra: extra.parse().ok()?,
+            });
+        }
         let (stamp, offset) = part.strip_prefix("td")?.split_once('o')?;
         Some(Self::Dos {
             stamp: stamp.parse().ok()?,
             utc_offset: offset.parse().ok()?,
         })
+    }
+}
+
+/// ext 的时间换成 1970-01-01 起的秒数与纳秒：秒数按有符号 32 位读，再加上扩展字段低 2 位（每 1 是 2^32 秒）。
+/// 秒数与扩展字段都是 0（没记）、纳秒超过 10 亿时为 `None`。
+fn ext_time(seconds: u32, extra: u32) -> Option<(i64, u32)> {
+    if seconds == 0 && extra == 0 {
+        return None;
+    }
+    let nanos = extra >> 2;
+    if nanos >= 1_000_000_000 {
+        return None;
+    }
+    let unix = i64::from(seconds as i32) + (i64::from(extra & 0b11) << 32);
+    Some((unix, nanos))
+}
+
+/// 1970-01-01 起 `unix` 秒（UTC，可以为负）的年月日时分秒。
+fn unix_civil(unix: i64) -> Civil {
+    let (days, rest) = (unix.div_euclid(86_400), unix.rem_euclid(86_400));
+    let (year, month, day) = civil_from_days(days);
+    Civil {
+        year,
+        month,
+        day,
+        hour: rest / 3600,
+        minute: rest / 60 % 60,
+        second: rest % 60,
     }
 }
 
@@ -207,8 +259,14 @@ pub enum Location {
         record: u64,
         sequence: u16,
     },
-    /// NTFS：原来的目录已找不到的已删除项集中列在这个虚拟目录里，它不在卷上。
+    /// 原来的目录已找不到的已删除项集中列在这个虚拟目录里，它不在卷上：NTFS 是父目录记录已被重用的，
+    /// FAT / exFAT 是读空闲簇认出的、上级目录里已没有记它的那一项的文件夹。
     Orphans,
+    /// ext2/3/4 的 inode 号与 inode 里记的版本号（`i_generation`，inode 每被重用一次就换一个）。
+    Inode {
+        inode: u32,
+        generation: u32,
+    },
 }
 
 /// 文件在卷里的位置，足以重新找到并读出它，不依赖目录缓存。
@@ -255,7 +313,7 @@ impl FileRef {
     }
 
     /// 编成界面原样传回的字符串：FAT / exFAT 如 `r1-d0-x0-c2-s0-v0-k0`，NTFS 如 `n1-d0-x1-m42-q3-s100`，
-    /// 虚拟目录为 `n1-o`；有修改时间时末尾另有一段（`tn…` 或 `td…o…`）。
+    /// 虚拟目录为 `n1-o`（各文件系统共用），ext 如 `e1-d0-x1-i12-g7-s100`；有修改时间时末尾另有一段（`tn…`、`td…o…` 或 `te…x…`）。
     pub fn to_token(&self) -> String {
         let (dir, deleted) = (u8::from(self.is_dir), u8::from(self.deleted));
         let token = match self.location {
@@ -270,6 +328,9 @@ impl FileRef {
                 format!("n1-d{dir}-x{deleted}-m{record}-q{sequence}-s{}", self.size)
             }
             Location::Orphans => "n1-o".to_owned(),
+            Location::Inode { inode, generation } => {
+                format!("e1-d{dir}-x{deleted}-i{inode}-g{generation}-s{}", self.size)
+            }
         };
         match self.modified {
             Some(stamp) => format!("{token}-{}", stamp.token()),
@@ -325,6 +386,18 @@ impl FileRef {
                     modified: None,
                 }
             }
+            "e1" => {
+                let inode = u32::try_from(field('i')?).ok()?;
+                let generation = u32::try_from(field('g')?).ok()?;
+                let size = field('s')?;
+                Self {
+                    size,
+                    is_dir,
+                    deleted,
+                    location: Location::Inode { inode, generation },
+                    modified: None,
+                }
+            }
             _ => return None,
         };
         let modified = match parts.next() {
@@ -363,6 +436,14 @@ impl FileAttributes {
             system: bits & u32::from(crate::format::ATTR_SYSTEM) != 0,
         }
     }
+
+    /// ext 没有隐藏、系统这两个属性位，按 Linux 的惯例以 `.` 开头的名字算隐藏。
+    pub(crate) fn from_unix_name(name: &str) -> Self {
+        Self {
+            hidden: name.starts_with('.'),
+            system: false,
+        }
+    }
 }
 
 /// 目录里的一项（不含 `.`、`..` 和卷标）。
@@ -374,7 +455,7 @@ pub struct Entry {
     /// 名字有字符无法确定（FAT 删除后丢了首字母、又没有长文件名可以推算）。
     pub name_uncertain: bool,
     pub size: u64,
-    /// `yyyy-MM-dd HH:mm:ss`，按卷上记录的时间：FAT / exFAT 是写入时的本地时间，NTFS 是 UTC
+    /// `yyyy-MM-dd HH:mm:ss`，按卷上记录的时间：FAT / exFAT 是写入时的本地时间，NTFS 与 ext 是 UTC
     /// （[`crate::Volume::times_utc`]）。
     pub modified: Option<String>,
     pub created: Option<String>,
@@ -389,6 +470,23 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// 根目录里的虚拟目录「找不到原目录的文件」（[`Location::Orphans`]），界面按它显示本地化的名字。
+    pub(crate) fn orphans_dir() -> Self {
+        Self {
+            name: "$Orphans".to_owned(),
+            short_name: None,
+            name_uncertain: false,
+            size: 0,
+            modified: None,
+            created: None,
+            state: State::Live,
+            position: None,
+            unsupported: None,
+            attributes: FileAttributes::default(),
+            file: FileRef::orphans(),
+        }
+    }
+
     pub fn is_dir(&self) -> bool {
         self.file.is_dir
     }
@@ -414,22 +512,8 @@ pub(crate) fn nt_time(value: u64) -> Option<String> {
         return None;
     }
     let unix = i64::try_from(value / 10_000_000).ok()? - yisi_io::NT_UNIX_EPOCH_SECONDS;
-    let (days, rest) = (unix.div_euclid(86_400), unix.rem_euclid(86_400));
-    let (year, month, day) = civil_from_days(days);
-    if !(1601..=9999).contains(&year) {
-        return None;
-    }
-    Some(
-        Civil {
-            year,
-            month,
-            day,
-            hour: rest / 3600,
-            minute: rest / 60 % 60,
-            second: rest % 60,
-        }
-        .text(),
-    )
+    let civil = unix_civil(unix);
+    (1601..=9999).contains(&civil.year).then(|| civil.text())
 }
 
 /// 把 FAT / exFAT 的日期时间（年从 1980 起）格式化成 `yyyy-MM-dd HH:mm:ss`，取值不合法时返回 `None`。

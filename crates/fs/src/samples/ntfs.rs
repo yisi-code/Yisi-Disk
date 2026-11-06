@@ -96,6 +96,10 @@ struct Node {
     encrypted: bool,
     /// 另加的文件属性位（隐藏 0x02、系统 0x04 等），写进 `$STANDARD_INFORMATION` 与 `$FILE_NAME`。
     attributes: u32,
+    /// 不写进上级目录的索引（造「文件不在上级目录索引里」）。
+    unindexed: bool,
+    /// 目录不写 `$I30` 索引（造「目录索引读不出」）。
+    without_index: bool,
     /// 重分析点的内容（开头 4 字节是标记）。
     reparse: Option<Vec<u8>>,
     /// 备用数据流（有名字的 `$DATA`），放在基本记录里、无名数据流之后。
@@ -364,6 +368,24 @@ impl NtfsImage {
         self.nodes.get_mut(&record).unwrap().attributes |= bits;
     }
 
+    /// 这个文件不写进上级目录的索引：记录还在用，浏览时却看不到。
+    pub fn leave_out_of_index(&mut self, record: u64) {
+        self.nodes.get_mut(&record).unwrap().unindexed = true;
+    }
+
+    /// 这个目录不写 `$I30` 索引：目录读不出。
+    pub fn drop_index(&mut self, dir: u64) {
+        self.nodes.get_mut(&dir).unwrap().without_index = true;
+    }
+
+    /// 把文件的运行表改成指到卷外（`$Bitmap` 不动）。
+    pub fn point_runs_outside(&mut self, record: u64) {
+        let node = self.nodes.get_mut(&record).unwrap();
+        if let Data::NonResident { runs, .. } = &mut node.data {
+            *runs = vec![(Some(TOTAL_CLUSTERS + 100), 1)];
+        }
+    }
+
     /// 只带标记的重分析点（内容为空）。
     pub fn mark_reparse(&mut self, record: u64, tag: u32) {
         let mut value = vec![0u8; 8];
@@ -508,7 +530,7 @@ impl NtfsImage {
         // 目录索引：按在用的子项生成（DOS 名单独一项）
         let mut children: BTreeMap<u64, Vec<(u64, Vec<u8>)>> = BTreeMap::new();
         for (&record, node) in &self.nodes {
-            if !node.in_use {
+            if !node.in_use || node.unindexed {
                 continue;
             }
             for name in &node.names {
@@ -535,7 +557,7 @@ impl NtfsImage {
             if node.extension_of.is_some() {
                 continue;
             }
-            let index = if node.is_dir && node.in_use {
+            let index = if node.is_dir && node.in_use && !node.without_index {
                 let entries = children.remove(&record).unwrap_or_default();
                 Some(self.index_attributes(entries))
             } else {

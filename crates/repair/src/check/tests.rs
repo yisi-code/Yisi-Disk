@@ -610,6 +610,42 @@ fn ntfs_boot_and_mft_are_checked() {
 }
 
 #[test]
+fn ntfs_missing_index_entries_bad_runs_and_unreadable_indexes_are_audited() {
+    use yisi_fs::samples::NTFS_ROOT;
+    let mut sample = NtfsImage::new();
+    let hidden = sample.add_file(NTFS_ROOT, "unlisted.txt", b"not in the index");
+    sample.leave_out_of_index(hidden);
+    let bad = sample.add_file(NTFS_ROOT, "bad.bin", &pattern(1, 3 * 4096));
+    sample.point_runs_outside(bad);
+    let dir = sample.mkdir(NTFS_ROOT, "noindex");
+    sample.add_file(dir, "inside.txt", b"x");
+    sample.drop_index(dir);
+    sample.add_file(NTFS_ROOT, "plain.txt", b"ok");
+    let report = run(&sample.finish());
+
+    let paths = |kind| -> Vec<String> {
+        report
+            .issues
+            .iter()
+            .filter(|issue| issue.kind == kind)
+            .filter_map(|issue| issue.path.clone())
+            .collect()
+    };
+    assert_eq!(
+        paths(IssueKind::MissingFromIndex),
+        ["/unlisted.txt"],
+        "{:#?}",
+        report.issues
+    );
+    assert_eq!(paths(IssueKind::RunsInvalid), ["/bad.bin"]);
+    assert_eq!(paths(IssueKind::IndexUnreadable), ["/noindex"]);
+    // 索引读不出的目录里的文件不判断「不在索引里」
+    assert!(!paths(IssueKind::MissingFromIndex).contains(&"/noindex/inside.txt".to_owned()));
+    // bad.bin 原来分到的 3 个簇在位图里还占着，却没人用到了
+    assert_eq!(find(&report, IssueKind::NtfsLostClusters).count, Some(3));
+}
+
+#[test]
 fn ntfs_records_indexes_and_clusters_are_audited() {
     use yisi_fs::samples::{NTFS_BITMAP_LCN, NTFS_ROOT};
     const CLUSTER: usize = 4096;

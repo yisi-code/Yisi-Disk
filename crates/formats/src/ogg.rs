@@ -135,6 +135,8 @@ impl FileFormat for Ogg {
                 closed_at: None,
                 first_link: true,
                 codecs: Vec::new(),
+                pages: 0,
+                last_page_end: 0,
             },
         )))
     }
@@ -161,6 +163,9 @@ struct OggStructure {
     first_link: bool,
     /// 第一段里各逻辑流的编码，按开始的顺序。
     codecs: Vec<Codec>,
+    /// 核对过 CRC、接得上的页数，与最后一页的结尾。
+    pages: u32,
+    last_page_end: u64,
 }
 
 impl OggStructure {
@@ -205,6 +210,11 @@ impl Structure for OggStructure {
         }
     }
 
+    /// 部分恢复：至少两页核对过 CRC、接得上才保存，到最后一个这样的页为止。
+    fn intact(&self, _cut: u64) -> Option<u64> {
+        (self.pages >= 2).then_some(self.last_page_end)
+    }
+
     fn step(&mut self, event: Event<'_>) -> Step {
         let Event::Bytes { at, bytes } = event else {
             return Step::Invalid;
@@ -244,6 +254,8 @@ impl Structure for OggStructure {
                     return Step::Invalid;
                 }
                 let end = at + bytes.len() as u64;
+                self.pages += 1;
+                self.last_page_end = end;
                 if self.open.is_empty() {
                     self.closed_at = Some(end);
                 }

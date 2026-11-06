@@ -106,6 +106,7 @@ impl FileFormat for Mkv {
             MkvStructure {
                 segment_at,
                 extension,
+                body_at: None,
             },
         )))
     }
@@ -114,6 +115,8 @@ impl FileFormat for Mkv {
 struct MkvStructure {
     segment_at: u64,
     extension: Option<&'static str>,
+    /// Segment 的内容从哪里开始（读到 Segment 的头之后才知道）。
+    body_at: Option<u64>,
 }
 
 impl Structure for MkvStructure {
@@ -122,6 +125,11 @@ impl Structure for MkvStructure {
             at: self.segment_at,
             len: SEGMENT_HEAD,
         }
+    }
+
+    /// 部分恢复：Segment 的内容开始之后才保存，到断点为止（内容核对不了，与完整时一样只看 Segment 的长度）。
+    fn intact(&self, cut: u64) -> Option<u64> {
+        self.body_at.filter(|&body_at| cut > body_at).map(|_| cut)
     }
 
     fn step(&mut self, event: Event<'_>) -> Step {
@@ -133,7 +141,9 @@ impl Structure for MkvStructure {
         };
         match element_size(bytes.get(id_len..).unwrap_or_default()) {
             Some((Some(size), size_len)) => {
-                match (at + (id_len + size_len) as u64).checked_add(size) {
+                let body_at = at + (id_len + size_len) as u64;
+                self.body_at = Some(body_at);
+                match body_at.checked_add(size) {
                     Some(end) => Step::Done(end),
                     None => Step::Invalid,
                 }

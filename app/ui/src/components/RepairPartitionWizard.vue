@@ -464,16 +464,16 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
         v-else-if="isBrowsing && browsingPartition && browsingRef && browse.jobId.value && browse.target.value"
         class="wizard__panel wizard__fill"
       >
-        <dl class="wizard__details">
-          <dt>{{ t('common.source') }}</dt>
-          <dd class="wizard__path-text">{{ sourceText }}</dd>
-          <dt>{{ t('partitionFiles.browse.partition') }}</dt>
-          <dd>{{ partitionLine(browsingPartition) }}</dd>
+        <dl class="wizard__details wizard__details--inline">
+          <div>
+            <dt>{{ t('common.source') }}</dt>
+            <dd class="wizard__path-text">{{ sourceText }}</dd>
+          </div>
+          <div>
+            <dt>{{ t('partitionFiles.browse.partition') }}</dt>
+            <dd>{{ partitionLine(browsingPartition) }}</dd>
+          </div>
         </dl>
-        <p class="wizard__hint wizard__hint--warning">
-          {{ browsingBoot === 'rebuilt' ? t('repair.browse.rebuiltIntro') : t('repair.browse.intro') }}
-        </p>
-        <p v-if="isDeviceKind(browse.target.value.kind)" class="wizard__hint">{{ t('partitionFiles.browse.liveHint') }}</p>
         <p v-if="browse.isUnresponsive.value" class="wizard__error" role="alert">
           {{ t('common.unresponsive') }}
         </p>
@@ -492,6 +492,11 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
             :boot="browsingBoot"
           />
         </div>
+        <!-- 固定的说明放在文件区下面，顶部只留来源与出错 -->
+        <p class="wizard__hint wizard__hint--warning">
+          {{ browsingBoot === 'rebuilt' ? t('repair.browse.rebuiltIntro') : t('repair.browse.intro') }}
+        </p>
+        <p v-if="isDeviceKind(browse.target.value.kind)" class="wizard__hint">{{ t('partitionFiles.browse.liveHint') }}</p>
       </div>
 
       <div v-else-if="isConfirming && writePlan.plan.value" class="wizard__panel">

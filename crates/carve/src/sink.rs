@@ -12,6 +12,21 @@ pub struct RecoveredFile {
     /// 在源设备上的起始偏移。
     pub offset: u64,
     pub length: u64,
+    /// 部分恢复存下的不完整文件：为什么断了。完整的文件为 `None`。
+    pub incomplete: Option<Incomplete>,
+}
+
+/// 不完整的文件（部分恢复）在哪里断了。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Incomplete {
+    /// 读到源的末尾还没结束，或文件头说的结尾超出了源的末尾。
+    SourceEnd,
+    /// 遇到读不出的块。
+    Unreadable,
+    /// 文件的范围里出现了别的文件头：后面多半已经被别的文件覆盖。
+    Overwritten,
+    /// 结构走到一半对不上了：后面多半已是别的数据（被覆盖，或文件不是连续存放的）。
+    Broken,
 }
 
 pub trait Sink {
@@ -22,9 +37,15 @@ pub trait Sink {
 pub trait SinkFile {
     fn write(&mut self, data: &[u8]) -> io::Result<()>;
 
-    /// 确认是完整文件，截到 `length` 字节保存。`extension` 是格式插件按内容定的扩展名
+    /// 确认是完整文件（或部分恢复时不完整，`incomplete` 是原因，名字带上 [`INCOMPLETE_MARK`]），
+    /// 截到 `length` 字节保存。`extension` 是格式插件按内容定的扩展名
     /// （例如 ZIP 里装的是 Word 文档时是 docx），给出时文件名用它，否则用 [`Sink::create`] 时的扩展名。
-    fn commit(self: Box<Self>, length: u64, extension: Option<&str>) -> io::Result<RecoveredFile>;
+    fn commit(
+        self: Box<Self>,
+        length: u64,
+        extension: Option<&str>,
+        incomplete: Option<Incomplete>,
+    ) -> io::Result<RecoveredFile>;
 
     /// 不是完整文件，丢弃已写的内容。
     fn discard(self: Box<Self>) -> io::Result<()>;
@@ -50,9 +71,18 @@ pub fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
     fs::rename(from, to)
 }
 
-/// 恢复出的文件的名字：`f` 加起始扇区号（按 512 字节计），例如 `f0000012345.jpg`。
-pub fn recovered_name(offset: u64, extension: &str) -> String {
-    format!("f{:010}.{extension}", offset / 512)
+/// 不完整的文件名字里扩展名前面的标记：`f0000012345.incomplete.jpg`。与写入中途的 [`PARTIAL_SUFFIX`] 不同，
+/// 它不在名字末尾，打开方式仍按真正的扩展名选。
+pub const INCOMPLETE_MARK: &str = "incomplete";
+
+/// 恢复出的文件的名字：`f` 加起始扇区号（按 512 字节计），例如 `f0000012345.jpg`；
+/// 不完整的在扩展名前加 [`INCOMPLETE_MARK`]，例如 `f0000012345.incomplete.jpg`，不会和完整的混淆。
+pub fn recovered_name(offset: u64, extension: &str, incomplete: bool) -> String {
+    if incomplete {
+        format!("f{:010}.{INCOMPLETE_MARK}.{extension}", offset / 512)
+    } else {
+        format!("f{:010}.{extension}", offset / 512)
+    }
 }
 
 /// 写到一个目录里，文件名见 [`recovered_name`]。
@@ -80,7 +110,7 @@ impl DirectorySink {
 impl Sink for DirectorySink {
     fn create(&mut self, offset: u64, extension: &str) -> io::Result<Box<dyn SinkFile>> {
         let offset = self.origin.saturating_add(offset);
-        let name = recovered_name(offset, extension);
+        let name = recovered_name(offset, extension, false);
         let final_path = self.directory.join(&name);
         let partial_path = partial_path(&final_path);
         let file = match File::create_new(&partial_path) {
@@ -95,7 +125,6 @@ impl Sink for DirectorySink {
             writer: BufWriter::new(file),
             partial_path,
             final_path,
-            name,
             extension: extension.to_owned(),
             offset,
         }))
@@ -105,8 +134,8 @@ impl Sink for DirectorySink {
 struct DirectoryFile {
     writer: BufWriter<File>,
     partial_path: PathBuf,
+    /// 按创建时的扩展名起的正式名字；提交时按插件定的扩展名与是否完整重新起名，只换文件名。
     final_path: PathBuf,
-    name: String,
     extension: String,
     offset: u64,
 }
@@ -116,7 +145,12 @@ impl SinkFile for DirectoryFile {
         self.writer.write_all(data)
     }
 
-    fn commit(self: Box<Self>, length: u64, extension: Option<&str>) -> io::Result<RecoveredFile> {
+    fn commit(
+        self: Box<Self>,
+        length: u64,
+        extension: Option<&str>,
+        incomplete: Option<Incomplete>,
+    ) -> io::Result<RecoveredFile> {
         let file = self
             .writer
             .into_inner()
@@ -126,14 +160,9 @@ impl SinkFile for DirectoryFile {
         // 最近改名的文件可能内容不全，源盘只读，重扫即可。
         file.set_len(length)?;
         drop(file);
-        let (name, extension, final_path) = match extension {
-            Some(extension) => {
-                let name = recovered_name(self.offset, extension);
-                let final_path = self.final_path.with_file_name(&name);
-                (name, extension.to_owned(), final_path)
-            }
-            None => (self.name, self.extension, self.final_path),
-        };
+        let extension = extension.map_or(self.extension, str::to_owned);
+        let name = recovered_name(self.offset, &extension, incomplete.is_some());
+        let final_path = self.final_path.with_file_name(&name);
         match rename_new(&self.partial_path, &final_path) {
             Ok(()) => {}
             // 续扫（从检查点接着扫）又找到了上次已经存好的文件：名字由起点定，同一个起点就是同一个文件，留着原来那份
@@ -147,6 +176,7 @@ impl SinkFile for DirectoryFile {
             extension,
             offset: self.offset,
             length,
+            incomplete,
         })
     }
 
@@ -164,7 +194,6 @@ pub struct ScanOnlySink;
 impl Sink for ScanOnlySink {
     fn create(&mut self, offset: u64, extension: &str) -> io::Result<Box<dyn SinkFile>> {
         Ok(Box::new(ScanOnlyFile {
-            name: recovered_name(offset, extension),
             extension: extension.to_owned(),
             offset,
         }))
@@ -172,7 +201,6 @@ impl Sink for ScanOnlySink {
 }
 
 struct ScanOnlyFile {
-    name: String,
     extension: String,
     offset: u64,
 }
@@ -182,16 +210,19 @@ impl SinkFile for ScanOnlyFile {
         Ok(())
     }
 
-    fn commit(self: Box<Self>, length: u64, extension: Option<&str>) -> io::Result<RecoveredFile> {
-        let (name, extension) = match extension {
-            Some(extension) => (recovered_name(self.offset, extension), extension.to_owned()),
-            None => (self.name, self.extension),
-        };
+    fn commit(
+        self: Box<Self>,
+        length: u64,
+        extension: Option<&str>,
+        incomplete: Option<Incomplete>,
+    ) -> io::Result<RecoveredFile> {
+        let extension = extension.map_or(self.extension, str::to_owned);
         Ok(RecoveredFile {
-            name,
+            name: recovered_name(self.offset, &extension, incomplete.is_some()),
             extension,
             offset: self.offset,
             length,
+            incomplete,
         })
     }
 

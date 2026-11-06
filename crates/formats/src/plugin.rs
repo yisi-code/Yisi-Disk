@@ -42,8 +42,15 @@ pub trait FileFormat: Send + Sync {
 
     fn signatures(&self) -> &[Signature];
 
-    /// 签名命中后，用文件开头的一块数据进一步确认；确认是这个格式时返回恢复状态。
+    /// 签名命中后，用签名所在的一块数据进一步确认；确认是这个格式时返回恢复状态。
     fn header_check(&self, block: &[u8]) -> Option<Box<dyn Recovering>>;
+
+    /// 签名所在的那一块离文件开头多远（字节）。绝大多数格式的签名就在文件开头，是 0；
+    /// ISO 9660 的卷描述符从 32 KiB 处开始，前面的系统区通常全是 0、认不出来，就在卷描述符那一块认，
+    /// 文件从它前面 32 KiB 算起（深度恢复回到那里，从文件开头起把数据交给 [`Recovering`]）。
+    fn lead(&self) -> u64 {
+        0
+    }
 }
 
 /// 一个正在恢复的文件。数据从文件开头起按顺序分块送入，块与块首尾相接。
@@ -67,8 +74,20 @@ pub trait Recovering: Send {
     }
 
     /// 按内容定的扩展名，是格式的 [`FormatInfo::variants`] 之一；没有更具体的说法时为 `None`，
-    /// 用格式本身的扩展名。文件完整（[`DataCheck::Complete`] 或 [`finish`](Self::finish) 给出长度）之后调用。
+    /// 用格式本身的扩展名。文件完整（[`DataCheck::Complete`] 或 [`finish`](Self::finish) 给出长度）之后调用；
+    /// 部分恢复时在 [`intact`](Self::intact) 之后也调用，给出到断点为止能确定的说法。
     fn extension(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// 部分恢复：文件没能完整（数据在设备末尾或读不出的块处断了、范围里出现了别的文件头、结构走到一半对不上了、
+    /// 要的数据超出设备末尾），从文件开头起还能确定属于它的那一段的长度，不超过 `received`
+    /// （已经交给 [`data_check`](Self::data_check) 的字节数）。
+    ///
+    /// 只在至少核对过一个完整单元（一个帧、一页、一个成员、一张图像，或文件头之后的真正内容）时给出，
+    /// 不然随机数据里的签名也会变成「不完整的文件」；`None` 表示说不出可靠的一段，不保存（默认）。
+    /// 调用之后不再送数据。
+    fn intact(&mut self, _received: u64) -> Option<u64> {
         None
     }
 }

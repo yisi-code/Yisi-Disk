@@ -82,6 +82,11 @@ impl Structure for JpgStructure {
         Step::Need { at: 2, len: 2 }
     }
 
+    /// 部分恢复：图像数据开始之后才保存，到断点为止（之前的标记段都核对过）。
+    fn intact(&self, cut: u64) -> Option<u64> {
+        self.seen_scan.then_some(cut)
+    }
+
     fn step(&mut self, event: Event<'_>) -> Step {
         let (at, bytes) = match event {
             // 熵编码数据结束于一个标记

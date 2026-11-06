@@ -300,7 +300,11 @@ fn dispatch_now(
                     Path::new(dir).join(format!("recovered-{}", short_id(&params.job_id)))
                 }),
             };
-            let start_at = params.start_at;
+            let settings = carve_job::ScanSettings {
+                enabled,
+                start_at: params.start_at,
+                keep_incomplete: params.keep_incomplete,
+            };
             let (device, mut sink): (Box<dyn BlockDevice>, Box<dyn Sink + Send>) = match &output_dir
             {
                 Some(dir) => {
@@ -323,8 +327,7 @@ fn dispatch_now(
                     carve_job::run(
                         device.as_ref(),
                         &registry,
-                        enabled,
-                        start_at,
+                        settings,
                         sink.as_mut(),
                         output_dir.as_deref(),
                         context,

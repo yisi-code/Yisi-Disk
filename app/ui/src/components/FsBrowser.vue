@@ -5,14 +5,8 @@ import { useEntryAttributes } from '../composables/useEntryAttributes'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { useTreeNavigation } from '../composables/useTreeNavigation'
 import { listFiles, toHostError, type FsEntry, type HostError } from '../services/host'
+import { isShownBy, type FileFilter } from '../utils/fileFilter'
 import { formatBytes } from '../utils/format'
-
-/** 列出哪些项：未删除的、已删除的、带隐藏或系统属性的（三项各自勾选，见 isShown） */
-export interface FileFilter {
-  live: boolean
-  deleted: boolean
-  hidden: boolean
-}
 
 /** 树里的一项：目录项本身，以及它在分区里的路径（一级一项） */
 export interface TreeItem {
@@ -67,10 +61,12 @@ const INDENT_PX = 18
 const props = defineProps<{
   jobId: string
   partition: number
-  /** 列出哪些项，规则见 isShown */
+  /** 列出哪些项，规则见 isShownBy */
   filter: FileFilter
   /** 打开后直接定位到这个文件夹（各级名字，不分大小写）：逐级展开、选中它；不给时停在根目录 */
   revealPath?: string[]
+  /** 变了就从根目录重新列（例如扫描后根目录多出「找不到原目录的文件」） */
+  reloadKey?: number
 }>()
 const selected = defineModel<TreeItem | null>('selected', { required: true })
 /** 勾选要复制的项，键是行的标识 */
@@ -125,7 +121,7 @@ const {
 })
 
 watch(
-  () => [props.jobId, props.partition] as const,
+  () => [props.jobId, props.partition, props.reloadKey] as const,
   () => {
     generation += 1
     dirs.value = new Map()
@@ -179,19 +175,8 @@ function appendChildren(result: TreeRow[], dirId: string, depth: number) {
   }
 }
 
-/**
- * 按 `filter` 这一项列不列：隐藏与系统文件没勾选时都不列（同资源管理器的默认）；只勾已删除时，
- * 未删除的文件夹照样列出（删除的文件可能在里面）
- */
 function isShown(entry: FsEntry): boolean {
-  const { live, deleted, hidden } = props.filter
-  if ((entry.hidden || entry.system) && !hidden) {
-    return false
-  }
-  if (entry.deleted) {
-    return deleted
-  }
-  return live || (deleted && entry.isDir)
+  return isShownBy(props.filter, entry)
 }
 
 /** 只勾已删除时列出的未删除文件夹：只是通往删除的文件的路，变淡显示 */
@@ -566,17 +551,17 @@ function withShownName(entry: FsEntry): FsEntry {
             </span>
             <span
               v-if="entryBadge(row.entry)"
-              class="fs-browser__badge"
+              class="tree-list__badge"
               :class="`fs-browser__badge--${row.entry.state}`"
             >
               {{ entryBadge(row.entry) }}
             </span>
-            <span v-if="attributesLabel(row.entry)" class="fs-browser__badge fs-browser__badge--system">
+            <span v-if="attributesLabel(row.entry)" class="tree-list__badge fs-browser__badge--system">
               {{ attributesLabel(row.entry) }}
             </span>
             <span
               v-if="row.entry.unsupported"
-              class="fs-browser__badge fs-browser__badge--unsupported"
+              class="tree-list__badge fs-browser__badge--unsupported"
             >
               {{ t(`partitionFiles.unsupported.${row.entry.unsupported}`) }}
             </span>
@@ -630,14 +615,6 @@ function withShownName(entry: FsEntry): FsEntry {
   text-decoration: line-through;
 }
 
-.fs-browser__badge {
-  flex: none;
-  padding: 0 var(--space-xs);
-  font-size: var(--font-size-small);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-control);
-}
-
 .fs-browser__badge--intact {
   color: var(--color-accent);
   border-color: var(--color-accent);
@@ -646,6 +623,11 @@ function withShownName(entry: FsEntry): FsEntry {
 .fs-browser__badge--overwritten {
   color: var(--color-danger);
   border-color: var(--color-danger);
+}
+
+.fs-browser__badge--cleared {
+  color: var(--color-text-muted);
+  border-style: dashed;
 }
 
 .fs-browser__badge--system {

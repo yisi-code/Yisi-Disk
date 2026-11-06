@@ -12,8 +12,8 @@ import FsCheckWizard from './components/FsCheckWizard.vue'
 import ProblemGuide from './components/ProblemGuide.vue'
 import ProblemOverview from './components/ProblemOverview.vue'
 import RepairPartitionWizard from './components/RepairPartitionWizard.vue'
+import SettingsPanel from './components/SettingsPanel.vue'
 import UndeleteWizard from './components/UndeleteWizard.vue'
-import { SUPPORTED_LOCALES } from './i18n'
 import {
   PROBLEMS,
   type FeatureKey,
@@ -85,20 +85,8 @@ function closeFeature() {
 
 <template>
   <div class="app-layout">
-    <header class="app-header">
-      <div class="app-header__brand">
-        <h1 class="app-header__title">{{ t('app.name') }}</h1>
-        <span class="app-header__subtitle">{{ t('app.subtitle') }}</span>
-      </div>
-      <label class="locale-picker">
-        <span class="locale-picker__label">{{ t('locale.label') }}</span>
-        <select v-model="locale" class="locale-picker__select">
-          <option v-for="code in SUPPORTED_LOCALES" :key="code" :value="code">
-            {{ t(`locale.${code}`) }}
-          </option>
-        </select>
-      </label>
-    </header>
+    <!-- 程序名在窗口标题栏与「关于」里；顶部不再占一行，内容区（文件浏览）多些高度 -->
+    <h1 class="wizard__visually-hidden">{{ t('app.name') }}</h1>
 
     <div class="app-body">
       <!-- 功能页运行中不能离开，导航栏随功能页一起收起 -->
@@ -131,7 +119,7 @@ function closeFeature() {
           </li>
         </ul>
         <ul class="app-nav__list app-nav__list--more">
-          <li v-for="other in ['allFeatures', 'about'] as const" :key="other">
+          <li v-for="other in ['allFeatures', 'settings', 'about'] as const" :key="other">
             <button
               class="app-nav__item"
               :class="{ 'app-nav__item--current': page === other }"
@@ -170,6 +158,7 @@ function closeFeature() {
           :focus-request="focusRequest"
           @open="openFeature"
         />
+        <SettingsPanel v-else-if="page === 'settings'" />
         <AboutPanel v-else />
       </main>
     </div>
@@ -188,47 +177,6 @@ function closeFeature() {
   display: flex;
   flex-direction: column;
   height: 100%;
-}
-
-.app-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--space-md) var(--space-lg);
-  background: var(--color-surface);
-  border-bottom: 1px solid var(--color-border);
-}
-
-.app-header__brand {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-sm);
-}
-
-.app-header__title {
-  margin: 0;
-  font-size: var(--font-size-app-title);
-  font-weight: 600;
-}
-
-.app-header__subtitle {
-  color: var(--color-text-muted);
-}
-
-.locale-picker {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  color: var(--color-text-muted);
-}
-
-.locale-picker__select {
-  padding: var(--space-xs) var(--space-sm);
-  color: var(--color-text);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--space-xs);
-  font: inherit;
 }
 
 .app-body {
@@ -306,7 +254,8 @@ function closeFeature() {
   flex-direction: column;
   min-width: 0;
   overflow: auto;
-  padding: var(--space-lg);
+  /* 上下留得少些，让文件区多占几行 */
+  padding: var(--space-md) var(--space-lg);
 }
 
 .app-footer {

@@ -2,6 +2,9 @@
 //! 第一个文件项（CFFILE）的位置、版本 1.3、文件夹数与文件数、标志。长度写在头里；其余各项只用来排除误识别：
 //! 三处保留字为 0、版本对、文件夹与文件都有、文件项在长度之内；第一个文件夹项（CFFOLDER）的压缩方式是规定的几种、
 //! 数据在长度之内；第一个文件项所属的文件夹存在、属性位都有定义。
+//!
+//! 带数字签名（Authenticode）的 CAB：签名附在 cbCabinet 之后，CFHEADER 带预留区（标志 0x0004，cbCFHeader 为 20），
+//! 预留区里记着签名的位置与长度：`00 00 10 00`、签名偏移、签名长度、8 个 0。签名紧接在 cbCabinet 处时，文件到签名结尾。
 
 use crate::plugin::{FileFormat, FormatInfo, Recovering, Signature};
 use crate::walker::{CheckedLength, Walker};
@@ -21,6 +24,10 @@ const MAX_COMPRESSION: u16 = 3;
 const KNOWN_ATTRIBUTES: u16 = 0x00E7;
 /// 文件项的文件夹序号可以是这几个特殊值（跨分卷的文件）。
 const FOLDER_CONTINUED: u16 = 0xFFFD;
+/// 记着数字签名位置的预留区：长度、开头 4 个字节、签名长度的上限（常见的几 KiB 到十几 KiB）。
+const SIGNATURE_RESERVE_LEN: u16 = 20;
+const SIGNATURE_RESERVE_TAG: [u8; 4] = [0, 0, 0x10, 0];
+const MAX_SIGNATURE: u32 = 1 << 20;
 
 pub struct Cab;
 
@@ -64,6 +71,11 @@ impl FileFormat for Cab {
         if !plausible {
             return None;
         }
+        let total = if flags & FLAG_RESERVE != 0 {
+            signed_length(block, length).unwrap_or(u64::from(length))
+        } else {
+            u64::from(length)
+        };
         // 没有预留区与分卷名时，第一个文件夹项紧跟在头后面
         if flags == 0 {
             let data_at = le32(block, 36)?;
@@ -78,10 +90,26 @@ impl FileFormat for Cab {
                 at: u64::from(files_at),
                 len: FILE_ENTRY_LEN,
                 check: move |entry: &[u8]| file_entry_ok(entry, folders),
-                length: u64::from(length),
+                length: total,
             },
         )))
     }
+}
+
+/// 带数字签名的 CAB 的总长度：预留区是记着签名位置的那种、签名紧接在 `cabinet`（cbCabinet）处时，到签名结尾。
+fn signed_length(block: &[u8], cabinet: u32) -> Option<u64> {
+    let reserve = block.get(40..60)?;
+    let signature_at = le32(reserve, 4)?;
+    let signature_len = le32(reserve, 8)?;
+    let shaped = le16(block, 36)? == SIGNATURE_RESERVE_LEN
+        && reserve.get(..4) == Some(SIGNATURE_RESERVE_TAG.as_slice())
+        && reserve
+            .get(12..)
+            .is_some_and(|tail| tail.iter().all(|&byte| byte == 0))
+        && signature_at == cabinet
+        && (1..=MAX_SIGNATURE).contains(&signature_len);
+    // 两个 u32 相加放在 u64 里，不会溢出
+    shaped.then(|| u64::from(signature_at) + u64::from(signature_len))
 }
 
 /// 第一个文件项：所属的文件夹存在（或是跨分卷的特殊值），属性位都有定义。
@@ -144,5 +172,38 @@ mod tests {
         // 第一个文件项的文件夹不存在
         let files_at = le32(&sample, 16).unwrap() as usize;
         check(&changed(files_at + 8, &[5, 0]), None);
+    }
+
+    #[test]
+    fn signed_cabinets_end_after_their_signature() {
+        let signed = samples::cab_signed(3, 500, 9872);
+        let mut data = signed.clone();
+        data.extend_from_slice(b"MSCF\0\0\0\0 and something else");
+        check(&data, Some(signed.len() as u64));
+        // 签名之前就断了，或签名不全
+        let cabinet = le32(&signed, 8).unwrap() as usize;
+        check(&signed[..cabinet], None);
+        check(&signed[..signed.len() - 1], None);
+
+        let changed = |at: usize, value: &[u8]| {
+            let mut data = signed.clone();
+            data[at..at + value.len()].copy_from_slice(value);
+            data
+        };
+        // 预留区不是记着签名的那种、签名不紧接在 cbCabinet 处、签名长得离谱：照旧到 cbCabinet 为止
+        for (at, value) in [
+            (40, &[0, 0, 0x11, 0][..]),
+            (44, &(cabinet as u32 + 4).to_le_bytes()[..]),
+            (48, &(MAX_SIGNATURE + 1).to_le_bytes()[..]),
+            (48, &u32::MAX.to_le_bytes()[..]),
+            (56, &[1][..]),
+            (36, &[21, 0][..]),
+        ] {
+            let data = changed(at, value);
+            assert_eq!(signed_length(&data, cabinet as u32), None, "改了 {at} 处");
+        }
+        // 照旧时文件到 cbCabinet 为止
+        let elsewhere = changed(44, &(cabinet as u32 + 4).to_le_bytes());
+        check(&elsewhere, Some(cabinet as u64));
     }
 }

@@ -88,6 +88,11 @@ impl Structure for FlvStructure {
         }
     }
 
+    /// 部分恢复：到最后一个完整的标签（后面的长度核对过）为止。
+    fn intact(&self, _cut: u64) -> Option<u64> {
+        self.last_end.filter(|_| self.tags > 0)
+    }
+
     fn step(&mut self, event: Event<'_>) -> Step {
         let Event::Bytes { at, bytes } = event else {
             return Step::Invalid;

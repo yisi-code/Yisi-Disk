@@ -422,7 +422,7 @@ impl Ntfs {
                 });
             }
             Location::Mft { record, sequence } => (record, sequence),
-            Location::Clusters(_) => return Err(FsError::BadRef),
+            Location::Clusters(_) | Location::Inode { .. } => return Err(FsError::BadRef),
         };
         let mut entries = Vec::new();
         let mut truncated = false;
@@ -442,19 +442,7 @@ impl Ntfs {
                 && let Some(scan) = &scan
                 && scan.summary.orphans > 0
             {
-                entries.push(Entry {
-                    name: "$Orphans".to_owned(),
-                    short_name: None,
-                    name_uncertain: false,
-                    size: 0,
-                    modified: None,
-                    created: None,
-                    state: State::Live,
-                    position: None,
-                    unsupported: None,
-                    attributes: FileAttributes::default(),
-                    file: FileRef::orphans(),
-                });
+                entries.push(Entry::orphans_dir());
             }
         }
         if let Some(scan) = &scan {

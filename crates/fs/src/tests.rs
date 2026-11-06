@@ -14,12 +14,12 @@ use crate::{
     Volume, detect,
 };
 
-fn open(image: Vec<u8>) -> Volume {
+pub(crate) fn open(image: Vec<u8>) -> Volume {
     let length = image.len() as u64;
     Volume::open(Arc::new(MemoryDisk::new(image, 512)), 0, length).unwrap()
 }
 
-fn read_all(volume: &Volume, file: &FileRef) -> Vec<u8> {
+pub(crate) fn read_all(volume: &Volume, file: &FileRef) -> Vec<u8> {
     let mut data = Vec::new();
     volume
         .open_file(file)
@@ -29,14 +29,14 @@ fn read_all(volume: &Volume, file: &FileRef) -> Vec<u8> {
     data
 }
 
-fn find<'a>(entries: &'a [Entry], name: &str) -> &'a Entry {
+pub(crate) fn find<'a>(entries: &'a [Entry], name: &str) -> &'a Entry {
     entries
         .iter()
         .find(|entry| entry.name == name)
         .unwrap_or_else(|| panic!("找不到 {name}：{:?}", names(entries)))
 }
 
-fn names(entries: &[Entry]) -> Vec<&str> {
+pub(crate) fn names(entries: &[Entry]) -> Vec<&str> {
     entries.iter().map(|entry| entry.name.as_str()).collect()
 }
 
@@ -445,7 +445,7 @@ fn file_systems_are_detected_inside_partitions() {
 }
 
 /// 递归列出并读出全部文件，限制深度与总数，防止测试本身陷进构造出来的环里。
-fn walk(volume: &Volume, dir: &FileRef, depth: usize, budget: &mut usize) {
+pub(crate) fn walk(volume: &Volume, dir: &FileRef, depth: usize, budget: &mut usize) {
     if depth == 0 {
         let _ = volume.scan(&mut |_, _| true);
     }
@@ -538,6 +538,394 @@ fn mutated_volumes_never_panic() {
                 let mut budget = 2000;
                 walk(&volume, &volume.root(), 0, &mut budget);
             }
+        }
+    }
+}
+
+// ───────────────────────────── FAT / exFAT：找不到原目录的文件 ─────────────────────────────
+
+/// 扫描后根目录里的「找不到原目录的文件」及其内容；没有时为 `None`。
+fn orphans(volume: &Volume) -> Option<Vec<Entry>> {
+    let root = volume.list(&volume.root()).unwrap().entries;
+    let virtual_dir = root.iter().find(|entry| entry.file.is_orphans())?;
+    assert_eq!(
+        (
+            virtual_dir.name.as_str(),
+            virtual_dir.deleted(),
+            virtual_dir.state
+        ),
+        ("$Orphans", false, State::Live)
+    );
+    Some(volume.list(&virtual_dir.file).unwrap().entries)
+}
+
+/// 一个文件夹连同里面的文件、子文件夹都删掉，它在上级目录里的那一项又被改成了别的（一个删掉的空文件）：
+/// 沿目录树找不到它，扫描空闲簇后出现在虚拟目录里，里面的文件逐字节读得出；子文件夹不单独列出。
+/// 另有一个沿目录树找得到的已删除文件夹，不在虚拟目录里重复出现。
+fn check_fat_orphans(kind: FatType) {
+    let mut sample = FatImage::new(kind);
+    let cs = sample.cluster_size();
+    let root = sample.root();
+    let lost = sample.mkdir(root, "Lost Folder");
+    let photo = pattern(1, cs * 3 + 5);
+    let photo_placed = sample.add_file(lost.as_dir(), "a photo.jpg", &photo, Layout::Contiguous);
+    let notes = pattern(2, 300);
+    let notes_placed = sample.add_short_file(lost.as_dir(), "NOTES.TXT", &notes);
+    let inner = sample.mkdir(lost.as_dir(), "Inner");
+    let deep = pattern(3, cs + 1);
+    let deep_placed = sample.add_file(inner.as_dir(), "deep.bin", &deep, Layout::Contiguous);
+    let kept = sample.mkdir(root, "Kept");
+    let kept_file = sample.add_file(
+        kept.as_dir(),
+        "kept.txt",
+        &pattern(4, 10),
+        Layout::Contiguous,
+    );
+    for placed in [
+        &deep_placed,
+        &inner,
+        &photo_placed,
+        &notes_placed,
+        &lost,
+        &kept_file,
+        &kept,
+    ] {
+        sample.delete(placed);
+    }
+    // 上级目录里记它的那一项被一个（也已删除的）空文件占了
+    sample.patch_short_entry(&lost, 11, &[0x20]);
+    sample.patch_short_entry(&lost, 20, &[0, 0]);
+    sample.patch_short_entry(&lost, 26, &[0, 0]);
+    let volume = open(sample.finish());
+    assert!(volume.optional_scan() && !volume.needs_scan() && !volume.is_scanned());
+    assert!(orphans(&volume).is_none());
+
+    let mut last = (0, 0);
+    let summary = volume
+        .scan(&mut |done, total| {
+            last = (done, total);
+            true
+        })
+        .unwrap()
+        .unwrap();
+    assert!(volume.is_scanned());
+    assert_eq!(last.0, last.1);
+    assert_eq!(summary.free_bytes, last.1);
+    assert!(summary.free_bytes > 0);
+    // 一个文件夹（Inner 挂在它下面）；里面 3 项、Inner 里 1 项
+    assert_eq!((summary.orphans, summary.deleted_names), (1, 4));
+    assert_eq!(summary.unreadable, 0);
+
+    let found = orphans(&volume).unwrap();
+    assert_eq!(names(&found), [format!("dir-{}", lost.first_cluster())]);
+    let folder = &found[0];
+    assert!(folder.deleted() && folder.is_dir());
+    assert_eq!(folder.state, State::Intact);
+    assert_eq!(folder.modified.as_deref(), Some(SAMPLE_TIME));
+    assert!(folder.position.is_some());
+    // 定位信息原样传回也打得开
+    let token = FileRef::from_token(&folder.file.to_token()).unwrap();
+    let inside = volume.list(&token).unwrap().entries;
+    let photo_entry = find(&inside, "a photo.jpg");
+    assert_eq!(
+        (photo_entry.state, photo_entry.size),
+        (State::Intact, photo.len() as u64)
+    );
+    assert_eq!(read_all(&volume, &photo_entry.file), photo);
+    let notes_entry = find(&inside, "_OTES.TXT");
+    assert!(notes_entry.name_uncertain && notes_entry.deleted());
+    assert_eq!(read_all(&volume, &notes_entry.file), notes);
+    let inner_entry = find(&inside, "Inner");
+    let deeper = volume.list(&inner_entry.file).unwrap().entries;
+    assert_eq!(read_all(&volume, &find(&deeper, "deep.bin").file), deep);
+
+    // 再扫一次直接给出上次的结果
+    let again = volume.scan(&mut |_, _| panic!("不应重扫")).unwrap();
+    assert_eq!(again, Some(summary));
+}
+
+#[test]
+fn fat12_orphaned_folders_are_found() {
+    check_fat_orphans(FatType::Fat12);
+}
+
+#[test]
+fn fat16_orphaned_folders_are_found() {
+    check_fat_orphans(FatType::Fat16);
+}
+
+#[test]
+fn fat32_orphaned_folders_are_found() {
+    check_fat_orphans(FatType::Fat32);
+}
+
+/// 上级文件夹删除后它的第一个簇被新文件覆盖：它下面的文件夹在目录树上断了，按「`.` 指向自己」认出来。
+#[test]
+fn fat_folder_under_an_overwritten_parent_is_found() {
+    let mut sample = FatImage::new(FatType::Fat16);
+    let root = sample.root();
+    let parent = sample.mkdir(root, "Parent");
+    let child = sample.mkdir(parent.as_dir(), "Child");
+    let data = pattern(5, 2500);
+    let file = sample.add_file(child.as_dir(), "report.pdf", &data, Layout::Contiguous);
+    for placed in [&file, &child, &parent] {
+        sample.delete(placed);
+    }
+    sample.add_file(
+        root,
+        "new.bin",
+        &pattern(6, 100),
+        Layout::At(parent.first_cluster()),
+    );
+    let volume = open(sample.finish());
+    scan(&volume);
+    let found = orphans(&volume).unwrap();
+    assert_eq!(names(&found), [format!("dir-{}", child.first_cluster())]);
+    let inside = volume.list(&found[0].file).unwrap().entries;
+    let report = find(&inside, "report.pdf");
+    assert_eq!(report.state, State::Intact);
+    assert_eq!(read_all(&volume, &report.file), data);
+}
+
+/// 只剩目录中间一段（开头的簇已被覆盖、不连续）：整簇都是格式正确的目录项、至少两项时也认出来，标「无法判断」。
+#[test]
+fn fat_directory_fragment_is_found() {
+    let mut sample = FatImage::new(FatType::Fat12);
+    let cs = sample.cluster_size();
+    let root = sample.root();
+    let big = sample.mkdir(root, "Big");
+    // 第一个簇放得下 `.`、`..` 与 7 个文件（各一段长文件名），之后的进第二个簇
+    let per_cluster = cs / 32;
+    let mut files = Vec::new();
+    for index in 0..per_cluster {
+        let data = pattern(index as u8, 40);
+        let placed = sample.add_file(
+            big.as_dir(),
+            &format!("file{index:02}.txt"),
+            &data,
+            Layout::Contiguous,
+        );
+        files.push((placed, data));
+    }
+    for (placed, _) in &files {
+        sample.delete(placed);
+    }
+    sample.delete(&big);
+    sample.zero_cluster(big.first_cluster());
+    let volume = open(sample.finish());
+    scan(&volume);
+    let found = orphans(&volume).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].state, State::Unknown);
+    let inside = volume.list(&found[0].file).unwrap().entries;
+    assert!(!inside.is_empty());
+    for entry in &inside {
+        let (_, data) = files
+            .iter()
+            .find(|(_, data)| {
+                entry.size == data.len() as u64 && read_all(&volume, &entry.file) == *data
+            })
+            .unwrap_or_else(|| panic!("{} 的内容不对", entry.name));
+        assert_eq!(entry.state, State::Intact, "{}", entry.name);
+        assert!(!data.is_empty());
+    }
+}
+
+#[test]
+fn exfat_orphaned_folders_are_found() {
+    let mut sample = ExfatImage::new();
+    let cs = sample.cluster_size();
+    let root = sample.root();
+    let lost = sample.mkdir(root, "相册 2024");
+    let photo = pattern(1, cs * 2 + 7);
+    let photo_placed = sample.add_file(lost.as_dir(), "海边.jpg", &photo, Layout::Contiguous);
+    let split = pattern(2, cs * 3 + 1);
+    let split_placed = sample.add_file(lost.as_dir(), "split.bin", &split, Layout::Fragmented);
+    let inner = sample.mkdir(lost.as_dir(), "Inner");
+    let deep = pattern(3, 100);
+    let deep_placed = sample.add_file(inner.as_dir(), "deep.txt", &deep, Layout::Contiguous);
+    let kept = sample.mkdir(root, "Kept");
+    let kept_file = sample.add_file(
+        kept.as_dir(),
+        "kept.txt",
+        &pattern(4, 10),
+        Layout::Contiguous,
+    );
+    for placed in [
+        &deep_placed,
+        &inner,
+        &photo_placed,
+        &split_placed,
+        &lost,
+        &kept_file,
+        &kept,
+    ] {
+        sample.delete(placed);
+    }
+    // 根目录里记它的那一组被改坏（校验和对不上，列不出）
+    sample.patch_entry(&lost, 1, 20, &[0xAA, 0xBB]);
+    let volume = open(sample.finish());
+    assert!(volume.optional_scan() && !volume.needs_scan());
+    let names_before = names(&volume.list(&volume.root()).unwrap().entries)
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(names_before, ["Kept"]);
+
+    let summary = scan(&volume);
+    assert_eq!((summary.orphans, summary.deleted_names), (1, 4));
+    let found = orphans(&volume).unwrap();
+    assert_eq!(names(&found), [format!("dir-{}", lost.first_cluster())]);
+    assert_eq!(found[0].state, State::Unknown);
+    let inside = volume.list(&found[0].file).unwrap().entries;
+    assert_eq!(names(&inside), ["海边.jpg", "split.bin", "Inner"]);
+    for (name, data) in [("海边.jpg", &photo), ("split.bin", &split)] {
+        let entry = find(&inside, name);
+        assert_eq!(
+            (entry.state, entry.deleted()),
+            (State::Intact, true),
+            "{name}"
+        );
+        assert_eq!(read_all(&volume, &entry.file), *data, "{name}");
+    }
+    let deeper = volume.list(&find(&inside, "Inner").file).unwrap().entries;
+    assert_eq!(read_all(&volume, &find(&deeper, "deep.txt").file), deep);
+}
+
+/// 删除的普通文件占的空闲簇（随机字节、大写文本、全 0、全 0xE5、像目录项却对不上的）不会被认成目录。
+#[test]
+fn ordinary_free_clusters_are_not_taken_for_directories() {
+    let mut noise = Noise::new(7);
+    let text = b"THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG. 0123456789 ".repeat(200);
+    // 一个 FAT 目录项的样子，但修改时间不合法
+    let mut fake = [0u8; 32];
+    fake[..11].copy_from_slice(b"FAKE    TXT");
+    fake[11] = 0x20;
+    fake[22..26].copy_from_slice(&[0xFF; 4]);
+    let fakes = fake.repeat(300);
+    let contents = [
+        noise.bytes(20_000),
+        text,
+        vec![0; 9000],
+        vec![0xE5; 9000],
+        fakes,
+    ];
+
+    for kind in [FatType::Fat12, FatType::Fat16, FatType::Fat32] {
+        let mut sample = FatImage::new(kind);
+        let root = sample.root();
+        for (index, data) in contents.iter().enumerate() {
+            let placed =
+                sample.add_file(root, &format!("data{index}.bin"), data, Layout::Contiguous);
+            sample.delete(&placed);
+        }
+        let volume = open(sample.finish());
+        let summary = scan(&volume);
+        assert_eq!((summary.orphans, summary.deleted_names), (0, 0), "{kind:?}");
+        assert!(summary.free_bytes > 0);
+        assert!(orphans(&volume).is_none());
+    }
+
+    let mut sample = ExfatImage::new();
+    let root = sample.root();
+    for (index, data) in contents.iter().enumerate() {
+        let placed = sample.add_file(root, &format!("data{index}.bin"), data, Layout::Contiguous);
+        sample.delete(&placed);
+    }
+    let volume = open(sample.finish());
+    let summary = scan(&volume);
+    assert_eq!((summary.orphans, summary.deleted_names), (0, 0));
+    assert!(orphans(&volume).is_none());
+}
+
+#[test]
+fn free_cluster_scan_can_be_cancelled_and_restarted() {
+    let mut sample = FatImage::new(FatType::Fat16);
+    let root = sample.root();
+    let lost = sample.mkdir(root, "Lost");
+    sample.add_file(lost.as_dir(), "a.txt", &pattern(1, 10), Layout::Contiguous);
+    sample.add_file(lost.as_dir(), "b.txt", &pattern(2, 10), Layout::Contiguous);
+    sample.delete(&lost);
+    sample.patch_short_entry(&lost, 11, &[0x20]);
+    sample.patch_short_entry(&lost, 26, &[0, 0]);
+    let volume = open(sample.finish());
+    let cancelled = volume.scan(&mut |_, _| false).unwrap();
+    assert_eq!(cancelled, None);
+    assert!(!volume.is_scanned());
+    assert!(orphans(&volume).is_none());
+    assert_eq!(scan(&volume).orphans, 1);
+    assert_eq!(orphans(&volume).unwrap().len(), 1);
+}
+
+/// 带找不到原目录的文件夹的卷，簇区随机改坏 200 轮：扫描、列目录、读文件都不崩。
+#[test]
+fn mutated_orphan_scans_never_panic() {
+    let fat_sample = |kind| {
+        let mut sample = FatImage::new(kind);
+        let root = sample.root();
+        let lost = sample.mkdir(root, "Lost");
+        let inner = sample.mkdir(lost.as_dir(), "Inner");
+        sample.add_file(
+            inner.as_dir(),
+            "deep.bin",
+            &pattern(1, 3000),
+            Layout::Contiguous,
+        );
+        let gone = sample.add_file(
+            lost.as_dir(),
+            "gone.bin",
+            &pattern(2, 2000),
+            Layout::Fragmented,
+        );
+        sample.delete(&gone);
+        sample.delete(&inner);
+        sample.delete(&lost);
+        sample.patch_short_entry(&lost, 11, &[0x20]);
+        sample.finish()
+    };
+    let mut exfat = ExfatImage::new();
+    let root = exfat.root();
+    let lost = exfat.mkdir(root, "Lost");
+    let inner = exfat.mkdir(lost.as_dir(), "Inner");
+    exfat.add_file(
+        inner.as_dir(),
+        "deep.bin",
+        &pattern(1, 9000),
+        Layout::Fragmented,
+    );
+    let gone = exfat.add_file(
+        lost.as_dir(),
+        "gone.bin",
+        &pattern(2, 5000),
+        Layout::Contiguous,
+    );
+    exfat.delete(&gone);
+    exfat.delete(&inner);
+    exfat.delete(&lost);
+    exfat.patch_entry(&lost, 0, 2, &[0, 0]);
+    let samples = [
+        fat_sample(FatType::Fat12),
+        fat_sample(FatType::Fat32),
+        exfat.finish(),
+    ];
+    let mut noise = Noise::new(23);
+    for round in 0..200 {
+        for (index, base) in samples.iter().enumerate() {
+            // FAT32 样本有 35 MB，每 8 轮改一次，测试才不至于太慢
+            if index == 1 && round % 8 != 0 {
+                continue;
+            }
+            let mut image = base.clone();
+            // 引导扇区之后到前 256 KiB：FAT、根目录与开头的目录簇
+            let hot = 512..image.len().min(256 * 1024);
+            let count = 1 + noise.below(48) as usize;
+            noise.mutate(&mut image[hot], count);
+            let length = image.len() as u64;
+            let Ok(volume) = Volume::open(Arc::new(MemoryDisk::new(image, 512)), 0, length) else {
+                continue;
+            };
+            let mut budget = 2000;
+            walk(&volume, &volume.root(), 0, &mut budget);
         }
     }
 }

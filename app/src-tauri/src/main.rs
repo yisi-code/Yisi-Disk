@@ -93,6 +93,7 @@ fn job_start_carve(
     target: Target,
     output_dir: Option<String>,
     extensions: Vec<String>,
+    keep_incomplete: Option<bool>,
     source_label: Option<String>,
 ) -> Result<(), HostError> {
     engines.start_carve(
@@ -103,6 +104,7 @@ fn job_start_carve(
         target,
         output_dir,
         extensions,
+        keep_incomplete.unwrap_or(false),
         source_label.unwrap_or_default(),
     )
 }

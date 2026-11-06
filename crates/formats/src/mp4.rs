@@ -47,13 +47,21 @@ fn major_brand(block: &[u8]) -> Option<[u8; 4]> {
     plausible.then_some(brand)
 }
 
-fn walker(max_size: u64, profile: Profile, extension: Option<&'static str>) -> Box<dyn Recovering> {
+/// `partial`：截短时保存断点之前的一段（见 [`Mp4Structure::intact`]）。
+fn walker(
+    max_size: u64,
+    profile: Profile,
+    extension: Option<&'static str>,
+    partial: bool,
+) -> Box<dyn Recovering> {
     Box::new(Walker::new(
         max_size,
         Mp4Structure {
             phase: Phase::Header,
             profile,
             extension,
+            partial,
+            substance: false,
             seen_moov: false,
             seen_meta: false,
             seen_mdat: false,
@@ -95,7 +103,7 @@ impl FileFormat for Mp4 {
             _ if brand.starts_with(b"3g") => Some("3gp"),
             _ => None,
         };
-        Some(walker(MP4_INFO.max_size, Profile::Movie, extension))
+        Some(walker(MP4_INFO.max_size, Profile::Movie, extension, true))
     }
 }
 
@@ -125,7 +133,7 @@ impl FileFormat for Heic {
             return None;
         }
         let extension = matches!(&brand, b"avif" | b"avis").then_some("avif");
-        Some(walker(HEIC_INFO.max_size, Profile::Image, extension))
+        Some(walker(HEIC_INFO.max_size, Profile::Image, extension, false))
     }
 }
 
@@ -150,7 +158,8 @@ impl FileFormat for Cr3 {
     }
 
     fn header_check(&self, block: &[u8]) -> Option<Box<dyn Recovering>> {
-        (&major_brand(block)? == CR3_BRAND).then(|| walker(CR3_INFO.max_size, Profile::Movie, None))
+        (&major_brand(block)? == CR3_BRAND)
+            .then(|| walker(CR3_INFO.max_size, Profile::Movie, None, false))
     }
 }
 
@@ -177,6 +186,10 @@ struct Mp4Structure {
     profile: Profile,
     /// 按主品牌定的扩展名。
     extension: Option<&'static str>,
+    /// 截短时保存断点之前的一段（视频与音频；HEIF 图片与 CR3 截短了基本打不开，不做）。
+    partial: bool,
+    /// 读到过长度合理的 moov 或 mdat 的头：ftyp 之后有了真正的内容。
+    substance: bool,
     seen_moov: bool,
     seen_meta: bool,
     seen_mdat: bool,
@@ -208,6 +221,7 @@ impl Mp4Structure {
         let Some(end) = start.checked_add(size) else {
             return Step::Invalid;
         };
+        self.substance |= matches!(kind, b"moov" | b"mdat");
         if kind != b"sidx" {
             self.phase = Phase::Header;
             return Step::Need { at: end, len: 8 };
@@ -258,6 +272,12 @@ impl Structure for Mp4Structure {
 
     fn extension(&self) -> Option<&'static str> {
         self.extension
+    }
+
+    /// 部分恢复：ftyp 之后有了 moov 或 mdat 才保存，到断点为止（之前的顶层 box 都接得上）。
+    /// moov 在前（边下边播的写法）时前半段多半还能播；moov 在最后的，前面只有媒体数据，要靠修复工具。
+    fn intact(&self, cut: u64) -> Option<u64> {
+        (self.partial && self.substance).then_some(cut)
     }
 
     fn step(&mut self, event: Event<'_>) -> Step {

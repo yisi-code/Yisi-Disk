@@ -204,6 +204,7 @@ impl Engines {
         target: Target,
         output_dir: Option<String>,
         extensions: Vec<String>,
+        keep_incomplete: bool,
         source_label: String,
     ) -> Result<(), HostError> {
         // 磁盘编号不合法时不启动引擎
@@ -215,6 +216,7 @@ impl Engines {
             target: target.clone(),
             source_label,
             extensions: extensions.clone(),
+            keep_incomplete,
             output_dir: None,
             status: CarveStatus::Running,
             resume_at: 0,
@@ -242,6 +244,7 @@ impl Engines {
                     extensions: Some(extensions),
                     start_at: 0,
                     continue_dir: None,
+                    keep_incomplete,
                 })
             },
         );
@@ -295,6 +298,7 @@ impl Engines {
                     extensions: Some(record.extensions.clone()),
                     start_at: record.resume_at,
                     continue_dir: record.output_dir.clone(),
+                    keep_incomplete: record.keep_incomplete,
                 })
             },
         );

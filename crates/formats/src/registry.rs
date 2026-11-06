@@ -9,16 +9,19 @@ use crate::mp4::{Cr3, Heic, Mp4};
 use crate::plugin::{FileFormat, Recovering};
 use crate::riff::{AVI, WAV, WEBP};
 use crate::{
-    asf::Asf, bmp::Bmp, cab::Cab, chm::Chm, evtx::Evtx, flv::Flv, gif::Gif, ico::Ico, jpg::Jpg,
-    midi::Midi, mkv::Mkv, mp3::Mp3, ogg::Ogg, ole::Ole, pdf::Pdf, pe::Pe, png::Png, psd::Psd,
-    pst::Pst, raf::Raf, rar::Rar, regf::Regf, sevenzip::SevenZip, sqlite::Sqlite, swf::Swf,
-    tar::Tar, tiff::Tiff, zip::Zip,
+    asf::Asf, bmp::Bmp, cab::Cab, chm::Chm, evtx::Evtx, flac::Flac, flv::Flv, gif::Gif, ico::Ico,
+    iso::Iso, jpg::Jpg, midi::Midi, mkv::Mkv, mp3::Mp3, ogg::Ogg, ole::Ole, pdf::Pdf, pe::Pe,
+    png::Png, psd::Psd, pst::Pst, raf::Raf, rar::Rar, regf::Regf, sevenzip::SevenZip,
+    sqlite::Sqlite, swf::Swf, tar::Tar, tiff::Tiff, zip::Zip,
 };
 
 /// 一块的开头命中了某个格式的文件头。
 pub struct HeaderMatch {
     /// 格式在注册表里的序号。
     pub format: usize,
+    /// 文件从这一块往前多少字节开始（[`FileFormat::lead`]），绝大多数格式是 0。
+    /// [`recovering`](Self::recovering) 要从文件开头起送数据。
+    pub lead: u64,
     pub recovering: Box<dyn Recovering>,
 }
 
@@ -109,6 +112,8 @@ impl Registry {
             Box::new(Chm),
             Box::new(Emf),
             Box::new(Wmf),
+            Box::new(Iso),
+            Box::new(Flac),
         ])
     }
 
@@ -163,6 +168,7 @@ impl Registry {
         let recovering = format.header_check(block)?;
         Some(HeaderMatch {
             format: position,
+            lead: format.lead(),
             recovering,
         })
     }
@@ -258,11 +264,19 @@ mod tests {
             ("chm", samples::chm(2, 10)),
             ("emf", samples::emf(1, 0)),
             ("wmf", samples::wmf(false, 1)),
+            ("flac", samples::flac(&samples::FlacLayout::default())),
+            // ISO 9660 在 32 KiB 处的卷描述符那一块认
+            (
+                "iso",
+                samples::iso(&samples::IsoLayout::default())[32 * 1024..].to_vec(),
+            ),
         ];
         for (extension, sample) in cases {
             let position = registry.position(extension).unwrap();
             let found = registry.match_header(&sample, &all).unwrap();
             assert_eq!(found.format, position, "{extension}");
+            let lead = if extension == "iso" { 32 * 1024 } else { 0 };
+            assert_eq!(found.lead, lead, "{extension}");
 
             let mut without = all.clone();
             without[position] = false;

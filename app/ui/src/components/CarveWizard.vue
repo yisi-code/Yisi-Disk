@@ -37,7 +37,7 @@ import {
   type FoundFile,
   type HostError,
 } from '../services/host'
-import { formatBytes, formatSeconds } from '../utils/format'
+import { formatBytes, formatCount, formatSeconds } from '../utils/format'
 import { joinPath } from '../utils/path'
 
 const STEPS = ['source', 'formats', 'scan'] as const
@@ -96,6 +96,10 @@ const fileTypesError = ref<HostError | null>(null)
 const selectedExtensions = ref<string[]>([])
 /** 高级选项：扫描时就把找到的文件直接保存到 outputDir；默认只扫描、什么都不写 */
 const saveWhileScanning = ref(false)
+/** 部分恢复：不完整的文件也列出来（默认不勾） */
+const keepIncomplete = ref(false)
+/** 发起扫描（或打开的记录）时是否部分恢复：之后回到上一步改选项，不影响正在显示的这次结果 */
+const runKeepsIncomplete = ref(false)
 const isAdvancedOpen = ref(false)
 const outputDir = ref('')
 const { dialogError, pickFolder } = useHostDialog()
@@ -175,6 +179,11 @@ const showsRecord = computed(() => status.value === 'idle' && record.value !== n
 /** 找到的文件一共多大（含续扫之前的） */
 const foundBytes = computed(() => files.value.reduce((sum, file) => sum + file.length, 0))
 
+/** 其中不完整的文件数 */
+const incompleteCount = computed(
+  () => files.value.filter((file) => file.incomplete !== undefined).length,
+)
+
 const canSaveChecked = computed(
   () => runScanOnly.value && checkedFiles.value.length > 0 && canExtract.value,
 )
@@ -213,12 +222,13 @@ const sourceText = computed(() => sourceName(target.value))
 /** 扫描这一步显示的来源：打开的扫描记录用记录里的描述（源可能没接上） */
 const scanSourceText = computed(() => record.value?.sourceLabel ?? sourceText.value)
 
-const selectedTypeNames = computed(() => {
-  const names = fileTypes.value
-    .filter((type) => selectedExtensions.value.includes(type.extension))
-    .map(formatName)
-  return new Intl.ListFormat(locale.value, { type: 'conjunction' }).format(names)
-})
+const selectedTypes = computed(() =>
+  fileTypes.value.filter((type) => selectedExtensions.value.includes(type.extension)),
+)
+const selectedTypeCount = computed(() => selectedTypes.value.length)
+const selectedTypeNames = computed(() =>
+  new Intl.ListFormat(locale.value, { type: 'conjunction' }).format(selectedTypes.value.map(formatName)),
+)
 
 const selectedTypeName = computed(() =>
   selectedFile.value === null ? '' : typeNameOf(selectedFile.value),
@@ -370,6 +380,7 @@ async function openRecord(item: CarveRecord): Promise<boolean> {
     return false
   }
   runScanOnly.value = item.outputDir === null
+  runKeepsIncomplete.value = item.keepIncomplete
   selectedExtensions.value = [...item.extensions]
   selectedFile.value = null
   checkedNames.value = new Set()
@@ -430,6 +441,7 @@ function handleStart() {
   }
   dialogError.value = null
   runScanOnly.value = !saveWhileScanning.value
+  runKeepsIncomplete.value = keepIncomplete.value
   selectedFile.value = null
   checkedNames.value = new Set()
   savedCopies.value = new Map()
@@ -439,6 +451,7 @@ function handleStart() {
     target.value,
     runScanOnly.value ? null : trimmedOutputDir.value,
     [...selectedExtensions.value],
+    runKeepsIncomplete.value,
     sourceText.value,
   )
 }
@@ -566,6 +579,7 @@ async function saveFiles(
     length: file.length,
     extension: file.extension,
     ...(name === undefined ? {} : { name }),
+    ...(file.incomplete === undefined ? {} : { incomplete: file.incomplete }),
   }))
   saveKind.value = kind
   if (kind === 'openCopy') {
@@ -766,6 +780,14 @@ function handleAdvancedToggle(event: Event) {
           <p class="wizard__hint">{{ t('carve.formats.hint') }}</p>
         </template>
 
+        <div class="carve-wizard__incomplete">
+          <label class="carve-wizard__option">
+            <input v-model="keepIncomplete" type="checkbox" aria-describedby="carve-incomplete-hint" />
+            {{ t('carve.formats.keepIncomplete') }}
+          </label>
+          <p id="carve-incomplete-hint" class="wizard__hint">{{ t('carve.formats.keepIncompleteHint') }}</p>
+        </div>
+
         <details class="carve-wizard__advanced" :open="isAdvancedOpen" @toggle="handleAdvancedToggle">
           <summary class="carve-wizard__advanced-summary">
             {{ t('carve.formats.advanced') }}
@@ -811,14 +833,30 @@ function handleAdvancedToggle(event: Event) {
       </div>
 
       <div v-else class="wizard__panel wizard__fill">
-        <dl class="wizard__details">
-          <dt>{{ t('common.source') }}</dt>
-          <dd class="wizard__path-text">{{ scanSourceText }}</dd>
-          <dt>{{ t('carve.run.formats') }}</dt>
-          <dd>{{ selectedTypeNames }}</dd>
-          <dt>{{ t('carve.run.output') }}</dt>
-          <dd v-if="runScanOnly">{{ t('carve.run.outputAfterScan') }}</dd>
-          <dd v-else class="wizard__path-text">{{ record?.outputDir ?? trimmedOutputDir }}</dd>
+        <dl class="wizard__details wizard__details--inline">
+          <div>
+            <dt>{{ t('common.source') }}</dt>
+            <dd class="wizard__path-text">{{ scanSourceText }}</dd>
+          </div>
+          <div>
+            <dt>{{ t('carve.run.formats') }}</dt>
+            <dd>
+              <!-- 选的格式常有几十种，全列出来要占好几行：只写个数，点开看全部 -->
+              <details class="carve-wizard__formats">
+                <summary>{{ t('carve.run.formatCount', { count: selectedTypeCount }, selectedTypeCount) }}</summary>
+                {{ selectedTypeNames }}
+              </details>
+            </dd>
+          </div>
+          <div>
+            <dt>{{ t('carve.run.output') }}</dt>
+            <dd v-if="runScanOnly">{{ t('carve.run.outputAfterScan') }}</dd>
+            <dd v-else class="wizard__path-text">{{ record?.outputDir ?? trimmedOutputDir }}</dd>
+          </div>
+          <div>
+            <dt>{{ t('carve.run.incomplete') }}</dt>
+            <dd>{{ runKeepsIncomplete ? t('carve.run.incompleteOn') : t('carve.run.incompleteOff') }}</dd>
+          </div>
         </dl>
 
         <div v-if="status !== 'idle' || record !== null" class="wizard__job wizard__fill" aria-live="polite">
@@ -851,6 +889,10 @@ function handleAdvancedToggle(event: Event) {
                     }, foundCount)
                   }}
                 </dd>
+              </div>
+              <div v-if="incompleteCount > 0" class="carve-wizard__report-item">
+                <dt>{{ t('carve.run.report.incomplete') }}</dt>
+                <dd>{{ formatCount(incompleteCount, locale) }}</dd>
               </div>
               <div class="carve-wizard__report-item">
                 <dt>{{ t('carve.run.report.unreadable') }}</dt>
@@ -993,6 +1035,12 @@ function handleAdvancedToggle(event: Event) {
   margin-top: var(--space-sm);
 }
 
+.carve-wizard__incomplete {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
 .carve-wizard__option {
   display: flex;
   align-items: center;
@@ -1025,6 +1073,10 @@ function handleAdvancedToggle(event: Event) {
 
 /* 文件列表与文件详情两栏，都分标题、主体、底部三行：标题、列表框与详情框、提示各自对齐。
    右栏略宽，十六进制预览的 ASCII 列在 1200px 宽的窗口里不用横向滚动 */
+.carve-wizard__formats summary {
+  cursor: pointer;
+}
+
 .carve-wizard__files {
   display: grid;
   grid-template-columns: minmax(0, 9fr) minmax(0, 11fr);

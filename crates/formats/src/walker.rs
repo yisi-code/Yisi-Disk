@@ -61,6 +61,19 @@ pub(crate) trait Structure: Send {
     fn extension(&self) -> Option<&'static str> {
         None
     }
+
+    /// 部分恢复（见 [`Recovering::intact`]）：文件在 `cut` 处断了，之前的数据都与结构对得上，给出要保存的长度；
+    /// 默认说不出（`None`）。`cut` 由遍历器给出：结构对不上时是那一步的位置，正在等的一步只收到一部分时是那一步的开头，
+    /// 其余（跳过大段数据、查找、已知结尾）是数据断开的位置。插件也可以给出自己记着的、更靠前的位置
+    /// （例如最后一个核对过的帧的结尾）。
+    fn intact(&self, _cut: u64) -> Option<u64> {
+        None
+    }
+
+    /// 数据到此为止，正在等的一步只收到了一部分：从 `at` 起的 `bytes`（不足要的长度）。
+    /// 按固定大小一段段要数据、自己在里面找边界的格式（FLAC 的帧）用它把最后这一段也看完，之后才问
+    /// [`finish`](Self::finish) 与 [`intact`](Self::intact)。默认什么也不做。
+    fn short(&mut self, _at: u64, _bytes: &[u8]) {}
 }
 
 enum Mode {
@@ -78,6 +91,10 @@ enum Mode {
     },
     Done(u64),
     Invalid,
+    /// 数据在等 `at` 起的一步时用完了，收到的那一部分已经交给 [`Structure::short`]。
+    Short {
+        at: u64,
+    },
 }
 
 pub(crate) struct Walker<S> {
@@ -148,7 +165,7 @@ impl<S: Structure> Walker<S> {
         loop {
             let step = match &mut self.mode {
                 Mode::Done(length) => return DataCheck::Complete(*length),
-                Mode::Invalid => return DataCheck::Invalid,
+                Mode::Invalid | Mode::Short { .. } => return DataCheck::Invalid,
                 Mode::Need { at, len, buffer } => {
                     if buffer.len() < *len {
                         let next = *at + buffer.len() as u64;
@@ -218,6 +235,33 @@ impl<S: Structure> Walker<S> {
     }
 }
 
+impl<S: Structure> Walker<S> {
+    /// 数据用完时，正在等的一步收到的那一部分交给插件看（[`Structure::short`]），只交一次。
+    fn flush_short(&mut self) {
+        let Mode::Need { at, buffer, .. } = &mut self.mode else {
+            return;
+        };
+        if buffer.is_empty() {
+            return;
+        }
+        let (at, bytes) = (*at, std::mem::take(buffer));
+        self.mode = Mode::Short { at };
+        self.structure.short(at, &bytes);
+    }
+
+    /// 部分恢复的断点（见 [`Structure::intact`]），不超过 `received`。
+    fn cut(&self, received: u64) -> u64 {
+        let cut = match &self.mode {
+            // 最后一步的位置：那一步读到的东西对不上，或它要的下一步不合理
+            Mode::Invalid => self.cursor,
+            Mode::Need { at, buffer, .. } if !buffer.is_empty() => *at,
+            Mode::Short { at } => *at,
+            Mode::Need { .. } | Mode::Scan { .. } | Mode::Done(_) => received,
+        };
+        cut.min(received)
+    }
+}
+
 impl<S: Structure> Recovering for Walker<S> {
     fn data_check(&mut self, offset: u64, block: &[u8]) -> DataCheck {
         self.feed(offset, block)
@@ -228,6 +272,7 @@ impl<S: Structure> Recovering for Walker<S> {
     }
 
     fn finish(&mut self, received: u64) -> Option<u64> {
+        self.flush_short();
         let waiting_at = match &self.mode {
             Mode::Done(length) => return (*length <= received).then_some(*length),
             Mode::Need { at, buffer, .. } if buffer.is_empty() => Some(*at),
@@ -242,12 +287,20 @@ impl<S: Structure> Recovering for Walker<S> {
         match &self.mode {
             Mode::Need { at, buffer, .. } => at.checked_add(buffer.len() as u64),
             Mode::Done(length) => Some(*length),
-            Mode::Scan { .. } | Mode::Invalid => None,
+            Mode::Scan { .. } | Mode::Invalid | Mode::Short { .. } => None,
         }
     }
 
     fn extension(&self) -> Option<&'static str> {
         self.structure.extension()
+    }
+
+    fn intact(&mut self, received: u64) -> Option<u64> {
+        self.flush_short();
+        let cut = self.cut(received);
+        self.structure
+            .intact(cut)
+            .filter(|&length| length > 0 && length <= received)
     }
 }
 
@@ -291,6 +344,8 @@ impl<T> ReadQueue<T> {
 pub(crate) struct KnownLength {
     length: u64,
     extension: Option<&'static str>,
+    /// 部分恢复：断点在这之后（文件头之后真正的内容开始了）才保存前面那一段；`None` 不做部分恢复。
+    intact_after: Option<u64>,
 }
 
 impl KnownLength {
@@ -298,12 +353,22 @@ impl KnownLength {
         Self {
             length,
             extension: None,
+            intact_after: None,
         }
     }
 
     /// 见 [`Recovering::extension`]。
     pub(crate) fn with_extension(self, extension: Option<&'static str>) -> Self {
         Self { extension, ..self }
+    }
+
+    /// 截短时保存断点之前的一段（见 [`Recovering::intact`]），断点要在 `after` 之后：
+    /// 文件头核对过、断点之前又有了真正的内容（例如位图的像素、音频的采样）。内容本身核对不了，与完整时一样。
+    pub(crate) fn intact_after(self, after: u64) -> Self {
+        Self {
+            intact_after: Some(after),
+            ..self
+        }
     }
 }
 
@@ -318,6 +383,10 @@ impl Structure for KnownLength {
 
     fn extension(&self) -> Option<&'static str> {
         self.extension
+    }
+
+    fn intact(&self, cut: u64) -> Option<u64> {
+        self.intact_after.filter(|&after| cut > after).map(|_| cut)
     }
 }
 
@@ -405,6 +474,45 @@ pub(crate) mod tests {
             offset += block.len() as u64;
         }
         recovering.finish(data.len() as u64)
+    }
+
+    /// 按块送入数据，文件不完整时再问部分恢复（同深度恢复：结构对不上时这一块已经交给插件看过；
+    /// 给出的结尾超出数据末尾时取到末尾）。完整或说不出可靠的一段时返回 `None`。
+    pub(crate) fn run_intact(
+        mut recovering: Box<dyn Recovering>,
+        data: &[u8],
+        block_size: usize,
+    ) -> Option<u64> {
+        let mut offset = 0u64;
+        for block in data.chunks(block_size) {
+            match recovering.data_check(offset, block) {
+                DataCheck::Continue => {}
+                DataCheck::Complete(length) if length <= data.len() as u64 => return None,
+                DataCheck::Complete(_) => return recovering.intact(data.len() as u64),
+                DataCheck::Invalid => return recovering.intact(offset + block.len() as u64),
+            }
+            offset += block.len() as u64;
+        }
+        if recovering.finish(data.len() as u64).is_some() {
+            return None;
+        }
+        recovering.intact(data.len() as u64)
+    }
+
+    /// 同 [`check_all_splits`]，看的是部分恢复给出的长度。
+    pub(crate) fn check_intact_splits(
+        make: impl Fn() -> Box<dyn Recovering>,
+        data: &[u8],
+        expected: Option<u64>,
+    ) {
+        let block_sizes = (1..=40).chain([64, 100, 511, 512, 4096, data.len().max(1)]);
+        for block_size in block_sizes {
+            assert_eq!(
+                run_intact(make(), data, block_size),
+                expected,
+                "块大小 {block_size}"
+            );
+        }
     }
 
     /// 测试用结构：头 4 字节是大端长度 n，随后 n 字节，再找一个 "END"，文件到 "END" 为止。

@@ -60,6 +60,7 @@ fn writes_recovered_files_with_sector_based_names() {
         block_size: device.sector_size(),
         enabled: vec![true; registry.formats().len()],
         start: 0,
+        keep_incomplete: false,
     };
     let output = tmp.join("recovered");
     let mut sink = DirectorySink::new(&output).unwrap();
@@ -98,4 +99,47 @@ fn writes_recovered_files_with_sector_based_names() {
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "part"))
         .collect();
     assert!(leftovers.is_empty());
+}
+
+/// 部分恢复：在设备末尾断了的 JPEG 存成 `f….incomplete.jpg`，内容是断点之前的一段。
+#[test]
+fn incomplete_files_are_named_apart_from_complete_ones() {
+    let tmp = Path::new(env!("CARGO_TARGET_TMPDIR")).join("carve-directory-sink-incomplete");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+
+    let jpg = samples::jpg(6000);
+    let mut image = vec![0u8; 1024];
+    image.extend_from_slice(&jpg[..4000]);
+    let image_path = tmp.join("disk.img");
+    fs::write(&image_path, &image).unwrap();
+
+    let device = RawImage::open(&image_path, 512).unwrap();
+    let registry = Registry::builtin();
+    let output = tmp.join("recovered");
+    for keep_incomplete in [false, true] {
+        let options = CarveOptions {
+            block_size: device.sector_size(),
+            enabled: vec![true; registry.formats().len()],
+            start: 0,
+            keep_incomplete,
+        };
+        let mut sink = DirectorySink::new(&output).unwrap();
+        let control = Quiet {
+            found: Cell::new(0),
+        };
+        let report = carve(&device, &registry, &options, &mut sink, &control)
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.incomplete, u64::from(keep_incomplete));
+    }
+    let names: Vec<_> = fs::read_dir(&output)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(names, ["f0000000002.incomplete.jpg"]);
+    assert_eq!(
+        fs::read(output.join("f0000000002.incomplete.jpg")).unwrap(),
+        jpg[..4000]
+    );
 }

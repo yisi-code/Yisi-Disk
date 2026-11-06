@@ -1,6 +1,7 @@
 //! 复制任务：把分区里选中的文件与目录（连同其中全部内容）复制到输出目录，保留相对路径。
 //! 源只读；单个文件读不出时记为失败、继续下一个，写输出出错（例如输出盘满）时整个任务失败。
-//! NTFS 分区上选了目录时，先扫一遍 MFT，目录里已删除的项才能一起复制。
+//! NTFS 分区上选了目录时，先扫一遍 MFT，目录里已删除的项才能一起复制；选了「找不到原目录的文件」这个虚拟目录时，
+//! FAT / exFAT 也先扫一遍空闲簇。
 //! 复制出的文件带上卷上记的修改时间（目录不带：往里写文件时系统会改它）。
 
 use std::collections::HashSet;
@@ -13,7 +14,7 @@ use yisi_carve::{PARTIAL_SUFFIX, partial_path, rename_new};
 use yisi_engine::protocol::{COPIED, CopiedFile, CopySummary, JobCopied};
 use yisi_fs::{FileRef, Moment, Stamp, Volume};
 
-use crate::browse::STAGE_SCAN_MFT;
+use crate::browse::scan_stage;
 use crate::job::{Batcher, JobContext, JobOutcome};
 use crate::runtime::error_chain;
 
@@ -40,13 +41,18 @@ pub fn run(
     let reporter = Reporter::new(context);
     let mut failed = 0u64;
 
-    if volume.needs_scan() && items.iter().any(|item| item.file.is_dir) {
+    // NTFS 目录里的已删除项要扫过 MFT 才列得出；「找不到原目录的文件」这个虚拟目录要扫过才有内容
+    // （FAT / exFAT 要读一遍空闲簇；里面的各个文件夹本身不靠扫描，直接打得开）
+    let scan_first = (volume.needs_scan() && items.iter().any(|item| item.file.is_dir))
+        || (!volume.is_scanned() && items.iter().any(|item| item.file.is_orphans()));
+    if scan_first {
+        let stage = scan_stage(volume);
         let scanned = volume
             .scan(&mut |done, total| {
-                context.stage_progress(STAGE_SCAN_MFT, done, total);
+                context.stage_progress(stage, done, total);
                 !context.is_cancelled()
             })
-            .map_err(|error| format!("扫描主文件表（MFT）失败：{}", error_chain(&error)))?;
+            .map_err(|error| format!("扫描已删除的项失败：{}", error_chain(&error)))?;
         if scanned.is_none() {
             return Ok(JobOutcome::Cancelled);
         }
