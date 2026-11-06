@@ -975,8 +975,10 @@ FAT、exFAT 依据微软公开的规范实现；NTFS 没有官方规范，依据
 - 程序内更新（`update.rs`）：只在用户点「检查新版本」「下载并更新」时联网，不自动检查、不在后台下载。
   - 发布：Release 里有压缩包 `yisi-disk-tools-v<版本>-windows-x64.zip`（GitHub 的资产名不能带中文）和签名清单 `.zip.sig`。清单是几行文本（格式行、版本、文件名、大小、SHA256），最后一行是 ECDSA P-256 / SHA-256 签名（r、s 各 32 字节的十六进制），签名覆盖它之前的全部字节。私钥只在发版的机器上，程序里内置公钥（`PUBLIC_KEY`）。
   - 安装：问 `releases/latest` → 下载清单，签名对、文件名与版本与发布一致、版本比当前新才继续（防止把旧的已签名版本当新版本发来）→ 下载压缩包，大小与 SHA256 必须与清单一致，GitHub 给的摘要也要一致 → 解压，只收顶层文件夹 `yisi-磁盘工具-v<版本>-windows-x64` 下的六个已知文件（三个程序必须有；本地头与中央目录的名字必须相同；核对 CRC-32），别的名字、子目录、`..` 一律拒绝 → 写到 `data/update/v<版本>` → 程序文件逐个改名为 `.old`（运行中的程序也能改名）再换上新的，任何一步失败都改回去。有任务在运行时（`Engines::is_busy`）不更新。
+  - 进度：宿主发 `update-progress` 事件（`UpdateProgress`），界面分两行显示：① 下载新版本（字节数，约每 1% 一次；总量取签名清单里的大小）、② 安装新版本（`verify` 核对签名与摘要 → `extract` 解压 n 个文件 → `replace` 换上 n 个文件，进度条按 1 + 2n 件算）；① 完成才进入 ②，完成的一步打勾，失败时停在哪一步看得出来。
   - 重启：宿主启动新的程序文件，带上 `--after-update <旧进程 PID>` 后退出；新进程先等旧进程退出（最多 30 秒，两个进程不能同时占着 WebView2 的数据目录），再建窗口；每次启动都删掉 `.old` 与 `data/update`。`data` 里的记录不动。
-  - 下载只认 `https://github.com/yisi-code/Yisi-Disk/releases/download/` 下的地址；环境变量 `YISI_UPDATE_API` 设为 `http://127.0.0.1:<端口>/…` 时改问本机的假发布源（走查用），资产也只认同一个源，签名照样核对。
+  - 发布源有两个：GitHub 与它在 Gitee 上的镜像（`gitee.com/yisi-code/yisi-disk`，有些地区连 GitHub 很慢），两边发一样的压缩包与 `.sig`。检查与安装时同时问两边的 `releases/latest`（并行、各自计时）：取最新的版本，同一版本按答复快慢排先后，一个源连不上不影响另一个；都失败时两边的原因一起报。下载从排第一的源开始，满 8 秒后按平均速度估计剩下的超过 60 秒、或 15 秒一个字节都没收到，且还有别的源，就中止换下一个（`too_slow`）；某个源出错（网络、签名、内容不符）也换下一个，报错时「太慢」让位于后面那个源的具体错误。两边下来的都过同一套签名核对，镜像伪造不了。进度里带着源（`source`），界面显示「来自 GitHub / Gitee」；「打开下载页」打开排第一的源的发布页（`releases_page`，网址写死）。
+  - 资产只认各源自己前缀下的地址（`https://github.com/yisi-code/Yisi-Disk/releases/download/`、`https://gitee.com/yisi-code/yisi-disk/releases/download/`）。环境变量 `YISI_UPDATE_API` 设为 `http://127.0.0.1:<端口>/…`（可以逗号分隔写几个，走查换源用）时只问这些本机假源，资产也只认各自同一个源，签名照样核对。
   - 系统调用（WinHTTP、CNG、等进程）在 `yisi_io` 里，宿主保持 `forbid(unsafe_code)`。
 
 ---
