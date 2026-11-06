@@ -61,6 +61,7 @@ fn writes_recovered_files_with_sector_based_names() {
         enabled: vec![true; registry.formats().len()],
         start: 0,
         keep_incomplete: false,
+        join_fragments: false,
     };
     let output = tmp.join("recovered");
     let mut sink = DirectorySink::new(&output).unwrap();
@@ -123,6 +124,7 @@ fn incomplete_files_are_named_apart_from_complete_ones() {
             enabled: vec![true; registry.formats().len()],
             start: 0,
             keep_incomplete,
+            join_fragments: false,
         };
         let mut sink = DirectorySink::new(&output).unwrap();
         let control = Quiet {

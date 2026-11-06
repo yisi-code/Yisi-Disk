@@ -1,6 +1,6 @@
 //! 启动真实的引擎进程，按宿主的方式收发 JSON-RPC。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
@@ -963,6 +963,103 @@ fn scan_only_reports_incomplete_files_and_saves_them() {
     );
     let content = std::fs::read(output.join("f0000000002.incomplete.wav")).unwrap();
     assert!(content[..] == image[1024..zip_at]);
+    assert!(saver.wait_exit().success());
+}
+
+/// 两段重组：照片分成两段存放。不给 `joinFragments`（旧界面）时照原来的规则不输出；打开时拼成完整的文件，
+/// 带着两段的位置；另存与预览按两段接起来读。
+#[test]
+fn joined_fragments_are_reported_saved_and_previewed() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-join-fragments");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let jpeg = samples::jpg_baseline(&samples::JpegLayout::default());
+    let cut = jpeg.len() / 2 / 4096 * 4096;
+    let mut noise = samples::Noise::new(3);
+    let mut image = vec![0x20u8; 4096];
+    image.extend_from_slice(&jpeg[..cut]);
+    image.extend(noise.bytes(4096 * 3));
+    let second_at = image.len();
+    image.extend_from_slice(&jpeg[cut..]);
+    image.resize(image.len().div_ceil(512) * 512 + 4096, 0x20);
+    let image_path = dir.join("disk.img");
+    std::fs::write(&image_path, &image).unwrap();
+    let source = json!({"type": "image", "path": image_path, "sectorSize": 512});
+
+    let scan = |job_id: &str, join: Option<bool>| {
+        let mut engine = Engine::start();
+        let mut params = json!({"jobId": job_id, "source": source});
+        if let Some(join) = join {
+            params["joinFragments"] = json!(join);
+        }
+        engine.call(CARVE_START, params).unwrap();
+        let found: Vec<FoundFile> = engine
+            .notifications_until(COMPLETED)
+            .iter()
+            .filter(|(method, _)| method == FOUND)
+            .flat_map(|(_, params)| {
+                serde_json::from_value::<Vec<FoundFile>>(params["files"].clone()).unwrap()
+            })
+            .collect();
+        assert!(engine.wait_exit().success());
+        found
+    };
+
+    assert!(scan("join-old-abcdef", None).is_empty());
+    assert!(scan("join-off-abcdef", Some(false)).is_empty());
+    let found = scan("join-on-abcdef", Some(true));
+    assert_eq!(found.len(), 1);
+    let photo = &found[0];
+    assert_eq!((photo.offset, photo.length), (4096, jpeg.len() as u64));
+    assert!(photo.incomplete.is_none());
+    let fragments = serde_json::to_value(&photo.fragments).unwrap();
+    assert_eq!(
+        fragments,
+        json!([
+            {"offset": 4096, "length": cut},
+            {"offset": second_at, "length": jpeg.len() - cut},
+        ])
+    );
+
+    let mut previewer = Engine::start();
+    let preview: FilePreview = serde_json::from_value(
+        previewer
+            .call(
+                PREVIEW_RANGE,
+                json!({"source": source, "offset": photo.offset, "length": photo.length,
+                       "fragments": fragments}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(preview.length, jpeg.len() as u64);
+    drop(previewer);
+
+    let output = dir.join("saved");
+    let mut saver = Engine::start();
+    saver
+        .call(
+            CARVE_EXTRACT,
+            json!({"jobId": "save-joined", "source": source, "outputDir": output, "items": [
+                {"offset": photo.offset, "length": photo.length, "extension": "jpg",
+                 "fragments": fragments},
+                // 不带两段的位置：源上从起点起连着的那一段不是这个文件
+                {"offset": photo.offset, "length": photo.length, "extension": "jpg"},
+            ]}),
+        )
+        .unwrap();
+    let saved: Vec<CopiedFile> = saver
+        .notifications_until(COMPLETED)
+        .iter()
+        .filter(|(method, _)| method == COPIED)
+        .flat_map(|(_, params)| {
+            serde_json::from_value::<Vec<CopiedFile>>(params["files"].clone()).unwrap()
+        })
+        .collect();
+    let outcome: Vec<_> = saved.iter().map(|file| file.error.is_none()).collect();
+    assert_eq!(outcome, [true, false]);
+    assert!(std::fs::read(output.join(&saved[0].path)).unwrap() == jpeg);
     assert!(saver.wait_exit().success());
 }
 
@@ -2988,4 +3085,299 @@ fn fat_orphaned_folders_are_scanned_listed_and_copied() {
         photo
     );
     assert!(copier.wait_exit().success());
+}
+
+/// 把 raw 镜像按 `layout` 拼成 E01（第一段是 `first`，后续段在同目录），返回各段的路径。
+fn raw_to_e01(raw: &Path, first: &Path, layout: &yisi_io::samples::EwfLayout) -> Vec<PathBuf> {
+    let data = std::fs::read(raw).unwrap();
+    yisi_io::samples::ewf_sample(&data, layout).write(first)
+}
+
+/// 另起一个引擎浏览 `source`：分区表，以及每个能浏览的分区根目录的全部项（JSON 原样）。
+fn browse_snapshot(source: &Value, job_id: &str) -> (Value, Vec<Value>) {
+    let mut engine = Engine::start();
+    let opened = engine
+        .call(BROWSE_OPEN, json!({"jobId": job_id, "source": source}))
+        .unwrap();
+    let parsed: BrowseOpened = serde_json::from_value(opened.clone()).unwrap();
+    let roots = parsed
+        .partitions
+        .iter()
+        .filter(|partition| partition.browsable)
+        .map(|partition| {
+            engine
+                .call(
+                    LIST_FILES,
+                    json!({"jobId": job_id, "partition": partition.number, "offset": 0, "limit": 1000}),
+                )
+                .unwrap()
+        })
+        .collect();
+    engine.call(CANCEL, json!({"jobId": job_id})).unwrap();
+    engine.notifications_until(CANCELLED);
+    assert!(engine.wait_exit().success());
+    (opened, roots)
+}
+
+/// 另起一个引擎把 `items`（定位信息与名字）从 `partition` 复制到 `dir` 下，返回各文件的内容（按名字）。
+fn copy_out(
+    source: &Value,
+    partition: &yisi_engine::protocol::PartitionInfo,
+    items: &[(String, String)],
+    dir: &Path,
+    job_id: &str,
+) -> Vec<(String, Vec<u8>)> {
+    let mut copier = Engine::start();
+    let started = copier
+        .call(
+            COPY_FILES,
+            json!({"jobId": job_id, "source": source, "outputDir": dir,
+                   "partition": {"number": partition.number, "offset": partition.offset, "length": partition.length},
+                   "items": items.iter().map(|(file, name)| json!({"file": file, "path": [name]})).collect::<Vec<_>>()}),
+        )
+        .unwrap();
+    let output = PathBuf::from(started["outputDir"].as_str().unwrap());
+    let notifications = copier.notifications_until(COMPLETED);
+    let summary: CopySummary =
+        serde_json::from_value(notifications.last().unwrap().1["result"].clone()).unwrap();
+    assert_eq!((summary.files, summary.failed), (items.len() as u64, 0));
+    assert!(copier.wait_exit().success());
+    items
+        .iter()
+        .map(|(_, name)| (name.clone(), std::fs::read(output.join(name)).unwrap()))
+        .collect()
+}
+
+#[test]
+fn an_e01_source_reads_like_the_raw_image_it_came_from() {
+    use yisi_engine::protocol::{DIAGNOSE_BOOT, PLAN_BOOT_SECTOR};
+    use yisi_io::samples::EwfLayout;
+
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-e01");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (raw, photo, _) = browse_image(&dir);
+    // 每段 40 块（1.25 MiB），压缩块与未压缩块混着放，最后一块不满
+    let layout = EwfLayout {
+        chunks_per_segment: 40,
+        chunks_per_table: 16,
+        ..EwfLayout::default()
+    };
+    let segments = raw_to_e01(Path::new(&raw), &dir.join("browse.E01"), &layout);
+    assert!(segments.len() > 2, "{}", segments.len());
+    let raw_source = json!({"type": "image", "path": raw, "sectorSize": 512});
+    // 宿主按坏区图给的扇区大小对 E01 不起作用：E01 自己记着 512
+    let e01_source = json!({"type": "image", "path": segments[0], "sectorSize": 4096});
+
+    // 打开分区、列根目录：与 raw 镜像完全一致
+    let (raw_opened, raw_roots) = browse_snapshot(&raw_source, "b-raw");
+    let (e01_opened, e01_roots) = browse_snapshot(&e01_source, "b-e01");
+    assert_eq!(e01_opened, raw_opened);
+    assert_eq!(e01_roots, raw_roots);
+    let opened: BrowseOpened = serde_json::from_value(e01_opened).unwrap();
+    assert_eq!(opened.sector_size, 512);
+
+    // 复制一个文件夹里的照片：先按 E01 列出 Photos，再复制
+    let mut engine = Engine::start();
+    engine
+        .call(
+            BROWSE_OPEN,
+            json!({"jobId": "b-list", "source": e01_source}),
+        )
+        .unwrap();
+    let root: FileListPage = serde_json::from_value(e01_roots[0].clone()).unwrap();
+    let photos = root
+        .entries
+        .iter()
+        .find(|entry| entry.name == "Photos")
+        .unwrap();
+    let inside: FileListPage = serde_json::from_value(
+        engine
+            .call(
+                LIST_FILES,
+                json!({"jobId": "b-list", "partition": 1, "dir": photos.file, "offset": 0, "limit": 10}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    engine.call(CANCEL, json!({"jobId": "b-list"})).unwrap();
+    engine.notifications_until(CANCELLED);
+    assert!(engine.wait_exit().success());
+    let jpg = &inside.entries[0];
+    let copied = copy_out(
+        &e01_source,
+        &opened.partitions[0],
+        &[(jpg.file.clone(), jpg.name.clone())],
+        &dir,
+        "copy-e01",
+    );
+    assert_eq!(copied, [("海边.jpg".to_owned(), photo)]);
+
+    // 诊断引导扇区：结论相同；E01 不能生成写入计划
+    let mut engine = Engine::start();
+    let raw_diagnosis = engine
+        .call(DIAGNOSE_BOOT, json!({"source": raw_source}))
+        .unwrap();
+    let e01_diagnosis = engine
+        .call(DIAGNOSE_BOOT, json!({"source": e01_source}))
+        .unwrap();
+    assert_eq!(e01_diagnosis, raw_diagnosis);
+    let refused = engine
+        .call(
+            PLAN_BOOT_SECTOR,
+            json!({"source": e01_source, "partition": 1, "fix": "primaryFromBackup"}),
+        )
+        .unwrap_err();
+    assert_eq!(refused.code, rpc_error::INVALID_PARAMS);
+    assert!(refused.message.contains("E01"), "{}", refused.message);
+    engine.close_input();
+    assert!(engine.wait_exit().success());
+
+    // 以 E01 为源制作镜像：做出的 raw 镜像与原来的逐字节相同；不能写到 E01 的任何一段上
+    let mut imager = Engine::start();
+    let refused = imager
+        .call(
+            IMAGE_CREATE,
+            json!({"jobId": "image-e01-self", "source": e01_source, "imagePath": segments[1]}),
+        )
+        .unwrap_err();
+    assert_eq!(refused.code, rpc_error::INVALID_PARAMS);
+    let image_path = dir.join("from-e01.img");
+    imager
+        .call(
+            IMAGE_CREATE,
+            json!({"jobId": "image-e01", "source": e01_source, "imagePath": image_path}),
+        )
+        .unwrap();
+    let summary = image_summary(&imager.notifications_until(COMPLETED));
+    assert_eq!(summary.bad_bytes, 0);
+    assert!(imager.wait_exit().success());
+    assert_eq!(
+        std::fs::read(&image_path).unwrap(),
+        std::fs::read(&raw).unwrap()
+    );
+}
+
+#[test]
+fn damaged_e01_chunks_show_up_as_unreadable_in_the_read_scan() {
+    use yisi_io::samples::{EwfLayout, ewf_sample};
+
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-e01-scan");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let data: Vec<u8> = (0..3 * 1024 * 1024u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+        .collect();
+    let mut sample = ewf_sample(
+        &data,
+        &EwfLayout {
+            chunks_per_segment: 30,
+            ..EwfLayout::default()
+        },
+    );
+    // 第 40 块（1.25 MiB 处）未压缩：改坏它的校验和
+    let chunk = sample.chunks[40];
+    assert!(!chunk.compressed);
+    sample.segments[chunk.segment][(chunk.offset + chunk.length - 1) as usize] ^= 0xFF;
+    let paths = sample.write(&dir.join("scan.E01"));
+
+    let mut engine = Engine::start();
+    engine
+        .call(
+            READ_SCAN,
+            json!({"jobId": "scan-e01", "source": {"type": "image", "path": paths[0], "sectorSize": 512}}),
+        )
+        .unwrap();
+    let notifications = engine.notifications_until(COMPLETED);
+    let report: ReadScanReport =
+        serde_json::from_value(notifications.last().unwrap().1["result"].clone()).unwrap();
+    assert_eq!(report.size, data.len() as u64);
+    assert!(report.unreadable_bytes > 0);
+    let bad_start = 40 * 32 * 1024;
+    assert!(
+        report
+            .unreadable
+            .iter()
+            .all(|range| range.offset <= bad_start && bad_start < range.offset + range.length),
+        "{:?}",
+        report.unreadable
+    );
+    assert!(engine.wait_exit().success());
+}
+
+/// 真实文件系统镜像（Windows 自己格式化、写入的 mbr-fat.vhd）转成 E01 后，打开分区、列根目录、复制根目录下的文件，
+/// 结果与直接读 VHD 相同。手动运行（PowerShell）：
+/// `$env:YISI_FS_TEST_IMAGES = '<镜像目录>'; cargo test -p yisi-engine --test protocol -- --ignored --nocapture e01`
+#[test]
+#[ignore = "需要 make-test-images.ps1 生成的 mbr-fat.vhd，并设置 YISI_FS_TEST_IMAGES"]
+fn a_real_fat_image_converted_to_e01_browses_and_copies_the_same() {
+    use yisi_io::samples::EwfLayout;
+
+    let images = std::env::var("YISI_FS_TEST_IMAGES").expect("设置 YISI_FS_TEST_IMAGES 为镜像目录");
+    let vhd = Path::new(&images).join("mbr-fat.vhd");
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("engine-e01-real");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let started = Instant::now();
+    // 每段 2048 块（64 MiB）
+    let layout = EwfLayout {
+        chunks_per_segment: 2048,
+        ..EwfLayout::default()
+    };
+    let segments = raw_to_e01(&vhd, &dir.join("mbr-fat.E01"), &layout);
+    let e01_bytes: u64 = segments
+        .iter()
+        .map(|path| std::fs::metadata(path).unwrap().len())
+        .sum();
+    println!(
+        "转成 E01：{} 段，共 {e01_bytes} 字节（VHD {} 字节），用时 {:?}",
+        segments.len(),
+        std::fs::metadata(&vhd).unwrap().len(),
+        started.elapsed()
+    );
+    let raw_source = json!({"type": "image", "path": vhd, "sectorSize": 512});
+    let e01_source = json!({"type": "image", "path": segments[0], "sectorSize": 512});
+
+    let (raw_opened, raw_roots) = browse_snapshot(&raw_source, "real-raw");
+    let (e01_opened, e01_roots) = browse_snapshot(&e01_source, "real-e01");
+    assert_eq!(e01_opened, raw_opened);
+    assert_eq!(e01_roots, raw_roots);
+    let opened: BrowseOpened = serde_json::from_value(e01_opened).unwrap();
+    let browsable: Vec<_> = opened
+        .partitions
+        .iter()
+        .filter(|partition| partition.browsable)
+        .collect();
+    assert!(!browsable.is_empty());
+    for (partition, root) in browsable.iter().zip(&e01_roots) {
+        let root: FileListPage = serde_json::from_value(root.clone()).unwrap();
+        let files: Vec<(String, String)> = root
+            .entries
+            .iter()
+            .filter(|entry| !entry.is_dir && !entry.deleted && entry.size > 0)
+            .map(|entry| (entry.file.clone(), entry.name.clone()))
+            .collect();
+        if files.is_empty() {
+            continue;
+        }
+        let number = partition.number;
+        let from_vhd = copy_out(
+            &raw_source,
+            partition,
+            &files,
+            &dir.join(format!("vhd-{number}")),
+            &format!("copy-vhd-{number}"),
+        );
+        let from_e01 = copy_out(
+            &e01_source,
+            partition,
+            &files,
+            &dir.join(format!("e01-{number}")),
+            &format!("copy-e01-{number}"),
+        );
+        assert_eq!(from_e01, from_vhd);
+        for (name, bytes) in &from_e01 {
+            println!("  分区 {number}：{name} {} 字节一致", bytes.len());
+        }
+    }
 }

@@ -207,6 +207,18 @@ fn volumes_and_the_system_disk_are_not_written() {
             "writeSystemDisk"
         );
     }
+    // E01 按签名认，不看扩展名：改名成 .img 的也不写
+    let ewf = dir.join("evidence.img");
+    let mut bytes = b"EVF\x09\x0d\x0a\xff\x00\x01\x01\x00\x00\x00".to_vec();
+    bytes.resize(8192, 0);
+    std::fs::write(&ewf, &bytes).unwrap();
+    let ewf_target = Target::Image {
+        path: ewf.display().to_string(),
+    };
+    assert_eq!(
+        writable(&ewf_target, &data).unwrap_err().code,
+        "writeTargetEwf"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

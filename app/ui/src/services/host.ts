@@ -61,7 +61,7 @@ export interface DiskVolume {
   freeBytes: number
 }
 
-/** 任务的源：镜像文件，或按编号指定的物理磁盘 */
+/** 任务的源：镜像文件（raw 或 E01），或按编号指定的物理磁盘、按盘符指定的卷 */
 export type JobTarget =
   | { kind: 'image'; path: string }
   | { kind: 'disk'; diskNumber: number }
@@ -73,11 +73,34 @@ export function isDeviceKind(kind: JobTarget['kind'] | null | undefined): boolea
 }
 
 /**
- * 能不能为这个源生成写盘计划：镜像文件与整块磁盘拿到的偏移就是盘上的偏移；
- * 卷上的偏移从卷首算起，换算到盘上要另做，所以卷不写
+ * 看路径像不像 E01 镜像的第一段（扩展名 .E01，不分大小写）：界面据此显示「E01 镜像」、不给写盘的按钮。
+ * 引擎与宿主按文件开头的签名认，改了扩展名的 E01 照样只读，写盘时由宿主拒绝（writeTargetEwf）
  */
+export function isEwfPath(path: string): boolean {
+  return /\.e01$/i.test(path.trim())
+}
+
+/** 不能为这个源生成写盘计划的原因：卷（volume）、E01 镜像（ewf） */
+export type WriteBlock = 'volume' | 'ewf'
+
+/**
+ * 为什么不能为这个源生成写盘计划；能写时为 null。raw 镜像文件与整块磁盘拿到的偏移就是盘上的偏移；
+ * 卷上的偏移从卷首算起，换算到盘上要另做，所以卷不写；E01 是压缩的只读镜像，不写
+ */
+export function writePlanBlock(target: JobTarget): WriteBlock | null {
+  switch (target.kind) {
+    case 'image':
+      return isEwfPath(target.path) ? 'ewf' : null
+    case 'disk':
+      return null
+    case 'volume':
+      return 'volume'
+  }
+}
+
+/** 能不能为这个源生成写盘计划（原因见 writePlanBlock） */
 export function canWritePlan(target: JobTarget | null): boolean {
-  return target !== null && (target.kind === 'image' || target.kind === 'disk')
+  return target !== null && writePlanBlock(target) === null
 }
 
 /** 两个源是不是同一个 */
@@ -137,6 +160,14 @@ export interface FoundFile {
   length: number
   /** 部分恢复存下的不完整文件：在哪里断了；完整的文件没有这一项 */
   incomplete?: IncompleteReason
+  /** 由两段拼成的文件（两段重组）：各段在源上的位置，按文件里的先后；连续存放的文件没有这一项 */
+  fragments?: FileFragment[]
+}
+
+/** 由几段拼成的文件里的一段：在源上的起点与长度 */
+export interface FileFragment {
+  offset: number
+  length: number
 }
 
 /** 引擎生成的缩略图：图片在引擎里解码、缩小后重新编码成 PNG，界面不直接渲染恢复出的文件 */
@@ -287,6 +318,10 @@ export interface ScanResult {
   unreadable: number
   /** FAT、exFAT：读过的空闲空间字节数 */
   freeBytes: number
+  /** NTFS：$LogFile 里认出的日志记录数（没有日志、读不出时为 0） */
+  logRecords: number
+  /** NTFS：从 $LogFile 找回的名字数（MFT 里那条记录已被重用或清掉的已删除项） */
+  logNames: number
   elapsedMs: number
 }
 
@@ -298,7 +333,7 @@ export type UnsupportedReason = 'compressed' | 'encrypted' | 'systemCompressed' 
 
 /**
  * live：未删除；intact：已删除、看起来完整；overwritten：已被覆盖；unknown：无法判断；
- * cleared：删除时文件系统清空了长度与数据位置（ext3 / ext4），读不出
+ * cleared：数据位置已不知道，读不出（ext3 / ext4 删除时清空了长度与数据位置；NTFS 从日志找回、日志里只有名字）
  */
 export type EntryState = 'live' | 'intact' | 'overwritten' | 'unknown' | 'cleared'
 
@@ -327,6 +362,19 @@ export interface FsEntry {
   /** 带隐藏、系统属性（回收站、System Volume Information 等，资源管理器默认不显示） */
   hidden: boolean
   system: boolean
+  /**
+   * NTFS 从 $LogFile 找回：MFT 里那条记录已被重用或清掉，名字与数据位置来自日志。内容按删除前的运行表读，
+   * 那些簇可能已被别的文件用了；state 为 cleared 时日志里只有名字，读不出
+   */
+  fromLog: boolean
+}
+
+/**
+ * 分区里的一项能不能读出原内容（预览、打开）：文件、存放方式支持、数据位置还知道
+ * （cleared 是删除时位置已被清空，或从日志找回时日志里只有名字）
+ */
+export function hasReadableContent(entry: FsEntry): boolean {
+  return !entry.isDir && entry.unsupported === null && entry.state !== 'cleared'
 }
 
 export interface FileListPage {
@@ -558,7 +606,7 @@ export type JobEvent<TResult = unknown> =
   | {
       jobId: string
       kind: 'progress'
-      /** stage：任务里的哪个阶段，只有一个阶段的任务不给；浏览与复制是 scanMft 或 scanFree，文件系统检查见 FsCheckReport */
+      /** stage：任务里的哪个阶段，只有一个阶段的任务不给；浏览与复制是 scanMft、scanLog 或 scanFree，文件系统检查见 FsCheckReport */
       data: { done: number; total: number; stage?: string }
     }
   | { jobId: string; kind: 'found'; data: { files: FoundFile[] } }
@@ -582,6 +630,11 @@ const JOB_EVENT = 'job-event'
 
 export function getAppInfo(): Promise<AppInfo> {
   return invoke<AppInfo>('app_info')
+}
+
+/** 用默认浏览器打开本项目的发布页（网址由宿主决定） */
+export function openReleasesPage(): Promise<void> {
+  return invoke<void>('open_releases_page')
 }
 
 export function getEngineCapabilities(): Promise<EngineCapabilities> {
@@ -611,7 +664,7 @@ export function startReadScan(jobId: string, target: JobTarget): Promise<void> {
  */
 /**
  * 开始一次深度恢复，记进扫描记录（记录 ID 就是任务 ID）；sourceLabel 是来源描述，源没接上时也认得出。
- * keepIncomplete：部分恢复，不完整的文件也存下（标为不完整）
+ * keepIncomplete：部分恢复，不完整的文件也存下（标为不完整）；joinFragments：分成两段的照片也拼回来（较慢）
  */
 export function startCarve(
   jobId: string,
@@ -619,6 +672,7 @@ export function startCarve(
   outputDir: string | null,
   extensions: string[],
   keepIncomplete: boolean,
+  joinFragments: boolean,
   sourceLabel: string,
 ): Promise<void> {
   return invoke<void>('job_start_carve', {
@@ -627,6 +681,7 @@ export function startCarve(
     outputDir,
     extensions,
     keepIncomplete,
+    joinFragments,
     sourceLabel,
   })
 }
@@ -642,6 +697,8 @@ export interface CarveRecord {
   extensions: string[]
   /** 部分恢复：不完整的文件也存下（接着扫时照样）；以前的记录为 false */
   keepIncomplete: boolean
+  /** 两段重组：分成两段的照片也拼回来（接着扫时照样）；以前的记录没有这一项 */
+  joinFragments?: boolean
   /** 边扫边保存时实际的目录（recovered-…）；只扫描时为 null */
   outputDir: string | null
   status: CarveStatus
@@ -686,15 +743,21 @@ export interface ExtractItem {
   name?: string
   /** 扫描时是不完整的文件：原样带回，保存时按部分恢复核对 */
   incomplete?: IncompleteReason
+  /** 扫描时由两段拼成的文件：原样带回，保存时把这几段接起来核对 */
+  fragments?: FileFragment[]
 }
 
-/** 预览只扫描、还没保存的文件：宿主回到扫描任务的源上读这一段，由引擎生成预览 */
+/**
+ * 预览只扫描、还没保存的文件：宿主回到扫描任务的源上读这一段（由两段拼成的按 `fragments` 接起来读），
+ * 由引擎生成预览
+ */
 export function previewCarveRange(
   scanJobId: string,
   offset: number,
   length: number,
+  fragments?: FileFragment[],
 ): Promise<FilePreview> {
-  return invoke<FilePreview>('carve_preview_range', { scanJobId, offset, length })
+  return invoke<FilePreview>('carve_preview_range', { scanJobId, offset, length, fragments })
 }
 
 /**
@@ -775,8 +838,9 @@ export function previewFsFile(jobId: string, partition: number, file: string): P
 }
 
 /**
- * 找出浏览中的一个分区里已删除的项（NTFS 扫一遍 MFT；FAT、exFAT 读一遍空闲簇，找原来的目录已找不到的文件夹），
- * 扫完才返回；进度经浏览任务的 progress 事件送达（stage 为 scanMft 或 scanFree，总量还不知道时 total 为 0）。
+ * 找出浏览中的一个分区里已删除的项（NTFS 扫一遍 MFT，再读 $LogFile；FAT、exFAT 读一遍空闲簇，找原来的目录已找不到的文件夹），
+ * 扫完才返回；进度经浏览任务的 progress 事件送达（stage 为 scanMft、scanLog 或 scanFree，换阶段时进度从 0 重新算；
+ * 总量还不知道时 total 为 0）。
  * 扫过的分区直接返回上次的结果
  */
 export function scanDeleted(jobId: string, partition: number): Promise<ScanResult> {
@@ -1312,6 +1376,27 @@ export function pickDirectory(title: string): Promise<string | null> {
 /** 系统的选择文件对话框；用户取消时返回 null */
 export function pickFile(title: string): Promise<string | null> {
   return open({ title, directory: false, multiple: false })
+}
+
+/** 选镜像文件时对话框里的几组类型：常见的镜像扩展名（含 E01）、只看 E01、所有文件（raw 镜像可以是任何扩展名） */
+export interface ImageFileFilters {
+  images: string
+  ewf: string
+  all: string
+}
+
+/** 系统的选择文件对话框，按镜像文件过滤；用户取消时返回 null */
+export function pickImageFile(title: string, names: ImageFileFilters): Promise<string | null> {
+  return open({
+    title,
+    directory: false,
+    multiple: false,
+    filters: [
+      { name: names.images, extensions: ['img', 'dd', 'raw', 'bin', 'iso', 'vhd', '001', 'e01'] },
+      { name: names.ewf, extensions: ['e01'] },
+      { name: names.all, extensions: ['*'] },
+    ],
+  })
 }
 
 /** 系统的「另存为」对话框：defaultPath 是建议的目录加文件名，只列出 extension 类型；用户取消时返回 null */

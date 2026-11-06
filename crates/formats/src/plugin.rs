@@ -90,4 +90,57 @@ pub trait Recovering: Send {
     fn intact(&mut self, _received: u64) -> Option<u64> {
         None
     }
+
+    /// 两段重组：文件结构走到一半对不上了，或格式自己逐位核对内容时不认这个结尾（数据多半在某个块边界之后
+    /// 换成了别的东西，文件剩下的部分存在后面别处），给出第一段可能在哪些块边界结束、从那里怎么接着核对第二段，
+    /// 最可能的在前。块边界是每次 [`data_check`](Self::data_check) 送入的那一块的开头。
+    ///
+    /// 只有能逐位核对内容的格式给出（JPEG 的熵编码数据，见 [`Resume::start`]），而且要先
+    /// [`enable_resumes`](Self::enable_resumes)；默认没有。在 [`intact`](Self::intact) 之前调用，调用之后不再送数据。
+    fn resumes(&mut self) -> Vec<Resume> {
+        Vec::new()
+    }
+
+    /// 打开两段重组：之后逐位核对内容、留下第一段可能的结尾（[`resumes`](Self::resumes)）。逐位核对有不小的开销，
+    /// 不调用时一概不做。要在第一次 [`data_check`](Self::data_check) 之前调用；默认什么也不做。
+    fn enable_resumes(&mut self) {}
+}
+
+/// 两段重组的一个起点（见 [`Recovering::resumes`]）：第一段到 `first_len` 为止时，接着核对第二段的状态。
+pub struct Resume {
+    /// 第一段的长度（从文件开头起，落在块边界上）。
+    pub first_len: u64,
+    start: Box<dyn Fn() -> Box<dyn Recovering> + Send>,
+    probe: Box<Probe>,
+}
+
+/// 粗看第二段可能从哪几块开始（见 [`Resume::possible_starts`]）。
+type Probe = dyn Fn(&[u8], usize) -> Vec<usize> + Send;
+
+impl Resume {
+    pub(crate) fn new(
+        first_len: u64,
+        start: impl Fn() -> Box<dyn Recovering> + Send + 'static,
+        probe: impl Fn(&[u8], usize) -> Vec<usize> + Send + 'static,
+    ) -> Self {
+        Self {
+            first_len,
+            start: Box::new(start),
+            probe: Box::new(probe),
+        }
+    }
+
+    /// `data` 从块边界起、按 `block` 字节分块：第二段可能从哪几块的开头开始（块的序号，从小到大）。
+    /// 只做最省事的核对，不在里面的一定接不上，在里面的要用 [`start`](Self::start) 接着细看。
+    /// 候选的块开头很多，绝大多数在这里就排除掉；一次给一大段，插件可以一并往后看第二段至少要有多长。
+    pub fn possible_starts(&self, data: &[u8], block: usize) -> Vec<usize> {
+        (self.probe)(data, block)
+    }
+
+    /// 从第一段末尾接着核对：之后送入的数据当作紧接在第一段之后（`data_check` 的偏移从 `first_len` 起）。
+    /// 内容一对不上就给出 [`DataCheck::Invalid`]；只有逐位核对一路对得上、正好在文件该结束的地方结束时才给出
+    /// [`DataCheck::Complete`]（文件总长度）。可以从同一个起点开始多次。
+    pub fn start(&self) -> Box<dyn Recovering> {
+        (self.start)()
+    }
 }

@@ -10,7 +10,7 @@ use yisi_engine::protocol::{
     self, BrowseOpened, FileListPage, FilePreview, FsEntry, ListFilesParams, MAX_PAGE,
     OpenRangeParams, PartitionInfo, PartitionRef, RANGE_PARTITION_BASE, ScanResult,
 };
-use yisi_fs::{BootCopy, FileRef, FsKind, State, Unsupported, Volume};
+use yisi_fs::{BootCopy, FileRef, FsKind, ScanStage, State, Unsupported, Volume};
 use yisi_io::BlockDevice;
 use yisi_part::{Note, Partition, PartitionKind, PartitionTable, Role, Scheme};
 use yisi_rpc::{ErrorObject, error_code};
@@ -24,16 +24,17 @@ use crate::runtime::error_chain;
 const PAGE_BYTES: usize = 768 * 1024;
 /// 最多缓存这么多个目录的排序结果，满了整个清空。
 const MAX_CACHED_DIRS: usize = 64;
-/// 扫描进度里的阶段名：NTFS 扫 MFT，FAT / exFAT 读空闲簇。
+/// 扫描进度里的阶段名：NTFS 扫 MFT、再读 `$LogFile`，FAT / exFAT 读空闲簇。
 pub const STAGE_SCAN_MFT: &str = "scanMft";
+pub const STAGE_SCAN_LOG: &str = "scanLog";
 pub const STAGE_SCAN_FREE: &str = "scanFree";
 
-/// 卷的扫描在进度里叫什么（浏览与复制共用）。
+/// 卷的扫描正在做的那一步在进度里叫什么（浏览与复制共用，每次报进度时取）。
 pub fn scan_stage(volume: &Volume) -> &'static str {
-    if volume.optional_scan() {
-        STAGE_SCAN_FREE
-    } else {
-        STAGE_SCAN_MFT
+    match volume.scan_stage() {
+        ScanStage::Mft => STAGE_SCAN_MFT,
+        ScanStage::Log => STAGE_SCAN_LOG,
+        ScanStage::FreeSpace => STAGE_SCAN_FREE,
     }
 }
 /// 一个会话里最多按位置打开这么多个分区。
@@ -177,9 +178,8 @@ impl Session {
                 .or_insert_with(|| Arc::new(AtomicBool::new(false))),
         );
         let started = Instant::now();
-        let stage = scan_stage(&volume);
         let outcome = volume.scan(&mut |done, total| {
-            self.progress.send(Some(stage), done, total);
+            self.progress.send(Some(scan_stage(&volume)), done, total);
             !stop.load(Ordering::Relaxed) && !self.closing.load(Ordering::Relaxed)
         });
         {
@@ -203,6 +203,8 @@ impl Session {
                 orphans: 0,
                 unreadable: 0,
                 free_bytes: 0,
+                log_records: 0,
+                log_names: 0,
                 elapsed_ms,
             });
         };
@@ -216,6 +218,8 @@ impl Session {
             orphans: summary.orphans,
             unreadable: summary.unreadable,
             free_bytes: summary.free_bytes,
+            log_records: summary.log_records,
+            log_names: summary.log_names,
             elapsed_ms,
         })
     }
@@ -394,6 +398,7 @@ impl Session {
                     .unsupported
                     .map(|reason| unsupported_key(reason).to_owned()),
                 record: entry.file.record(),
+                from_log: entry.file.from_log(),
                 virtual_dir: entry.file.is_orphans().then(|| "orphans".to_owned()),
                 hidden: entry.attributes.hidden,
                 system: entry.attributes.system,

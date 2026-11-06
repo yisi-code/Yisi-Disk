@@ -14,6 +14,15 @@ pub struct RecoveredFile {
     pub length: u64,
     /// 部分恢复存下的不完整文件：为什么断了。完整的文件为 `None`。
     pub incomplete: Option<Incomplete>,
+    /// 由几段拼成的文件（两段重组）：各段在源上的位置，按文件里的先后；连续存放的为空。
+    pub fragments: Vec<Fragment>,
+}
+
+/// 由几段拼成的文件里的一段：在源上的起点与长度。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fragment {
+    pub offset: u64,
+    pub length: u64,
 }
 
 /// 不完整的文件（部分恢复）在哪里断了。
@@ -40,11 +49,13 @@ pub trait SinkFile {
     /// 确认是完整文件（或部分恢复时不完整，`incomplete` 是原因，名字带上 [`INCOMPLETE_MARK`]），
     /// 截到 `length` 字节保存。`extension` 是格式插件按内容定的扩展名
     /// （例如 ZIP 里装的是 Word 文档时是 docx），给出时文件名用它，否则用 [`Sink::create`] 时的扩展名。
+    /// `fragments`：由几段拼成时各段在扫描的设备上的位置（见 [`RecoveredFile::fragments`]），连续存放的为空。
     fn commit(
         self: Box<Self>,
         length: u64,
         extension: Option<&str>,
         incomplete: Option<Incomplete>,
+        fragments: &[Fragment],
     ) -> io::Result<RecoveredFile>;
 
     /// 不是完整文件，丢弃已写的内容。
@@ -127,6 +138,7 @@ impl Sink for DirectorySink {
             final_path,
             extension: extension.to_owned(),
             offset,
+            origin: self.origin,
         }))
     }
 }
@@ -137,7 +149,10 @@ struct DirectoryFile {
     /// 按创建时的扩展名起的正式名字；提交时按插件定的扩展名与是否完整重新起名，只换文件名。
     final_path: PathBuf,
     extension: String,
+    /// 在源上的起点（已加上 `origin`）。
     offset: u64,
+    /// 见 [`DirectorySink::with_origin`]。
+    origin: u64,
 }
 
 impl SinkFile for DirectoryFile {
@@ -150,6 +165,7 @@ impl SinkFile for DirectoryFile {
         length: u64,
         extension: Option<&str>,
         incomplete: Option<Incomplete>,
+        fragments: &[Fragment],
     ) -> io::Result<RecoveredFile> {
         let file = self
             .writer
@@ -177,6 +193,13 @@ impl SinkFile for DirectoryFile {
             offset: self.offset,
             length,
             incomplete,
+            fragments: fragments
+                .iter()
+                .map(|fragment| Fragment {
+                    offset: self.origin.saturating_add(fragment.offset),
+                    ..*fragment
+                })
+                .collect(),
         })
     }
 
@@ -215,6 +238,7 @@ impl SinkFile for ScanOnlyFile {
         length: u64,
         extension: Option<&str>,
         incomplete: Option<Incomplete>,
+        fragments: &[Fragment],
     ) -> io::Result<RecoveredFile> {
         let extension = extension.map_or(self.extension, str::to_owned);
         Ok(RecoveredFile {
@@ -223,6 +247,7 @@ impl SinkFile for ScanOnlyFile {
             offset: self.offset,
             length,
             incomplete,
+            fragments: fragments.to_vec(),
         })
     }
 

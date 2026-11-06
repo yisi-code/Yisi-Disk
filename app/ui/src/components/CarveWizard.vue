@@ -98,8 +98,12 @@ const selectedExtensions = ref<string[]>([])
 const saveWhileScanning = ref(false)
 /** 部分恢复：不完整的文件也列出来（默认不勾） */
 const keepIncomplete = ref(false)
+/** 两段重组：分成两段存放的照片也拼回来（较慢，默认不勾） */
+const joinFragments = ref(false)
 /** 发起扫描（或打开的记录）时是否部分恢复：之后回到上一步改选项，不影响正在显示的这次结果 */
 const runKeepsIncomplete = ref(false)
+/** 发起扫描（或打开的记录）时是否两段重组，同上 */
+const runJoinsFragments = ref(false)
 const isAdvancedOpen = ref(false)
 const outputDir = ref('')
 const { dialogError, pickFolder } = useHostDialog()
@@ -381,6 +385,7 @@ async function openRecord(item: CarveRecord): Promise<boolean> {
   }
   runScanOnly.value = item.outputDir === null
   runKeepsIncomplete.value = item.keepIncomplete
+  runJoinsFragments.value = item.joinFragments === true
   selectedExtensions.value = [...item.extensions]
   selectedFile.value = null
   checkedNames.value = new Set()
@@ -442,6 +447,7 @@ function handleStart() {
   dialogError.value = null
   runScanOnly.value = !saveWhileScanning.value
   runKeepsIncomplete.value = keepIncomplete.value
+  runJoinsFragments.value = joinFragments.value
   selectedFile.value = null
   checkedNames.value = new Set()
   savedCopies.value = new Map()
@@ -452,6 +458,7 @@ function handleStart() {
     runScanOnly.value ? null : trimmedOutputDir.value,
     [...selectedExtensions.value],
     runKeepsIncomplete.value,
+    runJoinsFragments.value,
     sourceText.value,
   )
 }
@@ -580,6 +587,7 @@ async function saveFiles(
     extension: file.extension,
     ...(name === undefined ? {} : { name }),
     ...(file.incomplete === undefined ? {} : { incomplete: file.incomplete }),
+    ...(file.fragments === undefined ? {} : { fragments: file.fragments }),
   }))
   saveKind.value = kind
   if (kind === 'openCopy') {
@@ -786,6 +794,11 @@ function handleAdvancedToggle(event: Event) {
             {{ t('carve.formats.keepIncomplete') }}
           </label>
           <p id="carve-incomplete-hint" class="wizard__hint">{{ t('carve.formats.keepIncompleteHint') }}</p>
+          <label class="carve-wizard__option">
+            <input v-model="joinFragments" type="checkbox" aria-describedby="carve-join-hint" />
+            {{ t('carve.formats.joinFragments') }}
+          </label>
+          <p id="carve-join-hint" class="wizard__hint">{{ t('carve.formats.joinFragmentsHint') }}</p>
         </div>
 
         <details class="carve-wizard__advanced" :open="isAdvancedOpen" @toggle="handleAdvancedToggle">
@@ -856,6 +869,10 @@ function handleAdvancedToggle(event: Event) {
           <div>
             <dt>{{ t('carve.run.incomplete') }}</dt>
             <dd>{{ runKeepsIncomplete ? t('carve.run.incompleteOn') : t('carve.run.incompleteOff') }}</dd>
+          </div>
+          <div>
+            <dt>{{ t('carve.run.joinFragments') }}</dt>
+            <dd>{{ runJoinsFragments ? t('carve.run.joinFragmentsOn') : t('carve.run.joinFragmentsOff') }}</dd>
           </div>
         </dl>
 

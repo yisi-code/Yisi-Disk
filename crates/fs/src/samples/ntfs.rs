@@ -1,7 +1,8 @@
 //! NTFS 测试样本：按公开的结构资料拼出的小卷（8 MiB、4 KiB 一簇、1 KiB 一条 MFT 记录）。
 //! 能建目录、写常驻或非常驻的文件（连续、碎片、带稀疏空洞、指定位置）、硬链接、DOS 短名、
-//! 数据流放进扩展记录（属性列表）、压缩 / 加密 / 系统压缩标记，删除文件与目录、重用记录。
+//! 数据流放进扩展记录（属性列表）、压缩 / 加密 / 系统压缩标记，删除文件与目录、重用或清掉记录。
 //! 目录索引在 `finish` 时按在用的子项生成，项多时放进 INDEX_ALLOCATION。
+//! 可以带 `$LogFile`：按 Windows 建文件、写内容、删除时记日志的样子记下操作，`finish` 时写成重启区与日志记录页。
 
 use std::collections::BTreeMap;
 
@@ -119,7 +120,104 @@ pub struct NtfsImage {
     label: String,
     /// `$MFT` 的记录位图（一位一条记录），`finish` 时按在用的记录生成。
     record_bitmap: Vec<u8>,
+    /// 有 `$LogFile` 时，按先后写进日志的操作（[`NtfsImage::enable_log`]）。
+    log: Option<Vec<LogOp>>,
 }
+
+/// `$LogFile` 从这个簇起，占 [`LOG_CLUSTERS`] 个簇（64 KiB）：两页重启区、两页缓冲页、12 页日志记录。
+pub const LOG_LCN: usize = 48;
+const LOG_CLUSTERS: usize = 16;
+/// 日志页的大小；日志记录页从第 4 页起（第 2 页放第 4 页的副本，模拟缓冲页）。
+pub const LOG_PAGE: usize = 4096;
+pub const LOG_FIRST_RECORD_PAGE: usize = 4;
+/// 页里第一条日志记录的偏移。
+const LOG_DATA_OFFSET: usize = 0x40;
+/// LSN 里序号占的位数（与 Windows 建的一样），其余位是位置除以 8。
+const LOG_SEQUENCE_BITS: u32 = 45;
+
+/// 写进样本 `$LogFile` 的一条 NTFS 日志记录。
+#[derive(Debug, Clone)]
+struct LogOp {
+    redo: u16,
+    undo: u16,
+    /// 落在哪条 MFT 记录上；`None` 时落在别处（目录的索引块）。
+    record: Option<u64>,
+    record_offset: usize,
+    attribute_offset: usize,
+    redo_data: Vec<u8>,
+    /// 声明的重做长度；`None` 时就是数据的长度。用户数据只记长度、不带数据时比数据长。
+    redo_length: Option<usize>,
+    undo_data: Vec<u8>,
+}
+
+impl LogOp {
+    fn new(redo: u16, undo: u16, record: Option<u64>, record_offset: usize) -> Self {
+        Self {
+            redo,
+            undo,
+            record,
+            record_offset,
+            attribute_offset: 0,
+            redo_data: Vec::new(),
+            redo_length: None,
+            undo_data: Vec::new(),
+        }
+    }
+
+    /// NTFS 的记录头（含一个簇号）加重做、撤销数据。
+    fn client_bytes(&self) -> Vec<u8> {
+        let redo_offset = 0x28usize;
+        let undo_offset = (redo_offset + self.redo_data.len()).next_multiple_of(8);
+        let mut body = vec![0u8; undo_offset + self.undo_data.len()];
+        let (vcn, block, lcn) = match self.record {
+            Some(record) => {
+                let byte = record as usize * RECORD;
+                let vcn = byte / CLUSTER;
+                (vcn, (byte % CLUSTER) / SECTOR, MFT_LCN + vcn)
+            }
+            None => (0, 0, 0),
+        };
+        let fields: [(usize, u16); 12] = [
+            (0x00, self.redo),
+            (0x02, self.undo),
+            (0x04, redo_offset as u16),
+            (
+                0x06,
+                self.redo_length.unwrap_or(self.redo_data.len()) as u16,
+            ),
+            (0x08, undo_offset as u16),
+            (0x0A, self.undo_data.len() as u16),
+            (0x0C, 24),
+            (0x0E, 1),
+            (0x10, self.record_offset as u16),
+            (0x12, self.attribute_offset as u16),
+            (0x14, block as u16),
+            (0x16, 0),
+        ];
+        for (at, value) in fields {
+            body[at..at + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        body[0x18..0x20].copy_from_slice(&(vcn as u64).to_le_bytes());
+        body[0x20..0x28].copy_from_slice(&(lcn as u64).to_le_bytes());
+        body[redo_offset..redo_offset + self.redo_data.len()].copy_from_slice(&self.redo_data);
+        body[undo_offset..].copy_from_slice(&self.undo_data);
+        body
+    }
+}
+
+/// 日志操作码（样本用到的）。
+const OP_NOOP: u16 = 0x00;
+const OP_INITIALIZE: u16 = 0x02;
+const OP_DEALLOCATE: u16 = 0x03;
+const OP_CREATE_ATTRIBUTE: u16 = 0x05;
+const OP_DELETE_ATTRIBUTE: u16 = 0x06;
+const OP_UPDATE_RESIDENT: u16 = 0x07;
+const OP_UPDATE_MAPPING: u16 = 0x09;
+const OP_SET_SIZES: u16 = 0x0B;
+const OP_ADD_INDEX_ROOT: u16 = 0x0C;
+const OP_DELETE_INDEX_ROOT: u16 = 0x0D;
+const OP_ADD_INDEX_ALLOCATION: u16 = 0x0E;
+const OP_DELETE_INDEX_ALLOCATION: u16 = 0x0F;
 
 impl Default for NtfsImage {
     fn default() -> Self {
@@ -161,7 +259,138 @@ impl NtfsImage {
             next_record: 16,
             label: "NTFS SAMPLE".to_owned(),
             record_bitmap: Vec::new(),
+            log: None,
         }
+    }
+
+    /// 加上 `$LogFile`（第 2 条记录，[`LOG_LCN`] 起 64 KiB）；之后 `log_*` 记下的操作在 `finish` 时写进日志。
+    pub fn enable_log(&mut self) {
+        for slot in &mut self.bitmap[LOG_LCN..LOG_LCN + LOG_CLUSTERS] {
+            *slot = true;
+        }
+        self.log = Some(Vec::new());
+    }
+
+    fn push_log(&mut self, op: LogOp) {
+        self.log.as_mut().expect("先 enable_log").push(op);
+    }
+
+    /// 像 Windows 建文件、写内容那样记日志（在 `delete` 之前调）：建记录的整条映像（只有 `$STANDARD_INFORMATION`、
+    /// `$FILE_NAME` 与空的常驻数据流），往上级目录的索引根里加项；非常驻的文件再删掉常驻数据流、建非常驻的、
+    /// 写运行表、定长度；常驻的文件只记写入的长度（用户数据不进日志）。
+    pub fn log_history(&mut self, record: u64) {
+        let node = self.nodes[&record].clone();
+        let mut attributes = vec![resident(0x10, "", 0, &self.standard_information(&node))];
+        for (id, name) in node.names.iter().enumerate() {
+            attributes.push(resident(
+                0x30,
+                "",
+                1 + id as u16,
+                &self.file_name_value(record, name),
+            ));
+        }
+        let data_offset = 0x38 + attributes.iter().map(Vec::len).sum::<usize>();
+        let empty_data = resident(0x80, "", 10, &[]);
+        if !node.is_dir {
+            attributes.push(empty_data.clone());
+        }
+        let image = record_image(record, node.sequence, true, node.is_dir, 0, &attributes);
+        let used = u32::from_le_bytes(image[0x18..0x1C].try_into().unwrap()) as usize;
+        let mut init = LogOp::new(OP_INITIALIZE, OP_NOOP, Some(record), 0);
+        init.redo_data = image[..used].to_vec();
+        self.push_log(init);
+        for name in &node.names {
+            let mut add = LogOp::new(
+                OP_ADD_INDEX_ROOT,
+                OP_DELETE_INDEX_ROOT,
+                Some(name.parent),
+                0x98,
+            );
+            add.redo_data = self.index_entry_for(record, name);
+            self.push_log(add);
+        }
+        match &node.data {
+            Data::NonResident { runs, size } => {
+                let mut delete = LogOp::new(
+                    OP_DELETE_ATTRIBUTE,
+                    OP_CREATE_ATTRIBUTE,
+                    Some(record),
+                    data_offset,
+                );
+                delete.undo_data = empty_data;
+                self.push_log(delete);
+                let mut create = LogOp::new(
+                    OP_CREATE_ATTRIBUTE,
+                    OP_DELETE_ATTRIBUTE,
+                    Some(record),
+                    data_offset,
+                );
+                create.redo_data = non_resident(0x80, "", 10, 0, 0, &[], 0, 0);
+                self.push_log(create);
+                let mut mapping = LogOp::new(
+                    OP_UPDATE_MAPPING,
+                    OP_UPDATE_MAPPING,
+                    Some(record),
+                    data_offset,
+                );
+                mapping.attribute_offset = 0x40;
+                mapping.redo_data = encode_runs(runs);
+                self.push_log(mapping);
+                let clusters: usize = runs.iter().map(|run| run.1).sum();
+                let mut sizes = LogOp::new(OP_SET_SIZES, OP_SET_SIZES, Some(record), data_offset);
+                for value in [clusters * CLUSTER, *size, *size] {
+                    sizes.redo_data.extend((value as u64).to_le_bytes());
+                }
+                self.push_log(sizes);
+            }
+            Data::Resident(bytes) => {
+                let mut write = LogOp::new(
+                    OP_UPDATE_RESIDENT,
+                    OP_UPDATE_RESIDENT,
+                    Some(record),
+                    data_offset,
+                );
+                write.attribute_offset = 0x18;
+                write.redo_length = Some(bytes.len());
+                self.push_log(write);
+            }
+            Data::None => {}
+        }
+    }
+
+    /// 像 Windows 删除那样记日志（在 `delete` 之前调）：从上级目录的索引块里删掉各个名字（撤销数据是整个索引项），
+    /// 再释放记录（撤销数据是记录头的前 24 字节）。只调这个、不调 [`log_history`](Self::log_history) 时，
+    /// 日志里就只有名字（文件建得比日志里最老的一条还早）。
+    pub fn log_deletion(&mut self, record: u64) {
+        let node = self.nodes[&record].clone();
+        for name in &node.names {
+            let mut remove =
+                LogOp::new(OP_DELETE_INDEX_ALLOCATION, OP_ADD_INDEX_ALLOCATION, None, 0);
+            remove.attribute_offset = 0x40;
+            remove.undo_data = self.index_entry_for(record, name);
+            self.push_log(remove);
+        }
+        let header = record_image(record, node.sequence, true, node.is_dir, 0, &[]);
+        let mut release = LogOp::new(OP_DEALLOCATE, OP_INITIALIZE, Some(record), 0);
+        release.undo_data = header[..24].to_vec();
+        self.push_log(release);
+    }
+
+    /// 记一条不改记录的日志（空操作），带 `length` 字节的数据：把后面的记录挤到下一页去。
+    pub fn log_padding(&mut self, length: usize) {
+        let mut noop = LogOp::new(OP_NOOP, OP_NOOP, None, 0);
+        noop.redo_data = vec![0x5A; length];
+        self.push_log(noop);
+    }
+
+    /// 清掉一条记录（`finish` 时那里全是 0），模拟记录被清掉。
+    pub fn wipe(&mut self, record: u64) {
+        self.nodes.remove(&record);
+    }
+
+    fn index_entry_for(&self, record: u64, name: &Name) -> Vec<u8> {
+        let reference = record | u64::from(self.nodes[&record].sequence) << 48;
+        index_entry(reference, &self.file_name_value(record, name), 0)
     }
 
     pub fn cluster_size(&self) -> usize {
@@ -527,6 +756,15 @@ impl NtfsImage {
 
     pub fn finish(mut self) -> Vec<u8> {
         self.write_boot();
+        // 有日志时多一个系统文件 $LogFile（第 2 条记录）
+        let system: Vec<(u64, &str)> = SYSTEM_FILES
+            .iter()
+            .copied()
+            .chain(self.log.is_some().then_some((2, "$LogFile")))
+            .collect();
+        if let Some(log) = self.log.as_deref().map(log_file) {
+            self.write_clusters(LOG_LCN, &log);
+        }
         // 目录索引：按在用的子项生成（DOS 名单独一项）
         let mut children: BTreeMap<u64, Vec<(u64, Vec<u8>)>> = BTreeMap::new();
         for (&record, node) in &self.nodes {
@@ -545,7 +783,7 @@ impl NtfsImage {
                     .push((reference, key));
             }
         }
-        for (number, name) in SYSTEM_FILES {
+        for &(number, name) in &system {
             let reference = number | u64::from(system_sequence(number)) << 48;
             let key = self.file_name_value_raw(name, ROOT, 5);
             children.entry(ROOT).or_default().push((reference, key));
@@ -575,12 +813,12 @@ impl NtfsImage {
             .iter()
             .filter(|(_, node)| node.in_use)
             .map(|(&number, _)| number)
-            .chain(SYSTEM_FILES.map(|(number, _)| number));
+            .chain(system.iter().map(|&(number, _)| number));
         for number in in_use {
             record_bitmap[number as usize / 8] |= 1 << (number % 8);
         }
         self.record_bitmap = record_bitmap;
-        for (number, name) in SYSTEM_FILES {
+        for &(number, name) in &system {
             records.insert(number, self.system_record(number, name));
         }
         for (number, bytes) in &records {
@@ -932,6 +1170,16 @@ impl NtfsImage {
                 MIRROR_CLUSTERS,
                 4 * RECORD,
             )),
+            2 => attributes.push(non_resident(
+                0x80,
+                "",
+                2,
+                0,
+                0,
+                &[(Some(LOG_LCN), LOG_CLUSTERS)],
+                LOG_CLUSTERS,
+                LOG_CLUSTERS * CLUSTER,
+            )),
             6 => attributes.push(non_resident(
                 0x80,
                 "",
@@ -1146,6 +1394,20 @@ fn record_with(
     base: u64,
     attributes: &[Vec<u8>],
 ) -> Vec<u8> {
+    let mut record = record_image(number, sequence, in_use, is_dir, base, attributes);
+    apply_usa(&mut record, 0x30);
+    record
+}
+
+/// 拼出一条记录在内存里的样子（不做更新序列处理，`$LogFile` 里记的就是这样）。
+fn record_image(
+    number: u64,
+    sequence: u16,
+    in_use: bool,
+    is_dir: bool,
+    base: u64,
+    attributes: &[Vec<u8>],
+) -> Vec<u8> {
     let mut record = vec![0u8; RECORD];
     record[0..4].copy_from_slice(b"FILE");
     record[4..6].copy_from_slice(&0x30u16.to_le_bytes());
@@ -1166,8 +1428,93 @@ fn record_with(
     record[offset..offset + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
     offset += 8;
     record[0x18..0x1C].copy_from_slice(&(offset as u32).to_le_bytes());
-    apply_usa(&mut record, 0x30);
     record
+}
+
+/// 按记下的操作写出整个 `$LogFile`：两页重启区，第 4 页起依次放日志记录（放不下的接到下一页的数据区），
+/// 第 2 页放第 4 页的副本（缓冲页，LSN 指的位置不是它，不该被算进去）。
+fn log_file(ops: &[LogOp]) -> Vec<u8> {
+    let mut log = vec![0u8; LOG_CLUSTERS * CLUSTER];
+    let lsn_of = |offset: usize| (1u64 << (64 - LOG_SEQUENCE_BITS)) | (offset as u64 / 8);
+    // 每一页：最后一条开始或经过这一页的记录、最后一条在这一页结束的记录、下一条记录的偏移
+    let mut pages: BTreeMap<usize, (u64, u64, usize)> = BTreeMap::new();
+    let mut position = LOG_FIRST_RECORD_PAGE * LOG_PAGE + LOG_DATA_OFFSET;
+    let mut previous = 0u64;
+    for op in ops {
+        if position % LOG_PAGE + 0x30 > LOG_PAGE {
+            position = position.next_multiple_of(LOG_PAGE) + LOG_DATA_OFFSET;
+        }
+        let lsn = lsn_of(position);
+        let body = op.client_bytes();
+        let mut header = vec![0u8; 0x30];
+        header[0x00..0x08].copy_from_slice(&lsn.to_le_bytes());
+        header[0x08..0x10].copy_from_slice(&previous.to_le_bytes());
+        header[0x18..0x1C].copy_from_slice(&(body.len() as u32).to_le_bytes());
+        header[0x20..0x24].copy_from_slice(&1u32.to_le_bytes());
+        header[0x24..0x28].copy_from_slice(&1u32.to_le_bytes());
+        let crosses = position % LOG_PAGE + 0x30 + body.len() > LOG_PAGE;
+        header[0x28..0x2A].copy_from_slice(&u16::from(crosses).to_le_bytes());
+        log[position..position + 0x30].copy_from_slice(&header);
+        let mut at = position + 0x30;
+        let mut written = 0;
+        loop {
+            let page = at / LOG_PAGE;
+            pages.entry(page).or_insert((0, 0, LOG_DATA_OFFSET)).0 = lsn;
+            let take = (body.len() - written).min((page + 1) * LOG_PAGE - at);
+            log[at..at + take].copy_from_slice(&body[written..written + take]);
+            written += take;
+            at += take;
+            if written == body.len() {
+                let meta = pages.get_mut(&page).unwrap();
+                meta.1 = lsn;
+                meta.2 = (at % LOG_PAGE).next_multiple_of(8);
+                break;
+            }
+            at = (page + 1) * LOG_PAGE + LOG_DATA_OFFSET;
+            assert!(at < log.len(), "样本的日志写满了");
+        }
+        position = at.next_multiple_of(8);
+        previous = lsn;
+    }
+    for (&page, &(last, last_end, next)) in &pages {
+        let block = &mut log[page * LOG_PAGE..(page + 1) * LOG_PAGE];
+        block[0..4].copy_from_slice(b"RCRD");
+        block[4..6].copy_from_slice(&0x28u16.to_le_bytes());
+        block[6..8].copy_from_slice(&((LOG_PAGE / SECTOR + 1) as u16).to_le_bytes());
+        block[0x08..0x10].copy_from_slice(&last.to_le_bytes());
+        block[0x14..0x16].copy_from_slice(&1u16.to_le_bytes());
+        block[0x16..0x18].copy_from_slice(&1u16.to_le_bytes());
+        block[0x18..0x1A].copy_from_slice(&(next as u16).to_le_bytes());
+        block[0x20..0x28].copy_from_slice(&last_end.to_le_bytes());
+        apply_usa(block, 0x28);
+    }
+    // 缓冲页：第一页日志记录的副本
+    let first = LOG_FIRST_RECORD_PAGE * LOG_PAGE;
+    log.copy_within(first..first + LOG_PAGE, 2 * LOG_PAGE);
+    for copy in 0..2 {
+        let page = &mut log[copy * LOG_PAGE..(copy + 1) * LOG_PAGE];
+        page[0..4].copy_from_slice(b"RSTR");
+        page[4..6].copy_from_slice(&0x1Eu16.to_le_bytes());
+        page[6..8].copy_from_slice(&((LOG_PAGE / SECTOR + 1) as u16).to_le_bytes());
+        page[0x10..0x14].copy_from_slice(&(LOG_PAGE as u32).to_le_bytes());
+        page[0x14..0x18].copy_from_slice(&(LOG_PAGE as u32).to_le_bytes());
+        page[0x18..0x1A].copy_from_slice(&0x30u16.to_le_bytes());
+        page[0x1A..0x1C].copy_from_slice(&1u16.to_le_bytes());
+        page[0x1C..0x1E].copy_from_slice(&1u16.to_le_bytes());
+        let area = 0x30;
+        page[area..area + 8].copy_from_slice(&previous.to_le_bytes());
+        page[area + 0x08..area + 0x0A].copy_from_slice(&1u16.to_le_bytes());
+        page[area + 0x0A..area + 0x0C].copy_from_slice(&0xFFFFu16.to_le_bytes());
+        page[area + 0x10..area + 0x14].copy_from_slice(&LOG_SEQUENCE_BITS.to_le_bytes());
+        page[area + 0x14..area + 0x16].copy_from_slice(&0xE0u16.to_le_bytes());
+        page[area + 0x16..area + 0x18].copy_from_slice(&0x40u16.to_le_bytes());
+        page[area + 0x18..area + 0x20]
+            .copy_from_slice(&((LOG_CLUSTERS * CLUSTER) as u64).to_le_bytes());
+        page[area + 0x24..area + 0x26].copy_from_slice(&0x30u16.to_le_bytes());
+        page[area + 0x26..area + 0x28].copy_from_slice(&(LOG_DATA_OFFSET as u16).to_le_bytes());
+        apply_usa(page, 0x1E);
+    }
+    log
 }
 
 /// 写盘前的更新序列处理：每个扇区最后两个字节存进数组，换成更新序列号。

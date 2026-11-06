@@ -20,8 +20,8 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use yisi_engine::protocol::PartitionInfo;
 use yisi_engine::protocol::{BootCopy, BootDiagnosis, BootFix, ImageDescription, ImageInspection};
 use yisi_engine::protocol::{
-    BrowseOpened, Capabilities, CopyItem, DiskList, ExtractItem, FileListPage, FilePreview,
-    FileTypeList, FoundFile, PartitionRef, ScanResult,
+    BrowseOpened, Capabilities, CopyItem, DiskList, ExtractItem, FileFragment, FileListPage,
+    FilePreview, FileTypeList, FoundFile, PartitionRef, ScanResult,
 };
 use yisi_engine::protocol::{ClusterRun, FatRating, FsFix, MftFix, PartitionTableFix, SearchMode};
 
@@ -49,6 +49,16 @@ fn app_info(app: AppHandle) -> AppInfo {
     AppInfo {
         version: app.package_info().version.to_string(),
     }
+}
+
+/// 本项目的发布页。网址写死在这里，界面只能请求打开它，不能让宿主打开任意网址。
+const RELEASES_PAGE: &str = "https://github.com/yisi-code/Yisi-Disk/releases/latest";
+
+/// 用默认浏览器打开发布页（「关于」里检查到新版本后去下载）。
+#[tauri::command]
+fn open_releases_page() -> Result<(), HostError> {
+    tauri_plugin_opener::open_url(RELEASES_PAGE, None::<&str>)
+        .map_err(|error| HostError::new("openFailed", error.to_string()))
 }
 
 // 下面几个命令会等待引擎答复，标成 async 让它们在独立线程上运行，不阻塞界面
@@ -94,6 +104,7 @@ fn job_start_carve(
     output_dir: Option<String>,
     extensions: Vec<String>,
     keep_incomplete: Option<bool>,
+    join_fragments: Option<bool>,
     source_label: Option<String>,
 ) -> Result<(), HostError> {
     engines.start_carve(
@@ -105,6 +116,7 @@ fn job_start_carve(
         output_dir,
         extensions,
         keep_incomplete.unwrap_or(false),
+        join_fragments.unwrap_or(false),
         source_label.unwrap_or_default(),
     )
 }
@@ -155,7 +167,7 @@ fn carve_history_remove(
     history.remove(&record_id)
 }
 
-/// 预览只扫描、还没保存的文件：回到扫描任务的源上读。
+/// 预览只扫描、还没保存的文件：回到扫描任务的源上读。由两段拼成的文件给出 `fragments`，按这几段接起来读。
 #[tauri::command(async)]
 fn carve_preview_range(
     engines: State<'_, Engines>,
@@ -163,8 +175,15 @@ fn carve_preview_range(
     scan_job_id: String,
     offset: u64,
     length: u64,
+    fragments: Option<Vec<FileFragment>>,
 ) -> Result<FilePreview, HostError> {
-    engines.preview_range(&broker, &scan_job_id, offset, length)
+    engines.preview_range(
+        &broker,
+        &scan_job_id,
+        offset,
+        length,
+        fragments.unwrap_or_default(),
+    )
 }
 
 /// 保存只扫描时选中的文件（另存为）。不给输出目录时是为打开、复制而保存：存到程序文件夹下 `data` 里的 `open-cache`，
@@ -727,6 +746,7 @@ fn main() -> anyhow::Result<()> {
         })
         .invoke_handler(tauri::generate_handler![
             app_info,
+            open_releases_page,
             engine_capabilities,
             disk_list,
             carve_file_types,

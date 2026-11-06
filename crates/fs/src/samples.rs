@@ -15,8 +15,9 @@ mod ext;
 pub use ext::{EXT_ROOT, EXT_SAMPLE_NANOS, EXT_SAMPLE_SECONDS, ExtFlavor, ExtImage};
 mod ntfs;
 pub use ntfs::{
-    BITMAP_LCN as NTFS_BITMAP_LCN, COMPRESSION_UNIT_CLUSTERS, CompressedUnit, NtfsImage,
-    ROOT as NTFS_ROOT, TAG_WOF,
+    BITMAP_LCN as NTFS_BITMAP_LCN, COMPRESSION_UNIT_CLUSTERS, CompressedUnit,
+    LOG_FIRST_RECORD_PAGE as NTFS_LOG_FIRST_RECORD_PAGE, LOG_LCN as NTFS_LOG_LCN,
+    LOG_PAGE as NTFS_LOG_PAGE, NtfsImage, ROOT as NTFS_ROOT, TAG_WOF,
 };
 
 /// 系统 `RtlCompressBuffer`（LZNT1）压出来的一个 64 KiB 压缩单元：原文与压缩结果。

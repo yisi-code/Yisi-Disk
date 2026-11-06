@@ -5,6 +5,7 @@ import JobControls from './JobControls.vue'
 import { useHostDialog } from '../composables/useHostDialog'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { useJob } from '../composables/useJob'
+import { useWritePlanText } from '../composables/useWritePlanText'
 import {
   rateFatCopies,
   startSaveLost,
@@ -32,7 +33,7 @@ const props = defineProps<{
   report: FsCheckReport
   target: JobTarget
   partition: PartitionRef
-  /** 镜像文件或整块磁盘才能写；选的是一个盘符时只说明 */
+  /** raw 镜像文件或整块磁盘才能写；选的是一个盘符或 E01 镜像时只说明 */
   canWrite: boolean
   /** 别处正在忙（生成计划、检查）：不能再生成计划 */
   busy: boolean
@@ -93,6 +94,7 @@ const ISSUE_KINDS: Record<FsFix, string[]> = {
 const FAT_FAMILY = ['fat12', 'fat16', 'fat32', 'exfat']
 
 const { t, locale } = useI18n()
+const { writeBlockedText } = useWritePlanText()
 const { formatHostError } = useHostErrorText()
 const { dialogError, pickFolder } = useHostDialog()
 const domPrefix = useId()
@@ -383,7 +385,7 @@ function propose() {
         {{ t('fsCheck.fix.propose') }}
       </button>
       <span v-if="preparing" class="wizard__note" aria-live="polite">{{ t('fsCheck.fix.preparing') }}</span>
-      <span v-else-if="!canWrite" class="wizard__hint">{{ t('fsCheck.repair.volumeUnsupported') }}</span>
+      <span v-else-if="!canWrite" class="wizard__hint">{{ writeBlockedText(target, 'fsCheck.repair') }}</span>
       <span v-else-if="dirtyBlocked" class="wizard__hint wizard__hint--warning">{{ t('fsCheck.fix.dirtyBlocked') }}</span>
       <span v-else-if="unifying" class="wizard__hint">{{ t('fsCheck.fix.fatCopies.alone') }}</span>
       <span v-else-if="rebuilding" class="wizard__hint">{{ t('fsCheck.fix.rebuildBitmap.alone') }}</span>

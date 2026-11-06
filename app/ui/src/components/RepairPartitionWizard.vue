@@ -51,7 +51,7 @@ const {
 } = usePartitionText()
 const browse = useBrowse()
 const writePlan = useWritePlan()
-const { writeActionText, writeOutcomeText } = useWritePlanText()
+const { writeActionText, writeOutcomeText, writeBlockedText } = useWritePlanText()
 
 const titleElement = ref<HTMLHeadingElement | null>(null)
 const step = ref<WizardStep>('source')
@@ -103,7 +103,7 @@ const isBusy = computed(
 /** 结果页上正在确认一份写入计划：这时只显示确认内容 */
 const isConfirming = computed(() => step.value === 'result' && !isBrowsing.value && writePlan.plan.value !== null)
 
-/** 镜像文件与整块磁盘可以修（Windows 所在的盘由宿主拒绝）；卷上的偏移不是盘上的偏移，不修 */
+/** raw 镜像文件与整块磁盘可以修（Windows 所在的盘由宿主拒绝）；卷上的偏移不是盘上的偏移、E01 只读，不修 */
 const canWrite = computed(() => canWritePlan(diagnosedTarget.value))
 
 /** 诊断的这个源的写盘记录（宿主按认盘标识筛好） */
@@ -544,7 +544,7 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
           >
             {{ t('repair.fix.repairGpt') }}
           </button>
-          <span v-else class="wizard__hint">{{ t('repair.fix.volumeUnsupported') }}</span>
+          <span v-else class="wizard__hint">{{ writeBlockedText(diagnosedTarget, 'repair.fix') }}</span>
           <span class="wizard__note">{{ t('repair.fix.repairGptHint') }}</span>
         </div>
         <p v-if="diagnosis.partitions.length === 0" class="wizard__note">{{ t('repair.result.none') }}</p>
@@ -687,7 +687,7 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
             </span>
           </div>
           <p v-if="!canWrite && fixDirection(partition)" class="wizard__hint">
-            {{ t('repair.fix.volumeUnsupported') }}
+            {{ writeBlockedText(diagnosedTarget, 'repair.fix') }}
           </p>
           <p v-if="browseError?.number === partition.number" class="wizard__error" role="alert">
             {{ t('repair.browse.failed', { reason: browseError.text }) }}

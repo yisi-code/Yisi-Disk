@@ -624,11 +624,19 @@ fn device_of(target: &Target) -> Result<Writable, HostError> {
     }
 }
 
-/// 镜像文件与整块物理盘可以写，卷不行（卷上的偏移不是盘上的偏移）。物理盘：Windows 所在的盘不写，
-/// 写前备份所在的 `data` 也不能在这块盘上（盘写坏了备份要还在）。
+/// raw 镜像文件与整块物理盘可以写；卷不行（卷上的偏移不是盘上的偏移），E01 也不行（压缩的只读镜像，按签名认，
+/// 不看扩展名）。物理盘：Windows 所在的盘不写，写前备份所在的 `data` 也不能在这块盘上（盘写坏了备份要还在）。
 fn writable(target: &Target, data_dir: &Path) -> Result<Writable, HostError> {
     match target {
-        Target::Image { .. } => device_of(target),
+        Target::Image { path } => {
+            if matches!(
+                yisi_io::image_format(Path::new(path)),
+                Ok(yisi_io::ImageFormat::Ewf)
+            ) {
+                return Err(HostError::new("writeTargetEwf", path.clone()));
+            }
+            device_of(target)
+        }
         #[cfg(windows)]
         Target::Disk { disk_number } => writable_disk(*disk_number, data_dir),
         #[cfg(not(windows))]

@@ -462,7 +462,13 @@ function statusText(row: StatusRow): string {
 }
 
 function entryBadge(entry: FsEntry): string | null {
-  return entry.deleted ? t(`partitionFiles.state.${entry.state}`) : null
+  if (!entry.deleted) {
+    return null
+  }
+  // 从日志找回、日志里只有名字：与 ext 删除时清空位置是同一个状态，原因不同
+  return entry.fromLog && entry.state === 'cleared'
+    ? t('partitionFiles.state.logNameOnly')
+    : t(`partitionFiles.state.${entry.state}`)
 }
 
 /** 虚拟目录的名字由界面给出；复制时它也是输出目录里的文件夹名 */
@@ -556,6 +562,9 @@ function withShownName(entry: FsEntry): FsEntry {
             >
               {{ entryBadge(row.entry) }}
             </span>
+            <span v-if="row.entry.fromLog" class="tree-list__badge fs-browser__badge--log">
+              {{ t('partitionFiles.browser.fromLog') }}
+            </span>
             <span v-if="attributesLabel(row.entry)" class="tree-list__badge fs-browser__badge--system">
               {{ attributesLabel(row.entry) }}
             </span>
@@ -632,6 +641,11 @@ function withShownName(entry: FsEntry): FsEntry {
 
 .fs-browser__badge--system {
   color: var(--color-text-muted);
+}
+
+.fs-browser__badge--log {
+  color: var(--color-text-muted);
+  border-style: dotted;
 }
 
 .fs-browser__badge--unsupported {

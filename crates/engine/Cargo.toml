@@ -21,6 +21,7 @@ yisi-rpc.workspace = true
 [dev-dependencies]
 yisi-formats = { workspace = true, features = ["test-samples"] }
 yisi-fs = { workspace = true, features = ["test-samples"] }
+yisi-io = { workspace = true, features = ["test-samples"] }
 yisi-repair = { workspace = true, features = ["test-samples"] }
 
 [lints]

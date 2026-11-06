@@ -10,6 +10,7 @@ import { useCopy } from '../composables/useCopy'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { useHostDialog } from '../composables/useHostDialog'
 import {
+  hasReadableContent,
   isDeviceKind,
   openCopiedFile,
   openOrReveal,
@@ -115,6 +116,9 @@ const copyStatusText = computed(() => {
       }
       if (copy.stage.value === 'scanFree') {
         return t('partitionFiles.copy.status.scanningFree', { percent: copy.percent.value })
+      }
+      if (copy.stage.value === 'scanLog') {
+        return t('partitionFiles.copy.status.scanningLog', { percent: copy.percent.value })
       }
       return t('partitionFiles.copy.status.running', {
         ...copy.progressParams.value,
@@ -229,7 +233,7 @@ async function handleSaveAs() {
 
 /** 双击文件或点「用默认程序打开」：先在 open-cache 里复制一份，复制好再交给系统打开 */
 async function openItem(item: TreeItem) {
-  if (item.entry.isDir || item.entry.unsupported !== null || copy.isBusy.value) {
+  if (!hasReadableContent(item.entry) || copy.isBusy.value) {
     return
   }
   selectedItem.value = item

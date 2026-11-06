@@ -3,7 +3,9 @@
 //!
 //! 三段流水线：读线程顺序读设备，调用线程识别文件，写线程写出，读盘、识别、写盘同时进行。
 //!
-//! 目前只处理连续存放的文件；碎片重组、块大小探测在后续阶段加入。
+//! 文件按连续存放来找。打开两段重组（[`CarveOptions::join_fragments`]）时，能逐位核对内容的格式（JPEG）
+//! 另做两段重组（[`gap`]）：文件在某个块边界之后断了、剩下的部分存在后面别处时，找到那一段，拼成完整的文件
+//! （[`RecoveredFile::fragments`] 记着两段各在哪）。
 //!
 //! 续扫：扫描时不断给出检查点（[`CarveControl::checkpoint`]），即从哪里接着扫不会漏掉、也不会重复已经报出的文件；
 //! 停下后从最后一个检查点（[`CarveOptions::start`]）接着扫。
@@ -14,6 +16,8 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
+mod gap;
+mod joined;
 mod sink;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -26,10 +30,13 @@ use std::time::Instant;
 use yisi_formats::{DataCheck, Recovering, Registry};
 use yisi_io::BlockDevice;
 
+pub use joined::FragmentView;
 pub use sink::{
-    DirectorySink, INCOMPLETE_MARK, Incomplete, PARTIAL_SUFFIX, RecoveredFile, ScanOnlySink, Sink,
-    SinkFile, partial_path, recovered_name, rename_new,
+    DirectorySink, Fragment, INCOMPLETE_MARK, Incomplete, PARTIAL_SUFFIX, RecoveredFile,
+    ScanOnlySink, Sink, SinkFile, partial_path, recovered_name, rename_new,
 };
+
+use gap::{ReadCache, Reassembled, Search};
 
 /// 每次从设备读这么多再按块处理，进度也按这个粒度报告。
 const CHUNK_SIZE: usize = 1 << 20;
@@ -53,6 +60,9 @@ pub struct CarveOptions {
     pub start: u64,
     /// 部分恢复：没能完整的文件也存下插件说得出的那一段，标成不完整。
     pub keep_incomplete: bool,
+    /// 两段重组：照片（基线 JPEG）断了时在后面找它剩下的那一段，拼成完整的文件。要逐位核对每张这样的照片，
+    /// 扫描明显变慢，默认关；关着时插件一概不做这些。
+    pub join_fragments: bool,
 }
 
 /// 扫描过程中查询取消、报告进度与找到的文件。
@@ -127,7 +137,7 @@ pub fn carve(
         };
         let mut reader = ChunkReader::spawn(scope, device, block_size);
         let scanned = scan(
-            device.size(),
+            device,
             &mut reader,
             registry,
             options,
@@ -169,7 +179,7 @@ pub fn carve(
     reason = "扫描所需的各方都由 carve 现场建好传入"
 )]
 fn scan(
-    size: u64,
+    device: &dyn BlockDevice,
     reader: &mut ChunkReader<'_>,
     registry: &Registry,
     options: &CarveOptions,
@@ -178,6 +188,7 @@ fn scan(
     report: &mut CarveReport,
     control: &dyn CarveControl,
 ) -> Result<Option<u64>, CarveError> {
+    let size = device.size();
     let block = block_size as u64;
     let keep = options.keep_incomplete;
     let mut active: Option<Active> = None;
@@ -189,6 +200,9 @@ fn scan(
     let mut led_from: Option<u64> = None;
     // 往回找文件开头时位置会回退，检查点不跟着退（从已经报过的检查点接着扫，照样会在签名那一块往回找）
     let mut last_checkpoint = 0u64;
+    // 最近拼成的文件的第二段：这些块是它的数据，不再当作别的文件的开头
+    let mut second_fragment: Option<(u64, u64)> = None;
+    let mut read_cache = ReadCache::new();
 
     loop {
         if position >= size {
@@ -203,7 +217,7 @@ fn scan(
                 .or_else(|| current.recovering.finish(current.received));
             match length {
                 Some(length) => {
-                    output.commit(length, current.recovering.extension(), None)?;
+                    output.commit(length, current.recovering.extension(), None, &[])?;
                     break;
                 }
                 None => {
@@ -256,7 +270,7 @@ fn scan(
         {
             match current.recovering.finish(current.received) {
                 Some(length) => {
-                    output.commit(length, current.recovering.extension(), None)?;
+                    output.commit(length, current.recovering.extension(), None, &[])?;
                     claimed_end = current.start + length;
                 }
                 None => give_up(current, output, keep, &[], Incomplete::Overwritten)?,
@@ -281,6 +295,10 @@ fn scan(
         }
 
         if active.is_none() {
+            if second_fragment.is_some_and(|(start, end)| (start..end).contains(&position)) {
+                position += block;
+                continue;
+            }
             let Some(found) = registry.match_header(data, &options.enabled) else {
                 position += block;
                 continue;
@@ -305,11 +323,16 @@ fn scan(
             };
             let info = format.info();
             output.begin(start, info.extension);
+            let mut recovering = found.recovering;
+            if options.join_fragments {
+                recovering.enable_resumes();
+            }
             active = Some(Active {
                 start,
+                extension: info.extension,
                 max_size: info.max_size,
                 limit: info.max_size.min(size - start),
-                recovering: found.recovering,
+                recovering,
                 received: 0,
                 known_length: None,
                 nests_files: info.nests_files,
@@ -330,19 +353,59 @@ fn scan(
                 length,
                 before_block,
             } => {
-                if let Some(done) = active.take() {
-                    output.commit(length, done.recovering.extension(), None)?;
-                    claimed_end = done.start + length;
+                if let Some(mut done) = active.take() {
+                    // 标记段的走法到了结尾、逐位核对却不认（中间隔着别的数据）：先找第二段，找不到照原来的结论
+                    match reassemble(device, &mut read_cache, &mut done, block_size, control) {
+                        Search::Found(joined) => {
+                            position = keep_reassembled(
+                                device,
+                                output,
+                                &done,
+                                joined,
+                                block,
+                                &mut second_fragment,
+                            )?;
+                            continue;
+                        }
+                        Search::Cancelled => {
+                            // 接着扫时从它开头重新认
+                            output.discard()?;
+                            position = done.start;
+                            continue;
+                        }
+                        Search::NotFound => {
+                            output.commit(length, done.recovering.extension(), None, &[])?;
+                            claimed_end = done.start + length;
+                        }
+                    }
                 }
                 if !before_block {
                     position += block;
                 }
             }
             Fed::Invalid => {
-                if let Some(current) = active.take() {
-                    // 误识别的文件头，或文件后半段已是别的数据：从它的下一块重新找，它覆盖过的块里可能有真正的文件
-                    position = current.start + block;
-                    give_up(current, output, keep, data, Incomplete::Broken)?;
+                if let Some(mut current) = active.take() {
+                    match reassemble(device, &mut read_cache, &mut current, block_size, control) {
+                        Search::Found(joined) => {
+                            position = keep_reassembled(
+                                device,
+                                output,
+                                &current,
+                                joined,
+                                block,
+                                &mut second_fragment,
+                            )?;
+                        }
+                        Search::Cancelled => {
+                            output.discard()?;
+                            position = current.start;
+                        }
+                        Search::NotFound => {
+                            // 误识别的文件头，或文件后半段已是别的数据：从它的下一块重新找，它覆盖过的块里可能有真正的文件
+                            position = current.start + block;
+                            give_up(current, output, keep, data, Incomplete::Broken)?;
+                        }
+                    }
                 }
             }
             Fed::TooLarge => {
@@ -370,10 +433,95 @@ fn give_up(
         if let Some(length) = current.recovering.intact(seen) {
             let extra = usize::try_from(length.saturating_sub(current.received)).unwrap_or(0);
             output.write(unwritten.get(..extra).unwrap_or_default())?;
-            return output.commit(length, current.recovering.extension(), Some(reason));
+            return output.commit(length, current.recovering.extension(), Some(reason), &[]);
         }
     }
     output.discard()
+}
+
+/// 两段重组（见 [`gap`]）：格式插件给出了第一段可能的结尾时，在后面找第二段。
+fn reassemble(
+    device: &dyn BlockDevice,
+    cache: &mut ReadCache,
+    current: &mut Active,
+    block_size: usize,
+    control: &dyn CarveControl,
+) -> Search {
+    let resumes = current.recovering.resumes();
+    if resumes.is_empty() {
+        return Search::NotFound;
+    }
+    gap::search(
+        device,
+        cache,
+        current.start,
+        &resumes,
+        block_size,
+        current.max_size,
+        control,
+    )
+}
+
+/// 拼成了：换掉正在写的那份，把拼成的文件从源上重新读出、写出，记下第二段占的块，返回接着扫的位置——
+/// 第一段的结尾（中间隔着的块里可能有别的文件）。读不出时（刚刚还读得出）不保存，从它的下一块重新找。
+fn keep_reassembled(
+    device: &dyn BlockDevice,
+    output: &mut Output,
+    current: &Active,
+    joined: Reassembled,
+    block: u64,
+    second_fragment: &mut Option<(u64, u64)>,
+) -> Result<u64, CarveError> {
+    output.discard()?;
+    if !save_reassembled(device, output, current, joined)? {
+        return Ok(current.start + block);
+    }
+    *second_fragment = Some((joined.second_start, joined.second_start + joined.second_len));
+    Ok(current.start + joined.first_len)
+}
+
+/// 把拼成的文件从源上重新读出、写出。读不出时不保存，返回 `false`。
+fn save_reassembled(
+    device: &dyn BlockDevice,
+    output: &mut Output,
+    current: &Active,
+    joined: Reassembled,
+) -> Result<bool, CarveError> {
+    let fragments = [
+        Fragment {
+            offset: current.start,
+            length: joined.first_len,
+        },
+        Fragment {
+            offset: joined.second_start,
+            length: joined.second_len,
+        },
+    ];
+    output.begin(current.start, current.extension);
+    let mut buffer = vec![0u8; CHUNK_SIZE];
+    for fragment in fragments {
+        let mut done = 0u64;
+        while done < fragment.length {
+            let take = usize::try_from(fragment.length - done)
+                .map_or(CHUNK_SIZE, |left| left.min(CHUNK_SIZE));
+            let Some(piece) = buffer.get_mut(..take) else {
+                break;
+            };
+            if device.read_exact_at(fragment.offset + done, piece).is_err() {
+                output.discard()?;
+                return Ok(false);
+            }
+            output.write(piece)?;
+            done += take as u64;
+        }
+    }
+    output.commit(
+        joined.first_len + joined.second_len,
+        current.recovering.extension(),
+        None,
+        &fragments,
+    )?;
+    Ok(true)
 }
 
 /// 不算还在写线程里的文件，从哪里接着扫：有文件恢复到一半时是它的开头，否则是当前位置。
@@ -383,6 +531,8 @@ fn resume_point(active: Option<&Active>, position: u64) -> u64 {
 
 struct Active {
     start: u64,
+    /// 格式本身的扩展名。
+    extension: &'static str,
     max_size: u64,
     /// 文件长度的上限：格式的最大尺寸与设备剩余容量中较小的一个。
     limit: u64,
@@ -544,6 +694,8 @@ enum Command {
         length: u64,
         extension: Option<&'static str>,
         incomplete: Option<Incomplete>,
+        /// 由几段拼成时各段在源上的位置（见 [`RecoveredFile::fragments`]）。
+        fragments: Vec<Fragment>,
     },
     Discard,
 }
@@ -582,6 +734,7 @@ impl Output {
         length: u64,
         extension: Option<&'static str>,
         incomplete: Option<Incomplete>,
+        fragments: &[Fragment],
     ) -> Result<(), CarveError> {
         if let Some((offset, _)) = self.current {
             self.unreported.push_back(offset);
@@ -593,6 +746,7 @@ impl Output {
             length,
             extension,
             incomplete,
+            fragments: fragments.to_vec(),
         })
     }
 
@@ -663,10 +817,11 @@ fn write_files(
                 length,
                 extension,
                 incomplete,
+                fragments,
             } => {
                 if let Some(file) = current.take() {
                     // 调用线程 panic 时没人接收，文件照样留在磁盘上
-                    let _ = written.send(file.commit(length, extension, incomplete)?);
+                    let _ = written.send(file.commit(length, extension, incomplete, &fragments)?);
                 }
             }
             Command::Discard => {
@@ -943,6 +1098,7 @@ mod tests {
             length: u64,
             extension: Option<&str>,
             incomplete: Option<Incomplete>,
+            fragments: &[Fragment],
         ) -> io::Result<RecoveredFile> {
             self.data.truncate(length as usize);
             let extension = extension.map_or_else(|| self.extension.clone(), str::to_owned);
@@ -952,6 +1108,7 @@ mod tests {
                 offset: self.offset,
                 length,
                 incomplete,
+                fragments: fragments.to_vec(),
             };
             self.saved.lock().unwrap().push((file.clone(), self.data));
             Ok(file)
@@ -966,6 +1123,9 @@ mod tests {
     struct Recorder {
         cancel_after_progress: Option<usize>,
         progress_calls: Cell<usize>,
+        /// 查询取消这么多次之后取消（扫描每块查一次，找第二段时每读 1 MiB 查一次）。
+        cancel_after_queries: Option<usize>,
+        queries: Cell<usize>,
         found: RefCell<Vec<RecoveredFile>>,
         /// 检查点，以及给出它时已经报出了几个文件。
         checkpoints: RefCell<Vec<(u64, usize)>>,
@@ -973,8 +1133,12 @@ mod tests {
 
     impl CarveControl for Recorder {
         fn is_cancelled(&self) -> bool {
+            self.queries.set(self.queries.get() + 1);
             self.cancel_after_progress
                 .is_some_and(|limit| self.progress_calls.get() > limit)
+                || self
+                    .cancel_after_queries
+                    .is_some_and(|limit| self.queries.get() > limit)
         }
 
         fn progress(&self, _done: u64, _total: u64) {
@@ -1073,13 +1237,33 @@ mod tests {
             enabled: enabled.unwrap_or_else(|| vec![true; registry.formats().len()]),
             start: 0,
             keep_incomplete: keep,
+            join_fragments: true,
         };
         let mut sink = MemorySink::default();
         let report = carve(device, &registry, &options, &mut sink, control).unwrap();
         (report, sink)
     }
 
-    /// 部分恢复打开或关闭时存下的文件。
+    /// 部分恢复、两段重组分别打开或关闭时存下的文件。
+    fn saved_joining(
+        device: &MemoryDevice,
+        keep: bool,
+        join: bool,
+    ) -> Vec<(RecoveredFile, Vec<u8>)> {
+        let registry = Registry::builtin();
+        let options = CarveOptions {
+            block_size: BLOCK as u32,
+            enabled: vec![true; registry.formats().len()],
+            start: 0,
+            keep_incomplete: keep,
+            join_fragments: join,
+        };
+        let mut sink = MemorySink::default();
+        carve(device, &registry, &options, &mut sink, &Recorder::default()).unwrap();
+        sink.saved.lock().unwrap().clone()
+    }
+
+    /// 部分恢复打开或关闭时存下的文件（两段重组打开）。
     fn saved_with(device: &MemoryDevice, keep: bool) -> Vec<(RecoveredFile, Vec<u8>)> {
         let (_, sink) = run_with(device, None, keep, &Recorder::default());
         sink.saved.lock().unwrap().clone()
@@ -1202,6 +1386,7 @@ mod tests {
             enabled: vec![true; registry.formats().len()],
             start,
             keep_incomplete: false,
+            join_fragments: true,
         };
         carve(
             device,
@@ -1607,6 +1792,292 @@ mod tests {
         assert_eq!(found, [(iso_at + 4 * BLOCK as u64, "jpg")]);
     }
 
+    fn baseline(seed: u64, restart: u16) -> Vec<u8> {
+        samples::jpg_baseline(&samples::JpegLayout {
+            width: 400,
+            height: 300,
+            restart,
+            seed,
+            ..samples::JpegLayout::default()
+        })
+    }
+
+    /// 第一段在 `cut`（块边界）处断开。
+    fn cut_at(jpeg: &[u8], fraction: usize) -> usize {
+        jpeg.len() * fraction / 10 / BLOCK * BLOCK
+    }
+
+    /// 两段各在哪。
+    fn fragments_of(file: &RecoveredFile) -> Vec<(u64, u64)> {
+        file.fragments
+            .iter()
+            .map(|fragment| (fragment.offset, fragment.length))
+            .collect()
+    }
+
+    /// 间隔至少 8 块（4 KiB，常见的簇大小）：随机数据里大约每 256 字节就有一个熵编码数据里不该出现的标记，
+    /// 逐位核对在间隔的头几块里就会对不上。只隔一两块时随机数据有一成多的机会一个这样的标记都没有，
+    /// 核对会一路接到第二段里去、到文件结尾才对不上，那样拼不了（照原来的结论）。
+    #[test]
+    fn a_jpeg_stored_in_two_pieces_is_put_back_together() {
+        for (gap_blocks, restart, fraction) in [(8, 0, 5), (37, 4, 3), (2500, 0, 8), (9, 1, 1)] {
+            let jpeg = baseline(gap_blocks as u64, restart);
+            let cut = cut_at(&jpeg, fraction);
+            let mut image = ImageBuilder::new();
+            image
+                .garbage(3)
+                .file("jpg-1", jpeg[..cut].to_vec())
+                .garbage(gap_blocks)
+                .file("jpg-2", jpeg[cut..].to_vec())
+                .garbage(2)
+                .file("png", samples::png(&[700]))
+                .garbage(1);
+            let (first_at, ..) = image.placed[0];
+            let (second_at, ..) = image.placed[1];
+            let device = image.device(vec![]);
+            for keep in [false, true] {
+                let saved = saved_with(&device, keep);
+                let summary: Vec<_> = saved
+                    .iter()
+                    .map(|(file, _)| (file.offset, file.extension.as_str(), file.incomplete))
+                    .collect();
+                assert_eq!(
+                    summary,
+                    [(first_at, "jpg", None), (image.placed[2].0, "png", None)],
+                    "间隔 {gap_blocks} 块"
+                );
+                let (file, data) = &saved[0];
+                assert!(
+                    *data == jpeg,
+                    "间隔 {gap_blocks} 块：内容不一致，{} 字节（应为 {}），{:?}，第一段应到 {}、第二段应从 {second_at} 起",
+                    data.len(),
+                    jpeg.len(),
+                    fragments_of(file),
+                    first_at + cut as u64
+                );
+                assert_eq!(file.length, jpeg.len() as u64);
+                assert!(!file.name.contains(INCOMPLETE_MARK));
+                assert_eq!(
+                    fragments_of(file),
+                    [
+                        (first_at, cut as u64),
+                        (second_at, (jpeg.len() - cut) as u64)
+                    ]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn with_joining_off_nothing_is_reassembled_and_contiguous_files_are_the_same() {
+        let jpeg = baseline(7, 0);
+        let cut = cut_at(&jpeg, 5);
+        // 前五个是连续存放的完整文件，第六个是分成两段的照片
+        let mut image = five_formats();
+        image
+            .garbage(2)
+            .file("jpg-1", jpeg[..cut].to_vec())
+            .garbage(20)
+            .file("jpg-2", jpeg[cut..].to_vec())
+            .garbage(2)
+            .file("jpg", baseline(8, 3))
+            .garbage(1);
+        let device = image.device(vec![]);
+        for keep in [false, true] {
+            let off = saved_joining(&device, keep, false);
+            let on = saved_joining(&device, keep, true);
+            assert!(off.iter().all(|(file, _)| file.fragments.is_empty()));
+            assert_eq!(
+                on.iter()
+                    .filter(|(file, _)| !file.fragments.is_empty())
+                    .count(),
+                1
+            );
+            // 拼成的那张以外，两种模式下存下的文件一模一样
+            let others = |saved: &[(RecoveredFile, Vec<u8>)]| {
+                saved
+                    .iter()
+                    .filter(|(file, _)| file.offset != image.placed[5].0)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(others(&off), others(&on));
+            // 关着时那张照片照原来的规则：不存，或存下不完整的一段
+            let broken = off
+                .iter()
+                .find(|(file, _)| file.offset == image.placed[5].0);
+            assert_eq!(broken.is_some(), keep);
+            assert!(broken.is_none_or(|(file, _)| file.incomplete.is_some()));
+        }
+    }
+
+    #[test]
+    fn a_whole_jpeg_or_another_jpegs_tail_in_between_is_not_taken_for_the_rest() {
+        let jpeg = baseline(1, 0);
+        let other = baseline(2, 0);
+        let cut = cut_at(&jpeg, 4);
+        // 另一张同样编码表的照片从中间某个块起的后半段：标记段的走法会一直走到它的 EOI
+        let other_tail = other[cut_at(&other, 5)..].to_vec();
+        for between in [other_tail, other.clone()] {
+            let mut image = ImageBuilder::new();
+            image
+                .garbage(2)
+                .file("jpg-1", jpeg[..cut].to_vec())
+                .file("between", between.clone())
+                .garbage(3)
+                .file("jpg-2", jpeg[cut..].to_vec())
+                .garbage(2);
+            let (first_at, ..) = image.placed[0];
+            let (between_at, ..) = image.placed[1];
+            let (second_at, ..) = image.placed[2];
+            let saved = saved_with(&image.device(vec![]), true);
+            let (file, data) = saved
+                .iter()
+                .find(|(file, _)| file.offset == first_at)
+                .expect("第一段的位置上应有文件");
+            assert!(*data == jpeg, "拼错了：{:?}", fragments_of(file));
+            assert_eq!(
+                fragments_of(file),
+                [
+                    (first_at, cut as u64),
+                    (second_at, (jpeg.len() - cut) as u64)
+                ]
+            );
+            // 夹在中间的完整照片照样找到；只有后半段的那张没有文件头，不出现
+            let others: Vec<_> = saved
+                .iter()
+                .filter(|(file, _)| file.offset != first_at)
+                .map(|(file, data)| (file.offset, data.len()))
+                .collect();
+            if between.len() == other.len() {
+                assert_eq!(others, [(between_at, other.len())]);
+            } else {
+                assert!(others.is_empty(), "{others:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn without_its_second_piece_a_broken_jpeg_is_handled_as_before() {
+        let jpeg = baseline(3, 0);
+        let other = baseline(4, 0);
+        let cut = cut_at(&jpeg, 5);
+        // 后面只有另一张照片的后半段（同样的编码表），没有它自己的
+        let mut image = ImageBuilder::new();
+        image
+            .garbage(2)
+            .file("jpg-1", jpeg[..cut].to_vec())
+            .garbage(40)
+            .file("other-2", other[cut_at(&other, 5)..].to_vec())
+            .garbage(2);
+        let (first_at, ..) = image.placed[0];
+        let device = image.device(vec![]);
+        assert!(saved_with(&device, false).is_empty());
+        let saved = saved_with(&device, true);
+        assert_eq!(saved.len(), 1);
+        let (file, data) = &saved[0];
+        assert_eq!(file.offset, first_at);
+        assert!(file.incomplete.is_some());
+        assert!(file.fragments.is_empty());
+        assert!(data[..cut] == jpeg[..cut]);
+    }
+
+    #[test]
+    fn a_reassembled_jpeg_reproduces_itself_from_its_fragments() {
+        let jpeg = baseline(5, 2);
+        let cut = cut_at(&jpeg, 6);
+        let mut image = ImageBuilder::new();
+        image
+            .garbage(1)
+            .file("jpg-1", jpeg[..cut].to_vec())
+            .garbage(17)
+            .file("jpg-2", jpeg[cut..].to_vec())
+            .garbage(1);
+        let device = image.device(vec![]);
+        let saved = saved_with(&device, false);
+        let file = &saved[0].0;
+        assert_eq!(file.fragments.len(), 2);
+        // 另存时：只拿那两段接起来、只启用它的格式再走一遍，得到同样长的完整文件
+        let view = FragmentView::new(&device, &file.fragments);
+        let registry = Registry::builtin();
+        let mut enabled = vec![false; registry.formats().len()];
+        enabled[registry.position("jpg").unwrap()] = true;
+        let pieces = MemoryDevice {
+            data: {
+                let mut all = vec![0; view.size() as usize];
+                view.read_exact_at(0, &mut all).unwrap();
+                all
+            },
+            bad: vec![],
+        };
+        let (_, sink) = run_with(&pieces, Some(enabled), false, &Recorder::default());
+        let again = sink.saved.lock().unwrap().clone();
+        assert_eq!(again.len(), 1);
+        assert!(again[0].1 == jpeg);
+        assert!(again[0].0.fragments.is_empty());
+    }
+
+    #[test]
+    fn stopping_anywhere_around_a_search_and_resuming_finds_every_file_once() {
+        let jpeg = baseline(6, 0);
+        let cut = cut_at(&jpeg, 5);
+        let mut image = ImageBuilder::new();
+        image
+            .garbage(1)
+            .file("png", samples::png(&[900]))
+            .file("jpg-1", jpeg[..cut].to_vec())
+            .garbage(300)
+            .file("jpg-2", jpeg[cut..].to_vec())
+            .garbage(1)
+            .file("zip", samples::zip(&[("a.txt", 300, true)], b""))
+            .garbage(1);
+        let device = image.device(vec![]);
+        let summary = |found: &[RecoveredFile]| {
+            found
+                .iter()
+                .map(|file| (file.offset, file.length, fragments_of(file)))
+                .collect::<Vec<_>>()
+        };
+        let whole = Recorder::default();
+        run_from(&device, 0, &whole).unwrap();
+        let expected = summary(&whole.found.borrow());
+        assert_eq!(expected.len(), 3);
+        assert_eq!(expected[1].2.len(), 2, "照片应拼成");
+
+        // 扫描与找第二段都是每块查一次取消：停在照片之前、照片里（第一段几十块，之后找第二段要过 300 块）、
+        // 拼成之后。停在照片里的，接着扫时从照片开头重新认
+        let mut stopped_inside = 0;
+        for queries in (1..=700).step_by(20) {
+            let first = Recorder {
+                cancel_after_queries: Some(queries),
+                ..Recorder::default()
+            };
+            if run_from(&device, 0, &first).is_some() {
+                continue;
+            }
+            let &(resume_at, reported) = first.checkpoints.borrow().last().unwrap();
+            assert_eq!(reported, first.found.borrow().len());
+            if resume_at == image.placed[1].0 && reported == 1 {
+                stopped_inside += 1;
+            }
+            let second = Recorder::default();
+            run_from(&device, resume_at, &second).unwrap();
+            // 同一个起点只算一次（宿主的扫描记录也这样认）
+            let mut both = summary(&first.found.borrow());
+            for file in summary(&second.found.borrow()) {
+                if both.iter().all(|seen| seen.0 != file.0) {
+                    both.push(file);
+                }
+            }
+            assert_eq!(
+                both, expected,
+                "查询 {queries} 次后停下，从 {resume_at} 接着扫"
+            );
+        }
+        // 第一段只占几个停下的点，多出来的都停在找第二段的途中
+        assert!(stopped_inside >= 8, "停在照片里的只有 {stopped_inside} 次");
+    }
+
     #[test]
     fn cancellation_returns_none() {
         let mut image = ImageBuilder::new();
@@ -1628,6 +2099,7 @@ mod tests {
             enabled: vec![true; registry.formats().len()],
             start: 0,
             keep_incomplete: false,
+            join_fragments: true,
         };
         let result = carve(
             &image.device(vec![]),
@@ -1703,6 +2175,7 @@ mod tests {
             enabled: vec![true; registry.formats().len()],
             start: 0,
             keep_incomplete: false,
+            join_fragments: true,
         };
         // 五个文件：写线程在第一个上出错后，扫描还要再交出后面几个，发送失败。
         // 一个文件：扫描先结束，错误要在等写线程时取回。

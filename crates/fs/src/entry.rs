@@ -267,6 +267,12 @@ pub enum Location {
         inode: u32,
         generation: u32,
     },
+    /// NTFS 从 `$LogFile` 里找回的已删除项：删除前的 MFT 记录号与序号。MFT 里这条记录已被重用或清掉，
+    /// 名字与数据位置都来自日志（扫描 MFT 时一并读出）。
+    Logged {
+        record: u64,
+        sequence: u16,
+    },
 }
 
 /// 文件在卷里的位置，足以重新找到并读出它，不依赖目录缓存。
@@ -292,12 +298,17 @@ impl FileRef {
             && !self.deleted
     }
 
-    /// NTFS 的 MFT 记录号。
+    /// NTFS 的 MFT 记录号（从日志找回的项是删除前的记录号）。
     pub fn record(&self) -> Option<u64> {
         match self.location {
-            Location::Mft { record, .. } => Some(record),
+            Location::Mft { record, .. } | Location::Logged { record, .. } => Some(record),
             _ => None,
         }
+    }
+
+    /// 是不是从 NTFS 的 `$LogFile` 里找回的（[`Location::Logged`]）。
+    pub fn from_log(&self) -> bool {
+        matches!(self.location, Location::Logged { .. })
     }
 
     /// 是不是「找不到原目录的文件」这个虚拟目录。
@@ -312,8 +323,9 @@ impl FileRef {
         }
     }
 
-    /// 编成界面原样传回的字符串：FAT / exFAT 如 `r1-d0-x0-c2-s0-v0-k0`，NTFS 如 `n1-d0-x1-m42-q3-s100`，
-    /// 虚拟目录为 `n1-o`（各文件系统共用），ext 如 `e1-d0-x1-i12-g7-s100`；有修改时间时末尾另有一段（`tn…`、`td…o…` 或 `te…x…`）。
+    /// 编成界面原样传回的字符串：FAT / exFAT 如 `r1-d0-x0-c2-s0-v0-k0`，NTFS 如 `n1-d0-x1-m42-q3-s100`（从日志找回的
+    /// 如 `j1-d0-x1-m42-q3-s100`），虚拟目录为 `n1-o`（各文件系统共用），ext 如 `e1-d0-x1-i12-g7-s100`；
+    /// 有修改时间时末尾另有一段（`tn…`、`td…o…` 或 `te…x…`）。
     pub fn to_token(&self) -> String {
         let (dir, deleted) = (u8::from(self.is_dir), u8::from(self.deleted));
         let token = match self.location {
@@ -330,6 +342,9 @@ impl FileRef {
             Location::Orphans => "n1-o".to_owned(),
             Location::Inode { inode, generation } => {
                 format!("e1-d{dir}-x{deleted}-i{inode}-g{generation}-s{}", self.size)
+            }
+            Location::Logged { record, sequence } => {
+                format!("j1-d{dir}-x{deleted}-m{record}-q{sequence}-s{}", self.size)
             }
         };
         match self.modified {
@@ -374,7 +389,7 @@ impl FileRef {
                     modified: None,
                 }
             }
-            "n1" => {
+            "n1" | "j1" => {
                 let record = field('m')?;
                 let sequence = u16::try_from(field('q')?).ok()?;
                 let size = field('s')?;
@@ -382,7 +397,11 @@ impl FileRef {
                     size,
                     is_dir,
                     deleted,
-                    location: Location::Mft { record, sequence },
+                    location: if version == "j1" {
+                        Location::Logged { record, sequence }
+                    } else {
+                        Location::Mft { record, sequence }
+                    },
                     modified: None,
                 }
             }
@@ -574,6 +593,16 @@ mod tests {
             "n1-d1-x0-m1099511627776-q65535-s7-tn5"
         );
         assert_eq!(FileRef::from_token("n1-o"), Some(FileRef::orphans()));
+        let logged = FileRef {
+            location: Location::Logged {
+                record: 42,
+                sequence: 3,
+            },
+            ..record
+        };
+        assert_eq!(logged.to_token(), "j1-d1-x0-m42-q3-s7");
+        assert_eq!(FileRef::from_token(&logged.to_token()), Some(logged));
+        assert!(logged.from_log() && !record.from_log());
         for bad in [
             "",
             "n1",

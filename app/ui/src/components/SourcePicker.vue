@@ -5,7 +5,7 @@ import DiskPicker from './DiskPicker.vue'
 import { useEngineCapabilities } from '../composables/useEngineCapabilities'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import type { DeviceTarget, SourceKind } from '../composables/useSourceSelection'
-import { pickDirectory, pickFile, toHostError, type HostError } from '../services/host'
+import { pickDirectory, pickImageFile, toHostError, type HostError } from '../services/host'
 
 /**
  * 选来源：镜像文件、物理磁盘（整块盘或其中一个卷），给了 folderHint 时还可以选文件夹。状态由 useSourceSelection 提供。
@@ -39,11 +39,15 @@ watch(
   { immediate: true },
 )
 
-/** 系统的选择文件对话框；用户取消时什么也不改 */
+/** 系统的选择文件对话框（按镜像文件过滤，含 E01）；用户取消时什么也不改 */
 async function browseImage() {
   dialogError.value = null
   try {
-    const path = await pickFile(t('source.pickTitle'))
+    const path = await pickImageFile(t('source.pickTitle'), {
+      images: t('source.filterImages'),
+      ewf: t('source.filterEwf'),
+      all: t('source.filterAll'),
+    })
     if (path !== null) {
       imagePath.value = path
     }

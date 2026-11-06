@@ -84,6 +84,14 @@ fn ustar_magic(header: &[u8]) -> bool {
     magic == Some(b"ustar\x0000".as_slice()) || magic == Some(b"ustar  \0".as_slice())
 }
 
+/// 一个 TAR 归档的第一个头块（开头 512 字节）：带 `ustar` 标识、校验和对得上、长度读得出。
+/// gzip 按解压出的开头判断里面是不是 TAR 时也用它。
+pub(crate) fn first_header_ok(block: &[u8]) -> bool {
+    block.get(..BLOCK as usize).is_some_and(|header| {
+        ustar_magic(header) && checksum_ok(header) && data_len(header).is_some()
+    })
+}
+
 impl FileFormat for Tar {
     fn info(&self) -> &FormatInfo {
         &INFO
@@ -94,9 +102,7 @@ impl FileFormat for Tar {
     }
 
     fn header_check(&self, block: &[u8]) -> Option<Box<dyn Recovering>> {
-        let header = block.get(..BLOCK as usize)?;
-        let plausible = ustar_magic(header) && checksum_ok(header) && data_len(header).is_some();
-        plausible.then(|| {
+        first_header_ok(block).then(|| {
             Box::new(Walker::new(
                 INFO.max_size,
                 TarStructure {

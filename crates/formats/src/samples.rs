@@ -1504,6 +1504,21 @@ pub fn pst(unicode: bool, ost: bool, len: usize) -> Vec<u8> {
 
 /// 未压缩的 SWF：`tags` 是各标签的数据长度（63 以上用长标签头），最后是 End 标签；文件头写着总长度。
 pub fn swf(tags: &[usize]) -> Vec<u8> {
+    swf_with(tags, false)
+}
+
+/// 压缩的 SWF（`CWS`）：结构同 [`swf`]，标签内容换成可压缩的文字（[`compressible`]），文件头之后用 zlib 压缩；
+/// 头里的长度仍是解压后的总长。
+pub fn cws(tags: &[usize]) -> Vec<u8> {
+    let plain = swf_with(tags, true);
+    let mut out = b"CWS".to_vec();
+    out.extend_from_slice(&plain[3..8]);
+    out.extend(miniz_oxide::deflate::compress_to_vec_zlib(&plain[8..], 6));
+    out
+}
+
+/// `text`：标签内容用可压缩的文字，否则是随机字节。
+fn swf_with(tags: &[usize], text: bool) -> Vec<u8> {
     let mut noise = Noise::new(0x0053_5746);
     let mut out = b"FWS\x0A\0\0\0\0".to_vec();
     // 舞台大小：每个坐标 15 位，5 + 60 = 65 位，占 9 字节
@@ -1519,11 +1534,100 @@ pub fn swf(tags: &[usize]) -> Vec<u8> {
         } else {
             put16(&mut out, (code << 6) | len as u16);
         }
-        out.extend(noise.bytes(len));
+        if text {
+            out.extend(compressible(len, index as u64 + 1));
+        } else {
+            out.extend(noise.bytes(len));
+        }
     }
     put16(&mut out, 0);
     let total = out.len() as u32;
     out[4..8].copy_from_slice(&total.to_le_bytes());
+    out
+}
+
+/// 可压缩的内容：按固定种子从一小组词里挑、以空格隔开，夹着随机数字，像一段文字；deflate 压缩后约为原来的
+/// 三分之一，解压要走真正的 Huffman 编码与回引（随机字节只会被原样存放）。
+pub fn compressible(len: usize, seed: u64) -> Vec<u8> {
+    const WORDS: [&str; 16] = [
+        "disk",
+        "sector",
+        "cluster",
+        "volume",
+        "recover",
+        "the",
+        "of",
+        "and",
+        "partition",
+        "file",
+        "table",
+        "entry",
+        "boot",
+        "record",
+        "image",
+        "\n",
+    ];
+    let mut noise = Noise::new(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    let mut out = Vec::with_capacity(len + 32);
+    while out.len() < len {
+        out.extend_from_slice(WORDS[(noise.next_u64() % 16) as usize].as_bytes());
+        out.push(b' ');
+        if noise.next_u64().is_multiple_of(3) {
+            out.extend_from_slice((noise.next_u64() % 100_000).to_string().as_bytes());
+            out.push(b' ');
+        }
+    }
+    out.truncate(len);
+    out
+}
+
+/// gzip 成员头里带哪些可选字段，内容按哪一级压缩（0 只存不压）。
+#[derive(Clone, Copy)]
+pub struct GzipLayout<'a> {
+    pub name: Option<&'a str>,
+    pub extra: Option<&'a [u8]>,
+    pub comment: Option<&'a str>,
+    pub header_crc: bool,
+    pub level: u8,
+}
+
+impl Default for GzipLayout<'_> {
+    fn default() -> Self {
+        Self {
+            name: None,
+            extra: None,
+            comment: None,
+            header_crc: false,
+            level: 6,
+        }
+    }
+}
+
+/// gzip 的一个成员：`content` 按 `layout` 压缩；几个成员首尾相接就是多成员的 gzip。
+pub fn gzip(content: &[u8], layout: &GzipLayout) -> Vec<u8> {
+    let flags = u8::from(layout.header_crc) << 1
+        | u8::from(layout.extra.is_some()) << 2
+        | u8::from(layout.name.is_some()) << 3
+        | u8::from(layout.comment.is_some()) << 4;
+    let mut out = vec![0x1F, 0x8B, 0x08, flags];
+    put32(&mut out, 0x6543_2100); // 修改时间
+    out.push(if layout.level >= 9 { 2 } else { 0 }); // 额外标志
+    out.push(3); // 操作系统：Unix
+    if let Some(extra) = layout.extra {
+        put16(&mut out, extra.len() as u16);
+        out.extend_from_slice(extra);
+    }
+    for text in [layout.name, layout.comment].into_iter().flatten() {
+        out.extend_from_slice(text.as_bytes());
+        out.push(0);
+    }
+    if layout.header_crc {
+        let crc = crc32(&[&out]);
+        put16(&mut out, crc as u16);
+    }
+    out.extend(miniz_oxide::deflate::compress_to_vec(content, layout.level));
+    put32(&mut out, crc32(&[content]));
+    put32(&mut out, content.len() as u32);
     out
 }
 
@@ -2035,4 +2139,245 @@ pub fn flac(layout: &FlacLayout) -> Vec<u8> {
 /// [`flac`] 样本里每一帧的起点。
 pub fn flac_frame_starts(layout: &FlacLayout) -> Vec<usize> {
     flac_build(layout).1
+}
+
+/// 真正按哈夫曼编码写出熵编码数据的基线 JPEG（[`jpg_baseline`]）。系数是伪随机的，不对应什么画面，
+/// 但每一位都合乎编码规则，能逐位解码到 EOI。
+#[derive(Debug, Clone)]
+pub struct JpegLayout {
+    pub width: u16,
+    pub height: u16,
+    /// 彩色（YCbCr，4:2:0 交错，色度用自己的一套表）还是灰度（一个分量）。
+    pub color: bool,
+    /// 每隔多少个 MCU 插一个 RST 标记；0 是不插（没有 DRI 段）。
+    pub restart: u16,
+    /// 亮度块大约几个非零的交流系数（色度块少一些），越大熵编码数据越长。
+    pub detail: u8,
+    pub seed: u64,
+}
+
+impl Default for JpegLayout {
+    fn default() -> Self {
+        Self {
+            width: 256,
+            height: 256,
+            color: true,
+            restart: 0,
+            detail: 6,
+            seed: 0x004A_4246,
+        }
+    }
+}
+
+/// 标准里的示例哈夫曼表：亮度、色度各一套 DC 与 AC。
+const JPEG_DC_COUNTS: [[u8; 16]; 2] = [
+    [0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0],
+    [0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0],
+];
+const JPEG_AC_COUNTS: [[u8; 16]; 2] = [
+    [0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 0x7D],
+    [0, 2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 0x77],
+];
+const JPEG_AC_VALUES: [[u8; 162]; 2] = [
+    [
+        0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12, 0x21, 0x31, 0x41, 0x06, 0x13, 0x51, 0x61,
+        0x07, 0x22, 0x71, 0x14, 0x32, 0x81, 0x91, 0xA1, 0x08, 0x23, 0x42, 0xB1, 0xC1, 0x15, 0x52,
+        0xD1, 0xF0, 0x24, 0x33, 0x62, 0x72, 0x82, 0x09, 0x0A, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x25,
+        0x26, 0x27, 0x28, 0x29, 0x2A, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x43, 0x44, 0x45,
+        0x46, 0x47, 0x48, 0x49, 0x4A, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x63, 0x64,
+        0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x83,
+        0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8A, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99,
+        0x9A, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6,
+        0xB7, 0xB8, 0xB9, 0xBA, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xD2, 0xD3,
+        0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8,
+        0xE9, 0xEA, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA,
+    ],
+    [
+        0x00, 0x01, 0x02, 0x03, 0x11, 0x04, 0x05, 0x21, 0x31, 0x06, 0x12, 0x41, 0x51, 0x07, 0x61,
+        0x71, 0x13, 0x22, 0x32, 0x81, 0x08, 0x14, 0x42, 0x91, 0xA1, 0xB1, 0xC1, 0x09, 0x23, 0x33,
+        0x52, 0xF0, 0x15, 0x62, 0x72, 0xD1, 0x0A, 0x16, 0x24, 0x34, 0xE1, 0x25, 0xF1, 0x17, 0x18,
+        0x19, 0x1A, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x43, 0x44,
+        0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x63,
+        0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A,
+        0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8A, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97,
+        0x98, 0x99, 0x9A, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xB2, 0xB3, 0xB4,
+        0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA,
+        0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7,
+        0xE8, 0xE9, 0xEA, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA,
+    ],
+];
+
+/// 按码长计数与符号给出每个符号的（码字，码长）。
+fn jpeg_codes(counts: &[u8; 16], values: &[u8]) -> [(u16, u8); 256] {
+    let mut codes = [(0u16, 0u8); 256];
+    let (mut code, mut index) = (0u16, 0usize);
+    for (length, &count) in counts.iter().enumerate() {
+        for _ in 0..count {
+            codes[values[index] as usize] = (code, length as u8 + 1);
+            code += 1;
+            index += 1;
+        }
+        code <<= 1;
+    }
+    codes
+}
+
+/// 熵编码数据的位写入：0xFF 后补 0x00，结束或 RST 之前用 1 补满字节。
+struct JpegBits {
+    out: Vec<u8>,
+    bits: u32,
+    count: u32,
+}
+
+impl JpegBits {
+    fn put(&mut self, value: u32, length: u32) {
+        for shift in (0..length).rev() {
+            self.bits = (self.bits << 1) | ((value >> shift) & 1);
+            self.count += 1;
+            if self.count == 8 {
+                self.out.push(self.bits as u8);
+                if self.bits == 0xFF {
+                    self.out.push(0);
+                }
+                self.bits = 0;
+                self.count = 0;
+            }
+        }
+    }
+
+    /// 写一个系数：先按表写（游程，位数）的码字，再写数值本身。
+    fn coefficient(&mut self, codes: &[(u16, u8); 256], symbol_high: u32, value: i32) {
+        let size = 32 - value.unsigned_abs().leading_zeros();
+        let (code, length) = codes[((symbol_high << 4) | size) as usize];
+        self.put(u32::from(code), u32::from(length));
+        let bits = if value < 0 { value - 1 } else { value };
+        self.put(bits as u32 & ((1 << size) - 1), size);
+    }
+
+    fn pad(&mut self) {
+        while self.count != 0 {
+            self.put(1, 1);
+        }
+    }
+}
+
+/// 基线 JPEG（SOF0），见 [`JpegLayout`]。
+pub fn jpg_baseline(layout: &JpegLayout) -> Vec<u8> {
+    let mut noise = Noise::new(layout.seed);
+    let dc_values: Vec<u8> = (0..12).collect();
+    let dc_codes = [0, 1].map(|table| jpeg_codes(&JPEG_DC_COUNTS[table], &dc_values));
+    let ac_codes = [0, 1].map(|table| jpeg_codes(&JPEG_AC_COUNTS[table], &JPEG_AC_VALUES[table]));
+    let (width, height) = (u32::from(layout.width), u32::from(layout.height));
+
+    let mut out = b"\xFF\xD8".to_vec();
+    jpg_segment(&mut out, 0xE0, b"JFIF\0\x01\x01\0\0\x01\0\x01\0\0");
+    let mut quant = vec![0u8];
+    quant.extend((1..=64).map(|value| value as u8));
+    jpg_segment(&mut out, 0xDB, &quant);
+    // 分量标识、采样因子、用哪一套表
+    let components: &[(u8, u8, usize)] = if layout.color {
+        &[(1, 0x22, 0), (2, 0x11, 1), (3, 0x11, 1)]
+    } else {
+        &[(1, 0x11, 0)]
+    };
+    let mut frame = vec![8];
+    frame.extend_from_slice(&layout.height.to_be_bytes());
+    frame.extend_from_slice(&layout.width.to_be_bytes());
+    frame.push(components.len() as u8);
+    for &(id, sampling, _) in components {
+        frame.extend_from_slice(&[id, sampling, 0]);
+    }
+    jpg_segment(&mut out, 0xC0, &frame);
+    let mut tables = Vec::new();
+    for table in 0..if layout.color { 2 } else { 1 } {
+        tables.push(table as u8);
+        tables.extend_from_slice(&JPEG_DC_COUNTS[table]);
+        tables.extend_from_slice(&dc_values);
+        tables.push(0x10 | table as u8);
+        tables.extend_from_slice(&JPEG_AC_COUNTS[table]);
+        tables.extend_from_slice(&JPEG_AC_VALUES[table]);
+    }
+    jpg_segment(&mut out, 0xC4, &tables);
+    if layout.restart > 0 {
+        jpg_segment(&mut out, 0xDD, &layout.restart.to_be_bytes());
+    }
+    let mut scan = vec![components.len() as u8];
+    for &(id, _, table) in components {
+        scan.extend_from_slice(&[id, (table as u8) << 4 | table as u8]);
+    }
+    scan.extend_from_slice(&[0, 63, 0]);
+    jpg_segment(&mut out, 0xDA, &scan);
+
+    // 每个 MCU 里各块属于哪个分量
+    let (blocks, mcus): (&[usize], u32) = if layout.color {
+        (
+            &[0, 0, 0, 0, 1, 2],
+            width.div_ceil(16) * height.div_ceil(16),
+        )
+    } else {
+        (&[0], width.div_ceil(8) * height.div_ceil(8))
+    };
+    let mut writer = JpegBits {
+        out: Vec::new(),
+        bits: 0,
+        count: 0,
+    };
+    let mut predictors = [0i32; 3];
+    let mut levels = [0i32; 3];
+    let mut restarts = 0u8;
+    for mcu in 0..mcus {
+        if layout.restart > 0 && mcu > 0 && mcu % u32::from(layout.restart) == 0 {
+            writer.pad();
+            writer.out.extend_from_slice(&[0xFF, 0xD0 + (restarts & 7)]);
+            restarts = restarts.wrapping_add(1);
+            predictors = [0; 3];
+        }
+        for &component in blocks {
+            let table = components[component].2;
+            // DC 在一个范围里慢慢游走
+            let step = (noise.next_u64() % 41) as i32 - 20;
+            levels[component] = (levels[component] + step).clamp(-1000, 1000);
+            let diff = levels[component] - predictors[component];
+            predictors[component] = levels[component];
+            writer.coefficient(&dc_codes[table], 0, diff);
+
+            let detail = if table == 0 {
+                layout.detail
+            } else {
+                layout.detail / 3
+            };
+            let mut k = 1u32;
+            for _ in 0..noise.next_u64() % (u64::from(detail) * 2 + 1) {
+                let mut run = (noise.next_u64() % 20) as u32;
+                if k + run > 63 {
+                    break;
+                }
+                while run > 15 {
+                    let (code, length) = ac_codes[table][0xF0];
+                    writer.put(u32::from(code), u32::from(length));
+                    run -= 16;
+                    k += 16;
+                }
+                let size = 1 + (noise.next_u64() % 6) as u32;
+                let low = 1i32 << (size - 1);
+                let mut value = low + (noise.next_u64() % low as u64) as i32;
+                if noise.next_u64().is_multiple_of(2) {
+                    value = -value;
+                }
+                writer.coefficient(&ac_codes[table], run, value);
+                k += run + 1;
+                if k > 63 {
+                    break;
+                }
+            }
+            if k <= 63 {
+                let (code, length) = ac_codes[table][0x00];
+                writer.put(u32::from(code), u32::from(length));
+            }
+        }
+    }
+    writer.pad();
+    out.extend(writer.out);
+    out.extend_from_slice(b"\xFF\xD9");
+    out
 }

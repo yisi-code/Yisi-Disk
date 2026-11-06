@@ -70,12 +70,18 @@ pub(crate) trait Structure: Send {
         None
     }
 
+    /// `Scan` 查找时经过的字节：从 `at` 起的 `bytes`，按顺序、不重复，不含匹配处及其之后的字节
+    /// （匹配的开头跨块时，它前面几个字节可能已经在上一次交过来）。要逐字节看内容的格式（JPEG 的熵编码数据）用它；
+    /// 默认什么也不做。
+    fn scanned(&mut self, _at: u64, _bytes: &[u8]) {}
+
     /// 数据到此为止，正在等的一步只收到了一部分：从 `at` 起的 `bytes`（不足要的长度）。
     /// 按固定大小一段段要数据、自己在里面找边界的格式（FLAC 的帧）用它把最后这一段也看完，之后才问
     /// [`finish`](Self::finish) 与 [`intact`](Self::intact)。默认什么也不做。
     fn short(&mut self, _at: u64, _bytes: &[u8]) {}
 }
 
+#[derive(Clone)]
 enum Mode {
     Need {
         at: u64,
@@ -97,6 +103,7 @@ enum Mode {
     },
 }
 
+#[derive(Clone)]
 pub(crate) struct Walker<S> {
     structure: S,
     mode: Mode,
@@ -123,6 +130,14 @@ impl<S: Structure> Walker<S> {
         };
         walker.mode = walker.enter(first);
         walker
+    }
+
+    pub(crate) fn structure(&self) -> &S {
+        &self.structure
+    }
+
+    pub(crate) fn structure_mut(&mut self) -> &mut S {
+        &mut self.structure
     }
 
     /// 已经看过、从 `at` 起最多 `max` 个字节。
@@ -216,12 +231,20 @@ impl<S: Structure> Walker<S> {
                     match (scanner.find)(&window) {
                         Some(index) => {
                             let at = window_start + index as u64;
+                            if let Some(seen) = at
+                                .checked_sub(*from)
+                                .and_then(|seen| region.get(..seen as usize))
+                                .filter(|seen| !seen.is_empty())
+                            {
+                                self.structure.scanned(*from, seen);
+                            }
                             self.cursor = at;
                             self.recent_at = at;
                             self.recent = window.split_off(index.min(window.len()));
                             self.structure.step(Event::Found { at })
                         }
                         None => {
+                            self.structure.scanned(*from, region);
                             let keep = scanner.overlap.min(window.len());
                             *carry = window.split_off(window.len() - keep);
                             *from = end;

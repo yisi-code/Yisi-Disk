@@ -29,7 +29,7 @@ use yisi_engine::protocol::{
 use yisi_engine::protocol::{DiskList, DiskSummary, DiskVolume};
 use yisi_engine::protocol::{OPEN_RANGE, OpenRangeParams, SEARCH_PARTITIONS, SearchParams};
 use yisi_formats::Registry;
-use yisi_io::{BlockDevice, RawImage};
+use yisi_io::{BlockDevice, ImageFormat, OpenedImage};
 use yisi_rpc::{
     ErrorObject, FrameError, MAX_ENGINE_OUTPUT_LEN, Message, Notification, Request, Response,
     error_code, read_message, write_message_limited,
@@ -304,6 +304,7 @@ fn dispatch_now(
                 enabled,
                 start_at: params.start_at,
                 keep_incomplete: params.keep_incomplete,
+                join_fragments: params.join_fragments,
             };
             let (device, mut sink): (Box<dyn BlockDevice>, Box<dyn Sink + Send>) = match &output_dir
             {
@@ -437,8 +438,10 @@ fn dispatch_now(
         PREVIEW_RANGE => {
             let params: PreviewRangeParams = request.params()?;
             let device = open_source(&params.source)?;
-            let preview = preview::preview_range(device.as_ref(), params.offset, params.length)
-                .map_err(|error| {
+            let fragments: Vec<_> = params.fragments.iter().copied().map(Into::into).collect();
+            let preview =
+                preview::preview_range(device.as_ref(), params.offset, params.length, &fragments)
+                    .map_err(|error| {
                     ErrorObject::new(
                         protocol::error_code::PREVIEW_UNAVAILABLE,
                         format!("无法读取偏移 {} 处的文件：{error}", params.offset),
@@ -610,17 +613,22 @@ fn image_path_param(path: &str) -> Result<&Path, ErrorObject> {
     Ok(image_path)
 }
 
+/// 打开镜像文件：raw 或 E01，按开头的签名认（`yisi_io::open_image`）；E01 的扇区大小取它自己记的，不用 `sector_size`。
+fn open_image_file(path: &str, sector_size: u32) -> Result<OpenedImage, ErrorObject> {
+    yisi_io::open_image(Path::new(path), sector_size).map_err(|error| {
+        ErrorObject::new(
+            protocol::error_code::SOURCE_UNAVAILABLE,
+            error_chain(&error),
+        )
+    })
+}
+
 /// 打开源。打开的源一律经读取计数器（[`reading::metered`]），任务运行期间据此报告读得怎样。
 fn open_source(source: &Source) -> Result<Box<dyn BlockDevice>, ErrorObject> {
     match source {
-        Source::Image { path, sector_size } => RawImage::open(path, *sector_size)
-            .map(|image| reading::metered(Box::new(image)))
-            .map_err(|error| {
-                ErrorObject::new(
-                    protocol::error_code::SOURCE_UNAVAILABLE,
-                    error_chain(&error),
-                )
-            }),
+        Source::Image { path, sector_size } => {
+            open_image_file(path, *sector_size).map(|opened| reading::metered(opened.device))
+        }
         #[cfg(windows)]
         Source::Disk { handle } | Source::Volume { handle, .. } => {
             adopt_disk(*handle).map(|disk| reading::metered(Box::new(disk)))
@@ -663,31 +671,38 @@ fn open_source_for_output(
 }
 
 /// 打开要做镜像的源，给出它的标识（续做时据此确认是同一个源）。物理盘先确认镜像不在这块盘上；
-/// 镜像文件不能把自己或自己的坏区图当作输出。
+/// 镜像文件不能把自己（E01 的任何一段）或自己的坏区图当作输出。
 fn open_image_source(
     source: &Source,
     image_path: &Path,
 ) -> Result<(Box<dyn BlockDevice>, String), ErrorObject> {
     match source {
-        Source::Image { path, .. } => {
-            let device = open_source(source)?;
+        Source::Image { path, sector_size } => {
+            let opened = open_image_file(path, *sector_size)?;
             let real_source = std::fs::canonicalize(path).map_err(|error| {
                 ErrorObject::new(
                     protocol::error_code::SOURCE_UNAVAILABLE,
                     format!("无法确认镜像文件 {path} 的位置：{error}"),
                 )
             })?;
-            let outputs = [image_path.to_path_buf(), image_job::map_path(image_path)];
-            if outputs
+            let source_files: Vec<PathBuf> = opened
+                .files
                 .iter()
-                .any(|output| std::fs::canonicalize(output).is_ok_and(|real| real == real_source))
-            {
+                .filter_map(|file| std::fs::canonicalize(file).ok())
+                .collect();
+            let outputs = [image_path.to_path_buf(), image_job::map_path(image_path)];
+            if let Some(output) = outputs.iter().find(|output| {
+                std::fs::canonicalize(output).is_ok_and(|real| source_files.contains(&real))
+            }) {
                 return Err(ErrorObject::new(
                     error_code::INVALID_PARAMS,
-                    format!("镜像不能写到来源文件 {path} 上"),
+                    format!("镜像不能写到来源文件 {} 上", output.display()),
                 ));
             }
-            Ok((device, yisi_io::image_identity(&real_source)))
+            Ok((
+                reading::metered(opened.device),
+                yisi_io::image_identity(&real_source),
+            ))
         }
         #[cfg(windows)]
         Source::Disk { handle } => {
@@ -738,12 +753,19 @@ fn plan_without_read_errors<T>(
     planned
 }
 
-/// 打开要生成写入计划的源，给出计划里记的设备标识（与坏区图里的来源相同）。写入计划只写镜像文件与整块物理盘：
-/// 卷上的偏移不是盘上的偏移，执行时也只按物理盘打开。
+/// 打开要生成写入计划的源，给出计划里记的设备标识（与坏区图里的来源相同）。写入计划只写 raw 镜像文件与整块物理盘：
+/// 卷上的偏移不是盘上的偏移，执行时也只按物理盘打开；E01 是压缩的只读镜像，盘上的字节不在文件里原样放着。
 fn open_plan_source(source: &Source) -> Result<(Box<dyn BlockDevice>, String), ErrorObject> {
     match source {
-        Source::Image { path, .. } => {
-            let device = open_source(source)?;
+        Source::Image { path, sector_size } => {
+            let opened = open_image_file(path, *sector_size)?;
+            if opened.format == ImageFormat::Ewf {
+                return Err(ErrorObject::new(
+                    error_code::INVALID_PARAMS,
+                    "E01 镜像只读，不能生成写入计划：先制作成普通镜像，在那上面修复",
+                ));
+            }
+            let device = reading::metered(opened.device);
             let real = std::fs::canonicalize(path).map_err(|error| {
                 ErrorObject::new(
                     protocol::error_code::SOURCE_UNAVAILABLE,

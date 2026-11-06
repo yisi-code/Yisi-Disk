@@ -210,6 +210,16 @@ export default {
     technical: '技术细节',
     engineVersion: '引擎版本',
     engineMethods: '支持的操作',
+    update: {
+      check: '检查新版本',
+      checking: '正在检查…',
+      latest: '已是最新版本（{version}）',
+      available: '有新版本 {version}',
+      open: '打开下载页',
+      failed: '检查失败：{reason}。可以稍后再试，或直接到项目主页的「Releases」下载。',
+      timeout: '20 秒内没连上 GitHub。可以稍后再试，或直接到项目主页的「Releases」下载。',
+      privacy: '只在点「检查新版本」时联网访问 GitHub 查询最新版本号，其余时候程序不联网；新版本要自己下载、解压替换。',
+    },
     techStack: '技术栈',
     techStackValue: '恢复引擎与磁盘代理用 Rust，界面用 Tauri 2 + Vue 3 + TypeScript',
     repository: '项目主页',
@@ -639,6 +649,8 @@ export default {
     wmf: 'WMF 图元文件',
     iso: '光盘镜像（ISO）',
     flac: 'FLAC 无损音频',
+    gz: 'gzip 压缩文件',
+    tgz: 'gzip 压缩的 TAR 归档（tar.gz）',
   },
   // 格式选择里一项的名字：一个格式按内容可能存成好几种扩展名时，说整个格式
   fileFormats: {
@@ -657,7 +669,8 @@ export default {
     ico: 'Windows 图标与光标',
     psd: 'Photoshop 文档（PSD / PSB）',
     pst: 'Outlook 数据文件（PST / OST）',
-    swf: 'Flash 动画（SWF，仅未压缩）',
+    swf: 'Flash 动画（SWF，未压缩与 zlib 压缩的）',
+    gz: 'gzip 压缩文件（含 tar.gz）',
   },
   carve: {
     // 不完整的文件（部分恢复）在哪里断了
@@ -690,6 +703,9 @@ export default {
       keepIncomplete: '不完整的文件也列出来（部分恢复）',
       keepIncompleteHint:
         '后半段被覆盖、读不出或到了磁盘末尾的文件，按结构还对得上的那一段保存，标为「不完整」、名字里带 .incomplete。这样的文件可能打不开，或只有前半段（例如照片只显示上半部分、视频只能放前面一段）。',
+      joinFragments: '拼接分成两段的照片（较慢）',
+      joinFragmentsHint:
+        '照片被存成两段、中间隔着别的数据时，找到后面那一段，拼成完整的照片。只对常见的基线 JPEG（相机、手机拍的照片大多是）；扫描时要逐位核对每张这样的照片，会明显变慢。拼成的照片在详情里写明两段各在哪里。',
     },
     output: {
       label: '保存到',
@@ -723,6 +739,9 @@ export default {
       incomplete: '不完整的文件',
       incompleteOn: '也列出来',
       incompleteOff: '不列出',
+      joinFragments: '两段拼接',
+      joinFragmentsOn: '开',
+      joinFragmentsOff: '关',
     },
     history: {
       title: '上次的扫描',
@@ -768,6 +787,9 @@ export default {
       state: '完整性',
       incomplete: '不完整：{reason}',
       incompleteHint: '只保存了按结构还对得上的那一段，可能打不开或只有前半段。',
+      fragments: '存放位置',
+      fragmentsValue: '由两段拼成：第一段 {first}，第二段 {second}',
+      fragment: '偏移 {start}–{end}（{size}）',
       open: '打开',
       saveAs: '另存为…',
       notSavedHint:
@@ -803,8 +825,11 @@ export default {
     image: '镜像文件',
     disk: '物理磁盘',
     imagePath: '镜像文件路径',
-    imagePathPlaceholder: '镜像文件的完整路径，例如 D:/images/disk.img',
+    imagePathPlaceholder: '镜像文件（raw 或 E01）的完整路径，例如 D:/images/disk.img',
     pickTitle: '选择镜像文件',
+    filterImages: '磁盘镜像',
+    filterEwf: 'E01 镜像（第一段）',
+    filterAll: '所有文件',
     browse: '选择文件…',
     folder: '文件夹',
     folderPath: '文件夹路径',
@@ -909,6 +934,7 @@ export default {
     opening: '正在读取分区表…',
     openingDisk: '正在请求管理员权限并读取分区表…',
     sourceImage: '镜像文件 {path}',
+    sourceEwf: 'E01 镜像 {path}',
     sourceDisk: '磁盘 {number}',
     sourceVolume: '{letter}: 盘',
   },
@@ -956,6 +982,7 @@ export default {
       nameUncertain: '名字不完整：删除时丢了首字母',
       contextDir: '未删除的文件夹：只勾了「已删除」时也列出它，展开能看到里面删除的文件',
       orphans: '找不到原目录的文件',
+      fromLog: '来自日志',
       hint: '单击文件夹展开或收起，单击文件查看详情，双击文件用默认程序打开；方向键移动，空格勾选。',
       status: {
         loading: '正在读取…',
@@ -976,6 +1003,11 @@ export default {
       summary: '主文件表（MFT）共 {records} 条记录，找到 {deleted} 个已删除的文件和文件夹。',
       orphans: '其中 {count} 个原来所在的文件夹已不在，列在「找不到原目录的文件」里。',
       unreadable: '有 {count} 条主文件表（MFT）记录读不出，其中的文件找不到。',
+      fromLog: '另从日志（$LogFile）找回 {count} 个主文件表（MFT）里已找不到的已删除文件和文件夹，标为「来自日志」。',
+      log: {
+        running: '正在读日志（$LogFile），找回主文件表（MFT）里已找不到的已删除文件：{done} / {total}（{percent}%）',
+        starting: '正在读日志（$LogFile），找回主文件表（MFT）里已找不到的已删除文件…',
+      },
       free: {
         hint: '删掉的文件夹如果连它在上级文件夹里的记录也没了，沿文件夹找不到它和里面的文件。可以读一遍这个分区的空闲空间，按内容认出这些文件夹，列在根目录下的「找不到原目录的文件」里：要读的量与空闲空间一样大，大分区可能要很久，可以随时取消。',
         action: '查找原文件夹已不在的文件',
@@ -993,6 +1025,7 @@ export default {
       overwritten: '已删除 · 已被覆盖',
       unknown: '已删除 · 无法判断',
       cleared: '已删除 · 位置已清空',
+      logNameOnly: '已删除 · 只有名字',
     },
     unsupported: {
       compressed: '新技术文件系统（NTFS）压缩 · 暂不支持',
@@ -1014,6 +1047,8 @@ export default {
       overwritten: '已删除。存放它的位置已经有一部分分给了别的文件，内容至少部分被覆盖',
       unknown: '已删除。无法判断还能不能完整找回（例如首簇不确定或簇链已断）',
       cleared: '已删除。删除时文件系统清空了它的长度与数据位置（ext3、ext4 的做法），这里只能列出名字、读不出内容；内容可能还在盘上，可以试试「按文件类型深度恢复」',
+      logNameOnly:
+        '已删除。日志（$LogFile）里只留下了名字与上级文件夹，没有删除前的数据位置（文件建得比日志里最老的记录还早；或内容存放在主文件表（MFT）记录里，这部分不进日志），读不出内容、不能另存；内容可能还在盘上，可以试试「按文件类型深度恢复」',
     },
     details: {
       title: '详情',
@@ -1029,6 +1064,11 @@ export default {
       position: '数据位置',
       record: '主文件表（MFT）记录',
       storage: '存放方式',
+      source: '来源',
+      fromLog:
+        '从日志（$LogFile）找回：主文件表（MFT）里这个文件的记录已被重用或清掉。内容按删除前的运行表读，那些簇之后可能已被别的文件用了，复制出来请打开核对。',
+      fromLogDir:
+        '从日志（$LogFile）找回：主文件表（MFT）里这个文件夹的记录已被重用或清掉，里面列的是原来在它下面的已删除项。',
       utcTime: '{time}（UTC）',
       open: '用默认程序打开',
       openHint: '打开前先在程序文件夹的 data 目录里复制一份临时副本，下次打开时清掉。',
@@ -1045,6 +1085,7 @@ export default {
         running: '已复制 {done} / {total}（{percent}%），{count} 个文件',
         scanning: '正在扫描主文件表（MFT），找出文件夹里已删除的文件（{percent}%）…',
         scanningFree: '正在读空闲空间，找原文件夹已不在的文件（{percent}%）…',
+        scanningLog: '正在读日志（$LogFile），找回主文件表（MFT）里已找不到的已删除文件（{percent}%）…',
         completed: '复制完成',
         failed: '复制失败',
         cancelled: '已取消；已经复制好的文件仍保留在保存位置',
@@ -1117,6 +1158,7 @@ export default {
       preparing: '正在生成写回分区表的计划…',
       hint: '「丢失」的分区可以写回分区表：先存写前备份，确认后才写，之后能回滚。写回之后 Windows 会挂载它并可能往里写，先把要的文件另存出来。',
       volumeUnsupported: '选的是一个盘符，不能改分区表：请改选整块磁盘。',
+      ewfUnsupported: 'E01 镜像只读，不能改分区表：可以先用「制作磁盘镜像」把它转成普通镜像，在普通镜像上写回。',
       extUnsupported: 'Linux 扩展文件系统（ext）的分区只能浏览、把文件另存到另一块盘，暂不提供写回分区表。',
       inTable: '这个分区在分区表里（分区 {number}），没有丢，不需要写回：Windows 能认出它的话已经分到了盘符。它打不开、提示要格式化时，用「修复打不开的分区」在原盘上修，不用另存。',
       structureOnly: '这个分区的主备引导扇区都没了，是按主文件表（$MFT）找到的，按推算的参数浏览；分区原来的末尾推不准，所以不提供写回分区表。先把要的文件另存到另一块盘。',
@@ -1233,6 +1275,7 @@ export default {
       rebuild: '重建引导扇区…',
       preparing: '正在生成修复计划…',
       volumeUnsupported: '选的是一个盘符，不能修复：请改选整块磁盘，或先制作镜像、在镜像上修复。',
+      ewfUnsupported: 'E01 镜像只读，不能修复：可以先用「制作磁盘镜像」把它转成普通镜像，在普通镜像上修复。',
       setType: '改分区类型…',
       repairGpt: '修复 GUID 分区表（GPT）…',
       repairGptHint: '用完好的那一份 GUID 分区表（GPT）重写坏了的那一份，分区本身不动。',
@@ -1434,6 +1477,7 @@ export default {
       mftFromMirror: '用副本修复主文件表…',
       preparing: '正在生成修复计划…',
       volumeUnsupported: '选的是一个盘符，不能修复：请改选整块磁盘，或先制作镜像、在镜像上修复。',
+      ewfUnsupported: 'E01 镜像只读，不能修复：可以先用「制作磁盘镜像」把它转成普通镜像，在普通镜像上修复。',
       outcome: '{action}：{outcome}',
     },
     fix: {
@@ -1954,6 +1998,7 @@ export default {
     backupFailed: '没能存下写前备份，没有写入',
     backupUnreadable: '备份文件读不出或已损坏，不能回滚',
     writeTargetUnsupported: '选一个盘符时不能改写：请选整块磁盘或镜像文件',
+    writeTargetEwf: 'E01 镜像只读，不能改写：先用「制作磁盘镜像」把它转成普通镜像，在普通镜像上修复',
     writeSystemDisk: '这块盘上有 Windows 所在的分区，不改写',
     writeWrongDisk: '这个编号现在已经不是生成计划时的那块盘（可能重新插拔过）：请重新诊断',
     volumeInUse: '要改写的分区正被别的程序使用，锁不住：关掉正在用它的程序（资源管理器窗口、打开着的文件）再点「写入」',

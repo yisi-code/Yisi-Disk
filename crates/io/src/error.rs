@@ -33,6 +33,12 @@ pub enum IoError {
         read: usize,
     },
 
+    #[error("E01 镜像 {} 读不懂：{reason}", .path.display())]
+    Ewf { path: PathBuf, reason: String },
+
+    #[error("E01 镜像缺少第 {number} 段：{}", .path.display())]
+    EwfSegmentMissing { number: u32, path: PathBuf },
+
     #[error("扇区大小 {0} 不受支持，应为 512 到 65536 之间的 2 的幂")]
     InvalidSectorSize(u32),
 

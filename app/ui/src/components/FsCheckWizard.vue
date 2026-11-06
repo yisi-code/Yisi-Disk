@@ -61,7 +61,7 @@ const { filesystemName, sourceName, partitionLine, bootFieldName, bootFieldValue
 const browse = useBrowse()
 const fsCheck = useFsCheck()
 const writePlan = useWritePlan()
-const { writeActionText, writeOutcomeText } = useWritePlanText()
+const { writeActionText, writeOutcomeText, writeBlockedText } = useWritePlanText()
 
 const titleElement = ref<HTMLHeadingElement | null>(null)
 const step = ref<WizardStep>('source')
@@ -115,7 +115,7 @@ const canRecheck = computed(
 
 const sourceText = computed(() => sourceName(browse.target.value ?? fsCheck.target.value))
 
-/** 镜像文件与整块磁盘可以写入计划修复；卷上的偏移不是盘上的偏移 */
+/** raw 镜像文件与整块磁盘可以写入计划修复；卷上的偏移不是盘上的偏移，E01 只读 */
 const canWrite = computed(() => canWritePlan(fsCheck.target.value))
 /** 结果页上正在确认一份写入计划 */
 const isConfirming = computed(() => step.value === 'result' && writePlan.plan.value !== null)
@@ -749,7 +749,7 @@ function buildReportText(): string {
                       >
                         {{ t(`fsCheck.repair.${mftFixFor(issue)}`) }}
                       </button>
-                      <p v-else class="wizard__hint">{{ t('fsCheck.repair.volumeUnsupported') }}</p>
+                      <p v-else class="wizard__hint">{{ writeBlockedText(fsCheck.target.value, 'fsCheck.repair') }}</p>
                       <p v-if="writePlan.isPreparing.value" class="wizard__note" aria-live="polite">
                         {{ t('fsCheck.repair.preparing') }}
                       </p>

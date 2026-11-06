@@ -46,10 +46,9 @@ pub fn run(
     let scan_first = (volume.needs_scan() && items.iter().any(|item| item.file.is_dir))
         || (!volume.is_scanned() && items.iter().any(|item| item.file.is_orphans()));
     if scan_first {
-        let stage = scan_stage(volume);
         let scanned = volume
             .scan(&mut |done, total| {
-                context.stage_progress(stage, done, total);
+                context.stage_progress(scan_stage(volume), done, total);
                 !context.is_cancelled()
             })
             .map_err(|error| format!("扫描已删除的项失败：{}", error_chain(&error)))?;
