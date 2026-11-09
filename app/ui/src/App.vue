@@ -5,7 +5,10 @@ import AboutPanel from './components/AboutPanel.vue'
 import BadSectorCheck from './components/BadSectorCheck.vue'
 import CarveWizard from './components/CarveWizard.vue'
 import DiskImage from './components/DiskImage.vue'
+import DiskAccessNotice from './components/DiskAccessNotice.vue'
 import EngineStatus from './components/EngineStatus.vue'
+import UpdatePrompt from './components/UpdatePrompt.vue'
+import { useUpdateCheck } from './composables/useUpdateCheck'
 import FeatureCatalog from './components/FeatureCatalog.vue'
 import FindPartitionsWizard from './components/FindPartitionsWizard.vue'
 import FsCheckWizard from './components/FsCheckWizard.vue'
@@ -37,6 +40,12 @@ const openedFeature = ref<FeatureKey | null>(null)
 const focusRequest = ref<FocusRequest | null>(null)
 const appVersion = ref<string | null>(null)
 const hostError = ref<string | null>(null)
+/** 自动检查到的新版本，等用户回到导航页时弹出提示；关掉后为 null */
+const promptedVersion = ref<string | null>(null)
+const { autoCheck, install: installUpdate } = useUpdateCheck()
+
+/** 打开后等一会儿再查，不和启动抢资源 */
+const AUTO_CHECK_DELAY_MS = 5000
 
 watch(
   locale,
@@ -47,12 +56,28 @@ watch(
 )
 
 onMounted(async () => {
+  window.setTimeout(() => {
+    void autoCheck().then((latest) => {
+      promptedVersion.value = latest
+    })
+  }, AUTO_CHECK_DELAY_MS)
   try {
     appVersion.value = (await getAppInfo()).version
   } catch (error) {
     hostError.value = String(error)
   }
 })
+
+/** 弹窗里点「立即更新」：到关于页，开始下载安装，进度在关于页的更新区显示 */
+function updateNow() {
+  const latest = promptedVersion.value
+  promptedVersion.value = null
+  if (latest === null) {
+    return
+  }
+  page.value = 'about'
+  void installUpdate(latest)
+}
 
 function isProblemPage(candidate: NavPage): candidate is ProblemKey {
   return (PROBLEM_KEYS as NavPage[]).includes(candidate)
@@ -163,8 +188,18 @@ function closeFeature() {
       </main>
     </div>
 
+    <!-- 功能页里可能有任务在跑，不打断：回到导航页时再提示 -->
+    <UpdatePrompt
+      v-if="promptedVersion !== null && featureView === null"
+      :latest="promptedVersion"
+      :current="appVersion"
+      @update="updateNow"
+      @dismiss="promptedVersion = null"
+    />
+
     <footer class="app-footer">
       <EngineStatus />
+      <DiskAccessNotice />
       <span v-if="hostError" role="alert">{{ t('host.failed', { reason: hostError }) }}</span>
       <span v-else-if="appVersion">{{ t('host.version', { version: appVersion }) }}</span>
       <span v-else>{{ t('host.connecting') }}</span>

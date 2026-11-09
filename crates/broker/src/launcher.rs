@@ -33,8 +33,8 @@ use windows_sys::Win32::System::Threading::{
     GetExitCodeProcess, GetProcessId, WaitForSingleObject,
 };
 use windows_sys::Win32::UI::Shell::{
-    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
-    SHELLEXECUTEINFOW_0, ShellExecuteExW,
+    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SEE_MASK_NOZONECHECKS,
+    SHELLEXECUTEINFOW, SHELLEXECUTEINFOW_0, ShellExecuteExW,
 };
 
 use serde_json::{Value, json};
@@ -245,13 +245,21 @@ fn create_pipe(name: &[u16]) -> io::Result<File> {
     Ok(File::from(unsafe { OwnedHandle::from_raw_handle(handle) }))
 }
 
+/// 以管理员身份启动 `exe`（磁盘代理：与宿主放在同一个文件夹、路径由宿主算出）。
+///
+/// 不做安全区域检查（`SEE_MASK_NOZONECHECKS`）：从网上下载的压缩包解压后，文件带着「来自网络」标记，
+/// 每次启动代理都会先弹一次「打开文件 - 安全警告」，而用户运行宿主时已经过了 Windows 的这一关；
+/// 只对代理这一处，打开别的文件仍走系统默认的检查。UAC 照常由系统按设置决定弹不弹。
 fn launch_elevated(exe: &Path, parameters: &str, owner: isize) -> Result<OwnedHandle, LaunchError> {
     let verb = wide("runas");
     let file = wide(exe.as_os_str());
     let parameters = wide(parameters);
     let mut info = SHELLEXECUTEINFOW {
         cbSize: mem::size_of::<SHELLEXECUTEINFOW>() as u32,
-        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC,
+        fMask: SEE_MASK_NOCLOSEPROCESS
+            | SEE_MASK_FLAG_NO_UI
+            | SEE_MASK_NOASYNC
+            | SEE_MASK_NOZONECHECKS,
         hwnd: owner as HWND,
         lpVerb: verb.as_ptr(),
         lpFile: file.as_ptr(),

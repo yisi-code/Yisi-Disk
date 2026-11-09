@@ -635,6 +635,26 @@ export function getAppInfo(): Promise<AppInfo> {
   return invoke<AppInfo>('app_info')
 }
 
+/** 设置页列出的程序文件夹：安装目录、程序数据 data、写盘前的备份、为打开与复制存的副本 */
+export type AppFolderKind = 'program' | 'data' | 'writeBackups' | 'openCache'
+
+export interface AppFolder {
+  kind: AppFolderKind
+  path: string
+  /** 还没存过东西的文件夹（例如从没写过盘）不存在，不能打开 */
+  exists: boolean
+}
+
+/** 程序文件夹的位置都由宿主算 */
+export function listAppFolders(): Promise<AppFolder[]> {
+  return invoke<AppFolder[]>('app_folders')
+}
+
+/** 在资源管理器里打开一个程序文件夹：只按种类，宿主不接受别的路径 */
+export function openAppFolder(kind: AppFolderKind): Promise<void> {
+  return invoke<void>('app_folder_open', { kind })
+}
+
 /** 用默认浏览器打开本项目的发布页（网址由宿主决定）：source 为 gitee 时打开 Gitee 镜像的，其余打开 GitHub 的 */
 export function openReleasesPage(source?: string): Promise<void> {
   return invoke<void>('open_releases_page', { source })
@@ -669,6 +689,28 @@ export interface UpdateProgress {
   total: number
   /** 从哪个发布源下载（github、gitee）；太慢或出错时宿主会换下一个源，这里跟着变 */
   source: string
+}
+
+/**
+ * 读写物理磁盘的管理员授权：notRequested 还没请求（或代理已退出），granted 已授权，cancelled 用户在 UAC 里取消，
+ * failed 代理没能启动，unsupported 这个平台没有磁盘代理
+ */
+export type DiskAccess = 'notRequested' | 'granted' | 'cancelled' | 'failed' | 'unsupported'
+
+export function getDiskAccess(): Promise<DiskAccess> {
+  return invoke<DiskAccess>('disk_access_status')
+}
+
+/** 现在就请求授权（弹 UAC 启动磁盘代理）；已授权时直接返回，用户取消时报 elevationCancelled，可以再请求 */
+export function authorizeDiskAccess(): Promise<DiskAccess> {
+  return invoke<DiskAccess>('disk_access_authorize')
+}
+
+const DISK_ACCESS_EVENT = 'disk-access'
+
+/** 任何功能弹 UAC 后的结果（授权、取消、失败）以及代理退出，都经这个事件报来 */
+export function onDiskAccess(handler: (access: DiskAccess) => void): Promise<UnlistenFn> {
+  return listen<DiskAccess>(DISK_ACCESS_EVENT, (event) => handler(event.payload))
 }
 
 const UPDATE_PROGRESS_EVENT = 'update-progress'

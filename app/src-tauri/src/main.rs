@@ -6,6 +6,7 @@
 mod broker;
 mod carve_history;
 mod engines;
+mod folders;
 mod image_history;
 mod record_file;
 mod shell;
@@ -26,7 +27,7 @@ use yisi_engine::protocol::{
 };
 use yisi_engine::protocol::{ClusterRun, FatRating, FsFix, MftFix, PartitionTableFix, SearchMode};
 
-use crate::broker::BrokerSession;
+use crate::broker::{BrokerSession, DiskAccess};
 use crate::carve_history::{CarveHistory, CarveRecord};
 use crate::engines::{
     Engines, HostError, ImagePlan, Target, refuse_executable, save_fs_check_report,
@@ -92,6 +93,34 @@ fn update_install(app: AppHandle, engines: State<'_, Engines>) -> Result<String,
 fn open_releases_page(source: Option<String>) -> Result<(), HostError> {
     tauri_plugin_opener::open_url(update::releases_page(source.as_deref()), None::<&str>)
         .map_err(|error| HostError::new("openFailed", error.to_string()))
+}
+
+/// 设置页列出的程序文件夹（安装目录、data 与其中的备份、副本）。
+#[tauri::command(async)]
+fn app_folders() -> Result<Vec<folders::AppFolder>, HostError> {
+    folders::list()
+}
+
+/// 在资源管理器里打开设置页列出的一个文件夹：只按种类找，路径由宿主算。
+#[tauri::command(async)]
+fn app_folder_open(kind: folders::FolderKind) -> Result<(), HostError> {
+    folders::open(kind)
+}
+
+/// 磁盘访问（管理员授权）事件的名字，载荷是 [`DiskAccess`]。
+const DISK_ACCESS_EVENT: &str = "disk-access";
+
+/// 磁盘访问现在的状态（设置页、底栏）。
+#[tauri::command]
+fn disk_access_status(broker: State<'_, BrokerSession>) -> DiskAccess {
+    broker.access()
+}
+
+/// 现在就请求管理员授权（启动磁盘代理）：已授权时直接返回；用户取消时答复 `elevationCancelled`，可以再点一次。
+#[tauri::command(async)]
+fn disk_access_authorize(broker: State<'_, BrokerSession>) -> Result<DiskAccess, HostError> {
+    broker.authorize()?;
+    Ok(broker.access())
 }
 
 // 下面几个命令会等待引擎答复，标成 async 让它们在独立线程上运行，不阻塞界面
@@ -731,6 +760,11 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     update::after_update(&args);
     update::clean_up();
+    // 启动时把令牌里已有的特权全部打开（不需要用户授权）；要管理员的读写物理盘仍在用到时经 UAC 请求
+    match yisi_io::enable_held_privileges() {
+        Ok(names) => tracing::info!(?names, "已启用特权"),
+        Err(error) => tracing::warn!(%error, "启用特权失败"),
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Engines::default())
@@ -758,6 +792,12 @@ fn main() -> anyhow::Result<()> {
             app.manage(ImageHistory::new(data_dir.join("image-history.json")));
             app.manage(Arc::new(CarveHistory::new(&data_dir)));
             app.manage(WritePlans::new(data_dir));
+            let handle = app.handle().clone();
+            app.state::<BrokerSession>().set_notifier(move |access| {
+                if let Err(error) = handle.emit(DISK_ACCESS_EVENT, access) {
+                    tracing::warn!(%error, "发不出磁盘访问状态");
+                }
+            });
             // 主窗口不由配置自动创建（tauri.conf.json 里 create 为 false），在这里按配置建，数据目录指到 data 下
             let window = app
                 .config()
@@ -786,6 +826,10 @@ fn main() -> anyhow::Result<()> {
         })
         .invoke_handler(tauri::generate_handler![
             app_info,
+            app_folders,
+            app_folder_open,
+            disk_access_status,
+            disk_access_authorize,
             open_releases_page,
             update_check,
             update_install,

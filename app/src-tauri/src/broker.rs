@@ -1,4 +1,5 @@
 //! 磁盘代理会话：第一次需要打开物理磁盘时弹出 UAC 启动代理，之后整个会话复用；宿主退出时代理随之退出。
+//! 用户在 UAC 里取消后，下次用到时（或在设置页、底栏点「授权」）会重新请求；授权的状态经 `disk-access` 事件告诉界面。
 
 #[cfg(windows)]
 use std::sync::Mutex;
@@ -14,6 +15,10 @@ use yisi_broker::protocol::{FailureData, WriteExecuted, refusal};
 #[cfg(windows)]
 use yisi_rpc::ErrorObject;
 
+use std::sync::OnceLock;
+
+use serde::Serialize;
+
 use crate::engines::HostError;
 #[cfg(windows)]
 use crate::engines::{lock, sibling_program};
@@ -22,8 +27,30 @@ use crate::engines::{lock, sibling_program};
 #[cfg(windows)]
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// 磁盘访问（管理员授权）的状态：设置页与底栏显示，取消后给出重新授权的入口。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DiskAccess {
+    /// 这次运行还没请求过（或代理已经退出，下次用到时再请求）。
+    #[default]
+    NotRequested,
+    /// 用户已授权，磁盘代理在运行。
+    Granted,
+    /// 用户在 UAC 里取消了。
+    Cancelled,
+    /// 代理没能启动（找不到程序、超时等）。
+    Failed,
+    /// 这个平台没有磁盘代理。
+    Unsupported,
+}
+
+type AccessNotifier = Box<dyn Fn(DiskAccess) + Send + Sync>;
+
 #[derive(Default)]
 pub struct BrokerSession {
+    access: std::sync::Mutex<DiskAccess>,
+    /// 状态变了时通知界面（宿主启动时设好）。
+    notifier: OnceLock<AccessNotifier>,
     #[cfg(windows)]
     connection: Mutex<Option<BrokerConnection>>,
     /// 主窗口的 `HWND`（0 为还没有）：UAC 以它为请求方，直接弹到最前面。
@@ -32,6 +59,59 @@ pub struct BrokerSession {
 }
 
 impl BrokerSession {
+    /// 状态变了时调用 `notify`（只设一次）。
+    pub fn set_notifier(&self, notify: impl Fn(DiskAccess) + Send + Sync + 'static) {
+        let _ = self.notifier.set(Box::new(notify));
+    }
+
+    /// 现在的磁盘访问状态。
+    pub fn access(&self) -> DiskAccess {
+        if cfg!(windows) {
+            *crate::engines::lock(&self.access)
+        } else {
+            DiskAccess::Unsupported
+        }
+    }
+
+    fn set_access(&self, value: DiskAccess) {
+        let changed = {
+            let mut access = crate::engines::lock(&self.access);
+            let changed = *access != value;
+            *access = value;
+            changed
+        };
+        if changed && let Some(notify) = self.notifier.get() {
+            notify(value);
+        }
+    }
+
+    /// 现在就请求授权（设置页、底栏的「授权」）：代理已在运行时直接返回，否则弹 UAC 启动它。
+    #[cfg(windows)]
+    pub fn authorize(&self) -> Result<(), HostError> {
+        let mut connection = lock(&self.connection);
+        if connection.is_none() {
+            *connection = Some(self.launch()?);
+        }
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    pub fn authorize(&self) -> Result<(), HostError> {
+        Err(HostError::new("unsupportedPlatform", ""))
+    }
+
+    /// 弹 UAC 启动代理，按结果记下状态。
+    #[cfg(windows)]
+    fn launch(&self) -> Result<BrokerConnection, HostError> {
+        let launched = launch(self.owner.load(Ordering::Relaxed));
+        self.set_access(match &launched {
+            Ok(_) => DiskAccess::Granted,
+            Err(error) if error.code == "elevationCancelled" => DiskAccess::Cancelled,
+            Err(_) => DiskAccess::Failed,
+        });
+        launched
+    }
+
     /// 记下主窗口，之后弹 UAC 时用它作请求方。
     #[cfg(windows)]
     pub fn set_owner(&self, hwnd: isize) {
@@ -74,7 +154,7 @@ impl BrokerSession {
         let mut connection = lock(&self.connection);
         let mut broker = match connection.take() {
             Some(broker) => broker,
-            None => launch(self.owner.load(Ordering::Relaxed))?,
+            None => self.launch()?,
         };
         match request(&mut broker) {
             Ok(value) => {
@@ -85,7 +165,11 @@ impl BrokerSession {
                 *connection = Some(broker);
                 Err(rejected(error))
             }
-            Err(error) => Err(HostError::new("brokerIo", yisi_rpc::error_chain(&error))),
+            Err(error) => {
+                // 连接断了（代理被结束等）：下次用到时重新请求授权
+                self.set_access(DiskAccess::NotRequested);
+                Err(HostError::new("brokerIo", yisi_rpc::error_chain(&error)))
+            }
         }
     }
 

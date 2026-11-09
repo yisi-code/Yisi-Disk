@@ -2,6 +2,10 @@ fn main() {
     // 应用命令白名单：未登记的命令即使在宿主里注册了，界面也调用不到
     let manifest = tauri_build::AppManifest::new().commands(&[
         "app_info",
+        "app_folders",
+        "app_folder_open",
+        "disk_access_status",
+        "disk_access_authorize",
         "open_releases_page",
         "update_check",
         "update_install",

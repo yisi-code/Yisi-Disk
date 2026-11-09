@@ -18,6 +18,9 @@ use yisi_broker::backup::SavedBackup;
 use yisi_broker::execute::{self, ImageFile};
 /// 执行的结果：成功，或停在哪一步、失败前已经写下去几段。与磁盘代理的答复同一个类型。
 pub use yisi_broker::protocol::WriteExecuted as WriteOutcome;
+
+/// 写前备份在 `data` 里的子文件夹名（设置页也按它找）。
+pub(crate) const BACKUP_DIR: &str = "write-backups";
 use yisi_engine::protocol::{
     BootFix, BootSectorPlan, ClusterRun, FsFix, FsFixCount, FsFixPlan, MBR_TABLE_OFFSET, MftFix,
     MftPlan, PartitionRef, PartitionTableFix, PartitionTablePlan, RebuiltBoot, SIGNATURE_OFFSET,
@@ -524,7 +527,7 @@ impl WritePlans {
             now_ms(),
             self.next_id.fetch_add(1, Ordering::Relaxed)
         );
-        let path = dir.join("write-backups").join(format!("{plan_id}.json"));
+        let path = dir.join(BACKUP_DIR).join(format!("{plan_id}.json"));
         let backup = SavedBackup::save(&path, plan)
             .map_err(|error| HostError::new("backupFailed", yisi_rpc::error_chain(&error)))?;
         let view = PlanView {

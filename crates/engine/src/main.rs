@@ -28,5 +28,10 @@ fn main() {
         .with_writer(std::io::stderr)
         .init();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "引擎启动");
+    // 启动时把令牌里已有的特权全部打开（不需要用户授权）
+    match yisi_io::enable_held_privileges() {
+        Ok(names) => tracing::debug!(?names, "已启用特权"),
+        Err(error) => tracing::warn!(%error, "启用特权失败"),
+    }
     runtime::serve(std::io::stdin(), std::io::stdout());
 }

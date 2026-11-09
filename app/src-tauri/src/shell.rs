@@ -1,4 +1,5 @@
-//! 交给系统外壳的操作：选择打开方式、把文件放到剪贴板。路径由调用方核对过，只会是任务输出目录里的文件。
+//! 交给系统外壳的操作：选择打开方式、把文件放到剪贴板、在资源管理器里打开文件夹。路径由调用方核对过：
+//! 文件只会是任务输出目录里的，文件夹只会是设置页列出的程序文件夹。
 
 use std::path::Path;
 use std::process::Command;
@@ -16,6 +17,17 @@ pub fn open_with(path: &Path) -> Result<(), HostError> {
     // OpenAs_RunDLL 把逗号之后的整段当作路径，带引号反而认不出，所以原样拼接、不加引号
     Command::new("rundll32.exe")
         .raw_arg(format!("shell32.dll,OpenAs_RunDLL {}", path.display()))
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| HostError::new("openFailed", error.to_string()))
+}
+
+/// 在资源管理器里打开文件夹 `path`，不等窗口关闭。直接交给 `explorer.exe`，不经 `explore` 动词：
+/// 有的机器上外壳按 `explore` 打开文件夹会报「无法访问指定设备、路径或文件」（opener 插件走的就是这条）。
+#[cfg(windows)]
+pub fn open_folder(path: &Path) -> Result<(), HostError> {
+    Command::new("explorer.exe")
+        .arg(path)
         .spawn()
         .map(|_| ())
         .map_err(|error| HostError::new("openFailed", error.to_string()))
@@ -50,6 +62,11 @@ pub fn copy_to_clipboard(path: &Path) -> Result<(), HostError> {
 #[cfg(not(windows))]
 pub fn open_with(_path: &Path) -> Result<(), HostError> {
     Err(HostError::new("unsupportedPlatform", "open with"))
+}
+
+#[cfg(not(windows))]
+pub fn open_folder(_path: &Path) -> Result<(), HostError> {
+    Err(HostError::new("unsupportedPlatform", "open folder"))
 }
 
 #[cfg(not(windows))]
