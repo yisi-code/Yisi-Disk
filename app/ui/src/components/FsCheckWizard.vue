@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import FeatureJump from './FeatureJump.vue'
 import FsFixPanel from './FsFixPanel.vue'
 import PartitionPicker from './PartitionPicker.vue'
 import SourcePicker from './SourcePicker.vue'
@@ -10,6 +11,7 @@ import ReadHealthHint from './ReadHealthHint.vue'
 import WriteHistoryList from './WriteHistoryList.vue'
 import WritePlanConfirm from './WritePlanConfirm.vue'
 import { useBrowse } from '../composables/useBrowse'
+import { takeFeatureHandoff, useFeatureJump } from '../composables/useFeatureJump'
 import { useFsCheck } from '../composables/useFsCheck'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { usePartitionText } from '../composables/usePartitionText'
@@ -35,6 +37,7 @@ import {
   type WriteRecord,
 } from '../services/host'
 import { formatBytes, formatCount, formatDateTime, formatHex, formatSeconds, formatStamp } from '../utils/format'
+import type { FeatureKey } from '../navigation'
 
 const STEPS = ['source', 'partition', 'check', 'result'] as const
 type WizardStep = (typeof STEPS)[number]
@@ -49,6 +52,18 @@ const MFT_FIXES: Partial<Record<string, MftFix>> = { mftMirrorMismatch: 'mirrorF
 /** 这类问题能用写入计划修的话，用哪种修法 */
 function mftFixFor(issue: FsIssue): MftFix | null {
   return MFT_FIXES[issue.kind] ?? null
+}
+/**
+ * 这类问题的修法要用到别的功能时，结果里直接给出转去的按钮：认不出文件系统时推算引导扇区或按格式找回，
+ * 分区被截短时找原来的范围，有读写错误时先查坏道、做镜像，内容读不出时按格式找回，不在文件夹列表里的先复制出来
+ */
+const ISSUE_JUMPS: Partial<Record<string, FeatureKey[]>> = {
+  unknownFilesystem: ['repairPartition', 'carve'],
+  volumeTruncated: ['findPartitions'],
+  mediaFailure: ['badSectors', 'image'],
+  firstClusterInvalid: ['carve'],
+  mftInvalid: ['carve'],
+  missingFromIndex: ['undelete'],
 }
 /** 按十六进制显示的值与补到几位：目录项集合校验和 16 位、大写表校验和 32 位，介质描述符 8 位 */
 const HEX_DIGITS: Record<string, number> = { entrySetChecksum: 4, upcaseChecksum: 8, fatMediaMismatch: 2 }
@@ -66,6 +81,7 @@ const { writeActionText, writeOutcomeText, writeBlockedText } = useWritePlanText
 const titleElement = ref<HTMLHeadingElement | null>(null)
 const step = ref<WizardStep>('source')
 const { sourceKind, imagePath, device, target } = useSourceSelection()
+useFeatureJump(handleExit)
 const selectedPartition = ref<number | null>(null)
 const exportError = ref<HostError | null>(null)
 const exportedPath = ref<string | null>(null)
@@ -185,8 +201,20 @@ watch(
   { immediate: true },
 )
 
-onMounted(() => {
+onMounted(async () => {
   titleElement.value?.focus()
+  // 从别的功能转过来：直接读这个源；带着分区时选中它（按位置对），检查仍由用户点开始
+  const handoff = takeFeatureHandoff('fsCheck')
+  if (handoff === null) {
+    return
+  }
+  await openSource()
+  const wanted = handoff.partition
+  const match =
+    wanted === null ? undefined : partitions.value.find((partition) => partition.offset === wanted.offset)
+  if (match !== undefined && isCheckable(match)) {
+    selectedPartition.value = match.number
+  }
 })
 
 async function handleExit() {
@@ -739,7 +767,14 @@ function buildReportText(): string {
                     <p v-if="issueText(issue, 'fix')" class="fs-check__text">
                       <strong>{{ t('fsCheck.labelValue', { label: t('fsCheck.facts.fix'), value: '' }) }}</strong>{{ issueText(issue, 'fix') }}
                     </p>
-                    <div v-if="mftFixFor(issue)" class="fs-check__repair">
+                    <FeatureJump
+                      v-if="ISSUE_JUMPS[issue.kind]"
+                      :features="ISSUE_JUMPS[issue.kind] ?? []"
+                      :target="fsCheck.target.value"
+                      :partition="checkedPartition"
+                      :disabled="fsCheck.isBusy.value || writePlan.isPreparing.value || isSavingLost"
+                    />
+                    <div v-if="mftFixFor(issue)" class="wizard__actions">
                       <button
                         v-if="canWrite"
                         class="wizard__button wizard__button--secondary"
@@ -854,13 +889,6 @@ function buildReportText(): string {
 
 .fs-check__text {
   margin: 0;
-}
-
-.fs-check__repair {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-sm);
 }
 
 .fs-check__history {

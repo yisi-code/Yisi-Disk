@@ -5,6 +5,7 @@ import FsBrowser, { type TreeItem } from './FsBrowser.vue'
 import FsEntryDetails from './FsEntryDetails.vue'
 import JobControls from './JobControls.vue'
 import FailureList from './FailureList.vue'
+import FeatureJump from './FeatureJump.vue'
 import ReadHealthHint from './ReadHealthHint.vue'
 import { useCopy } from '../composables/useCopy'
 import { useHostErrorText } from '../composables/useHostErrorText'
@@ -334,6 +335,12 @@ async function revealOutput() {
             {{ t('partitionFiles.browse.revealMissing', { name: revealMissing }) }}
           </p>
           <p class="wizard__hint">{{ t('partitionFiles.browse.stateHint') }}</p>
+          <FeatureJump
+            :features="['carve']"
+            :target="source"
+            :lead="t('jump.notFoundLead')"
+            :disabled="copy.isBusy.value"
+          />
           <p v-if="partition.timesUtc" class="wizard__hint">
             {{ t('partitionFiles.browse.timesUtc') }}
           </p>

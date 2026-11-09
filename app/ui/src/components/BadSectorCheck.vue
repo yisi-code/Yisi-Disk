@@ -1,15 +1,17 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import FeatureJump from './FeatureJump.vue'
 import SourcePicker from './SourcePicker.vue'
 import UnreadableRanges from './UnreadableRanges.vue'
 import JobControls from './JobControls.vue'
 import ReadHealthHint from './ReadHealthHint.vue'
 import ReadMap from './ReadMap.vue'
+import { useFeatureJump } from '../composables/useFeatureJump'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { useReadScan } from '../composables/useReadScan'
 import { useSourceSelection } from '../composables/useSourceSelection'
-import { isDeviceKind } from '../services/host'
+import { isDeviceKind, type JobTarget } from '../services/host'
 import { formatBytes, formatSeconds } from '../utils/format'
 
 /** 报告里最多列出的读不出区段数；其余只计入总数 */
@@ -36,6 +38,9 @@ const {
 
 const titleElement = ref<HTMLHeadingElement | null>(null)
 const { sourceKind, imagePath, device, target: scanTarget } = useSourceSelection()
+/** 发起检测时的源：结果页转到别的功能时用它（之后改了来源的选择也不影响） */
+const scannedTarget = ref<JobTarget | null>(null)
+useFeatureJump(handleExit)
 
 
 const canStart = computed(() => scanTarget.value !== null && !isBusy.value)
@@ -79,6 +84,7 @@ function handleExit() {
 
 function handleSubmit() {
   if (canStart.value && scanTarget.value !== null) {
+    scannedTarget.value = scanTarget.value
     void start(scanTarget.value)
   }
 }
@@ -217,13 +223,19 @@ function handleCancel() {
           {{ t('badSectors.result.truncated', { count: completedReport.unreadable.length }) }}
         </p>
 
-        <p class="tool__next">
-          {{
-            completedReport.unreadableBytes === 0
-              ? t('badSectors.result.nextClean')
-              : t('badSectors.result.nextFound')
-          }}
-        </p>
+        <div class="tool__next">
+          <p>
+            {{
+              completedReport.unreadableBytes === 0
+                ? t('badSectors.result.nextClean')
+                : t('badSectors.result.nextFound')
+            }}
+          </p>
+          <FeatureJump
+            :features="completedReport.unreadableBytes === 0 ? ['undelete', 'carve'] : ['image', 'undelete', 'carve']"
+            :target="scannedTarget"
+          />
+        </div>
       </section>
     </div>
   </section>

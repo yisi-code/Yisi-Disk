@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import FeatureJump from './FeatureJump.vue'
 import ImageHistoryList from './ImageHistoryList.vue'
 import ImageRegionPicker from './ImageRegionPicker.vue'
 import JobControls from './JobControls.vue'
@@ -8,6 +9,7 @@ import ReadMap from './ReadMap.vue'
 import SourcePicker from './SourcePicker.vue'
 import UnreadableRanges from './UnreadableRanges.vue'
 import { useDiskImage } from '../composables/useDiskImage'
+import { useFeatureJump } from '../composables/useFeatureJump'
 import { useHostDialog } from '../composables/useHostDialog'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { useImageHistory } from '../composables/useImageHistory'
@@ -87,6 +89,7 @@ const {
   device,
   target: imageTarget,
 } = useSourceSelection('disk')
+useFeatureJump(handleExit)
 const imagePath = ref('')
 /** 整盘，或者只做选中的几段 */
 const scopeMode = ref<'whole' | 'select'>('whole')
@@ -1027,10 +1030,17 @@ function changeText(change: { kind: string; number: number; before: ByteRange | 
           {{ t('diskImage.result.truncated', { count: finishedSummary.badRanges.length }) }}
         </p>
 
-        <p class="tool__next">
-          {{ t('diskImage.result.next', { path: finishedSummary.imagePath }) }}
-          <template v-if="finishedSummary.badBytes > 0">{{ t('diskImage.result.nextBad') }}</template>
-        </p>
+        <div class="tool__next">
+          <p>
+            {{ t('diskImage.result.next', { path: finishedSummary.imagePath }) }}
+            <template v-if="finishedSummary.badBytes > 0">{{ t('diskImage.result.nextBad') }}</template>
+          </p>
+          <!-- 在刚做好的镜像上恢复：带过去的源是这个镜像文件 -->
+          <FeatureJump
+            :features="['undelete', 'carve']"
+            :target="{ kind: 'image', path: finishedSummary.imagePath }"
+          />
+        </div>
       </section>
     </div>
   </section>

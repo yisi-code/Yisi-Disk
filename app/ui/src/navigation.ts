@@ -2,6 +2,7 @@
 
 /** 能进入的功能页；没有对应页面的功能还在开发中 */
 export type FeatureView =
+  | 'survey'
   | 'undelete'
   | 'carve'
   | 'badSectors'
@@ -15,6 +16,7 @@ export type FeatureKey = FeatureView
 
 /** 每个功能进入哪个功能页；null 表示还在开发中 */
 export const FEATURE_VIEWS: Record<FeatureKey, FeatureView | null> = {
+  survey: 'survey',
   undelete: 'undelete',
   carve: 'carve',
   badSectors: 'badSectors',
@@ -26,6 +28,7 @@ export const FEATURE_VIEWS: Record<FeatureKey, FeatureView | null> = {
 
 /** 每个功能要用的引擎方法：引擎不支持（`engine.capabilities` 里没有）时这个功能不能进入 */
 export const FEATURE_METHODS: Record<FeatureKey, string> = {
+  survey: 'repair.diagnoseBoot',
   undelete: 'repair.open',
   carve: 'carve.start',
   badSectors: 'disk.readScan',
@@ -37,6 +40,7 @@ export const FEATURE_METHODS: Record<FeatureKey, string> = {
 
 /** 「全部功能」页的顺序：能用的在前 */
 export const ALL_FEATURES: FeatureKey[] = [
+  'survey',
   'undelete',
   'carve',
   'badSectors',
@@ -46,7 +50,7 @@ export const ALL_FEATURES: FeatureKey[] = [
   'fsCheck',
 ]
 
-export type ProblemKey = 'deleted' | 'unopenable' | 'lostPartition' | 'failingDisk'
+export type ProblemKey = 'deleted' | 'formatted' | 'unopenable' | 'lostPartition' | 'failingDisk'
 
 export interface Problem {
   key: ProblemKey
@@ -56,7 +60,9 @@ export interface Problem {
 
 export const PROBLEMS: Problem[] = [
   { key: 'deleted', features: ['undelete', 'carve'] },
-  { key: 'unopenable', features: ['carve', 'repairPartition', 'fsCheck'] },
+  { key: 'formatted', features: ['undelete', 'carve', 'findPartitions'] },
+  // 能保留文件名的先试：先诊断引导扇区、再查文件系统，都不行时按文件格式找回
+  { key: 'unopenable', features: ['repairPartition', 'fsCheck', 'carve'] },
   { key: 'lostPartition', features: ['findPartitions', 'carve'] },
   { key: 'failingDisk', features: ['badSectors', 'image', 'undelete', 'carve'] },
 ]

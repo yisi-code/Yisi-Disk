@@ -6,6 +6,7 @@ import BadSectorCheck from './components/BadSectorCheck.vue'
 import CarveWizard from './components/CarveWizard.vue'
 import DiskImage from './components/DiskImage.vue'
 import DiskAccessNotice from './components/DiskAccessNotice.vue'
+import DiskSurvey from './components/DiskSurvey.vue'
 import EngineStatus from './components/EngineStatus.vue'
 import UpdatePrompt from './components/UpdatePrompt.vue'
 import { useUpdateCheck } from './composables/useUpdateCheck'
@@ -17,7 +18,9 @@ import ProblemOverview from './components/ProblemOverview.vue'
 import RepairPartitionWizard from './components/RepairPartitionWizard.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 import UndeleteWizard from './components/UndeleteWizard.vue'
+import { acceptFeatureJump } from './composables/useFeatureJump'
 import {
+  FEATURE_VIEWS,
   PROBLEMS,
   type FeatureKey,
   type FeatureView,
@@ -100,8 +103,18 @@ function openFeature(view: FeatureView, feature: FeatureKey) {
   featureView.value = view
 }
 
-/** 从功能页返回：回到原来的导航页，焦点回到进入时点的那张卡片 */
+/**
+ * 从功能页返回：回到原来的导航页，焦点回到进入时点的那张卡片。
+ * 功能页是为了转到另一个功能才退出的，就直接打开那个功能；之后从那里返回时焦点落在导航页标题上
+ */
 function closeFeature() {
+  const next = acceptFeatureJump()
+  const nextView = next === null ? null : FEATURE_VIEWS[next]
+  if (nextView !== null) {
+    openedFeature.value = null
+    featureView.value = nextView
+    return
+  }
   const feature = openedFeature.value
   focusRequest.value = feature === null ? { target: 'title' } : { target: 'feature', feature }
   featureView.value = null
@@ -159,7 +172,8 @@ function closeFeature() {
       </nav>
 
       <main class="app-main">
-        <CarveWizard v-if="featureView === 'carve'" @exit="closeFeature" />
+        <DiskSurvey v-if="featureView === 'survey'" @exit="closeFeature" />
+        <CarveWizard v-else-if="featureView === 'carve'" @exit="closeFeature" />
         <UndeleteWizard v-else-if="featureView === 'undelete'" @exit="closeFeature" />
         <BadSectorCheck v-else-if="featureView === 'badSectors'" @exit="closeFeature" />
         <DiskImage v-else-if="featureView === 'image'" @exit="closeFeature" />
@@ -170,6 +184,7 @@ function closeFeature() {
           v-else-if="page === 'overview'"
           :focus-request="focusRequest"
           @navigate="navigateFromOverview"
+          @open="openFeature"
         />
         <ProblemGuide
           v-else-if="isProblemPage(page)"

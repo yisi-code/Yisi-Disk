@@ -2,11 +2,13 @@
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import DeletedScanProgress from './DeletedScanProgress.vue'
+import FeatureJump from './FeatureJump.vue'
 import PartitionFiles from './PartitionFiles.vue'
 import PartitionPicker from './PartitionPicker.vue'
 import SourcePicker from './SourcePicker.vue'
 import WizardSteps from './WizardSteps.vue'
 import { useBrowse } from '../composables/useBrowse'
+import { takeFeatureHandoff, useFeatureJump } from '../composables/useFeatureJump'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { usePartitionText } from '../composables/usePartitionText'
 import { useSourceSelection } from '../composables/useSourceSelection'
@@ -25,7 +27,10 @@ const browse = useBrowse()
 
 const titleElement = ref<HTMLHeadingElement | null>(null)
 const step = ref<WizardStep>('source')
-const { sourceKind, imagePath, device, folder, folderLocation, target } = useSourceSelection()
+const { sourceKind, imagePath, device, folder, folderLocation, target } = useSourceSelection('image', {
+  allowsFolder: true,
+})
+useFeatureJump(handleExit)
 const selectedPartition = ref<number | null>(null)
 /** 选文件夹找回时，打开的那一刻文件夹在卷里的位置：浏览时直接定位到它 */
 const openedFolder = ref<string[] | null>(null)
@@ -118,8 +123,23 @@ const openingText = computed(() =>
   isDeviceKind(target.value?.kind) ? t('partition.openingDisk') : t('partition.opening'),
 )
 
-onMounted(() => {
+onMounted(async () => {
   titleElement.value?.focus()
+  // 从别的功能转过来：直接读这个源；带着分区时选中它（按位置对，编号可能不同）并进入
+  const handoff = takeFeatureHandoff('undelete')
+  if (handoff === null) {
+    return
+  }
+  await openSource()
+  const wanted = handoff.partition
+  const match =
+    wanted === null
+      ? undefined
+      : partitions.value.find((partition) => partition.offset === wanted.offset && partition.browsable)
+  if (match !== undefined && step.value === 'partition') {
+    selectedPartition.value = match.number
+    await enterPartition()
+  }
 })
 
 async function handleExit() {
@@ -284,9 +304,10 @@ async function openSource() {
           :note="(partition) => (partition.browsable ? '' : unbrowsableReason(partition.filesystem))"
           :disabled="browse.isScanning.value"
         />
-        <p v-if="!partitions.some((partition) => partition.browsable)" class="wizard__note">
-          {{ t('partition.picker.none') }}
-        </p>
+        <template v-if="!partitions.some((partition) => partition.browsable)">
+          <p class="wizard__note">{{ t('partition.picker.none') }}</p>
+          <FeatureJump :features="['repairPartition', 'carve']" :target="browse.target.value" />
+        </template>
         <p v-if="needsScanHint" class="wizard__hint">{{ t('partition.picker.scanHint') }}</p>
         <DeletedScanProgress v-if="browse.isScanning.value" :browse="browse" aria-live="polite" />
         <p v-if="browse.scanFailure.value" class="wizard__error" role="alert">

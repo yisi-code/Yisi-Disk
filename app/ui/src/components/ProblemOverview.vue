@@ -1,18 +1,34 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { PROBLEMS, type FocusRequest, type NavPage } from '../navigation'
+import { useEngineCapabilities } from '../composables/useEngineCapabilities'
+import {
+  FEATURE_METHODS,
+  PROBLEMS,
+  type FeatureKey,
+  type FeatureView,
+  type FocusRequest,
+  type NavPage,
+} from '../navigation'
 
 const props = defineProps<{ focusRequest: FocusRequest | null }>()
-const emit = defineEmits<{ navigate: [page: NavPage] }>()
+const emit = defineEmits<{ navigate: [page: NavPage]; open: [view: FeatureView, feature: FeatureKey] }>()
 
 const { t } = useI18n()
+const engine = useEngineCapabilities()
 
 const titleElement = ref<HTMLHeadingElement | null>(null)
+const surveyElement = ref<HTMLButtonElement | null>(null)
+
+/** 引擎不支持诊断时不给这个入口，按问题选照常可用 */
+const canSurvey = computed(() => engine.failure.value === null && engine.supports(FEATURE_METHODS.survey))
 
 onMounted(() => {
+  void engine.load()
   if (props.focusRequest?.target === 'title') {
     titleElement.value?.focus()
+  } else if (props.focusRequest?.target === 'feature' && props.focusRequest.feature === 'survey') {
+    surveyElement.value?.focus()
   }
 })
 </script>
@@ -25,6 +41,17 @@ onMounted(() => {
       </h2>
       <p class="guide-page__intro">{{ t('problems.overview.intro') }}</p>
     </header>
+
+    <button
+      v-if="canSurvey"
+      ref="surveyElement"
+      class="nav-card problem-card problem-card--survey"
+      type="button"
+      @click="emit('open', 'survey', 'survey')"
+    >
+      <span class="problem-card__name">{{ t('problems.overview.survey.name') }}</span>
+      <span class="problem-card__summary">{{ t('problems.overview.survey.summary') }}</span>
+    </button>
 
     <ul class="guide-page__cards guide-page__cards--grid">
       <li v-for="problem in PROBLEMS" :key="problem.key">
@@ -54,5 +81,10 @@ onMounted(() => {
 
 .problem-card__summary {
   color: var(--color-text-muted);
+}
+
+/* 不确定是哪种问题时的入口：占满一行，左侧色条与问题卡片区分开 */
+.problem-card--survey {
+  border-left: 4px solid var(--color-accent);
 }
 </style>

@@ -50,6 +50,105 @@ const enUS: typeof zhCN = {
     },
     failedItem: '{path}: {reason}',
   },
+  jump: {
+    to: 'Use "{name}" instead',
+    toPartition: 'Open this partition in "{name}"',
+    notFoundLead: 'For files you cannot find here:',
+  },
+  survey: {
+    steps: {
+      source: 'Source',
+      check: 'Check',
+      result: 'Findings',
+    },
+    intro:
+      'Pick a disk or an image file. The partition table and the boot sector of each partition are read, then a quick search looks for lost partitions; this usually takes seconds and never writes to the disk. Afterwards you see what was found and which feature to use.',
+    diskHint: 'Pick the whole disk to see both the partition table and lost partitions; picking one drive letter checks only that partition.',
+    start: 'Start check',
+    again: 'Check again',
+    run: {
+      diagnosing: 'Reading the partition table and the boot sector of each partition…',
+      diagnosingDisk: 'Requesting administrator rights and reading the partition table and boot sectors…',
+      searchStarting: 'Quickly looking for lost partitions…',
+      searching: 'Quickly looking for lost partitions: searched {done} of {total} ({percent}%), {rate}/s',
+      failed: 'This source cannot be read: {reason}',
+      failedLead: 'When the source cannot be read:',
+    },
+    result: {
+      separator: '; ',
+      searched: 'lost partitions were searched for quickly.',
+      searchStopped: 'the quick search was stopped at {percent}%, the rest was not looked at.',
+      notSearched: 'no quick search was done.',
+      readOnly: 'These findings come from a quick read-only check and are only suggestions: reading files, saving and writing happen in each feature, and only when you click.',
+      searchFailed: 'The quick search did not finish: {reason}. Only the boot sector findings are shown below.',
+      partitionTitle: '{partition}: {title}',
+    },
+    level: {
+      danger: 'Act now',
+      warning: 'Attention',
+      ok: 'OK',
+      info: 'Note',
+    },
+    finding: {
+      readErrors: {
+        title: 'Read errors or stalls',
+        detail:
+          'Some places could not be read or stalled during the quick check, so the disk may have bad sectors. Make an image first and recover from it, reading this disk directly as little as possible; if the disk makes noises or keeps disconnecting, stop using it, and for very important data consider a professional recovery service.',
+      },
+      gptDamaged: {
+        title: 'One of the two GPT copies is damaged',
+        detail: 'If the other copy is intact, "Repair a partition that will not open" can use it to fix the damaged one.',
+      },
+      lostPartitions: {
+        title: 'Found {count} partition not in the partition table | Found {count} partitions not in the partition table',
+        detail: 'Most likely partitions that were deleted or whose table entry was lost. In "Find lost partitions" you can browse and save their files, then write them back to the partition table.',
+      },
+      noPartitions: {
+        title: 'No partitions',
+        detail: 'The partition table has no partitions and the quick search found none. A deep search reads the whole disk to look again (hours for a large disk), or recover files by format straight away.',
+      },
+      healthy: {
+        title: 'OK, can be browsed',
+        detail: 'The boot sector checks out. For deleted files use "Recover deleted files"; if folders will not open or names are garbled, "Check a file system" finds out what is broken.',
+      },
+      backupDamaged: {
+        title: 'Usable, the backup boot sector has problems',
+        detail: 'The partition opens as usual, it just lost a safety net; if needed, "Repair a partition that will not open" can rewrite the backup from the boot sector.',
+      },
+      primaryDamaged: {
+        title: 'Boot sector damaged, backup usable',
+        detail: 'This is most likely why the partition will not open or asks to be formatted. "Repair a partition that will not open" can browse with the backup and save your files first, then repair the boot sector.',
+      },
+      bothDamaged: {
+        title: 'Boot sector and backup both damaged',
+        detail: '"Repair a partition that will not open" can work out the boot sector from the structures left in the partition and browse with it; if that fails, recover files by format.',
+      },
+      unrecognized: {
+        title: 'Unrecognized file system (RAW)',
+        detail: 'It may never have been formatted, use another file system, or be damaged at the start beyond recognition. "Repair a partition that will not open" can try to work out its parameters; if that fails, recover files by format.',
+      },
+      ext: {
+        title: 'Linux partition (ext)',
+        detail: 'Can be browsed and deleted files recovered; ext3 and ext4 clear where a deleted file was, so only names are listed and the contents have to be recovered by format.',
+      },
+      bitlocker: {
+        title: 'BitLocker encrypted volume',
+        detail: 'Unlock it in Windows first, then pick its drive letter to recover from; while locked, only encrypted data can be read.',
+      },
+      typeMismatch: {
+        title: 'The partition type in the table does not match the file system',
+        detail: 'Windows may not give it a drive letter because of this; "Repair a partition that will not open" can set the right type.',
+      },
+      systemPartitions: {
+        title: '{count} more partition used by the system | {count} more partitions used by the system',
+        detail: 'For example the Microsoft reserved partition or dynamic disk metadata: they have no file system by design and need nothing.',
+      },
+      fallback: {
+        title: 'If none of the above helps',
+        detail: '"Deep recovery by file type" does not depend on partitions or file systems and searches the whole source by file format; recovered files have no original names.',
+      },
+    },
+  },
   problems: {
     overview: {
       title: 'What happened?',
@@ -59,6 +158,11 @@ const enUS: typeof zhCN = {
         'Whatever happened: until your data is back, do not write anything to the affected disk, and save recovered files to a different disk.',
       allFeaturesHint: 'Already know which feature you need?',
       allFeaturesLink: 'See all features',
+      survey: {
+        name: 'Not sure what happened? Check this disk first',
+        summary:
+          'Reads the partition table and each partition\'s boot sector and quickly looks for lost partitions, usually in seconds; then tells you what it found and which feature to use, and opens it with this disk in one click.',
+      },
     },
     symptomsTitle: 'Choose this when',
     featuresTitle: 'Try in this order',
@@ -82,23 +186,44 @@ const enUS: typeof zhCN = {
         'If the files were on the system drive (C:), Windows keeps writing to it while running; if you can, shut down and recover from another computer.',
       ],
     },
+    formatted: {
+      name: 'Formatted by mistake',
+      summary: 'A partition was quick-formatted, a drive was formatted while reinstalling Windows, or a memory card or USB stick was formatted: the partition opens, but the old files are gone.',
+      symptoms: [
+        'You clicked "Format" by mistake, or clicked it when asked to format the disk (quick format).',
+        'C: or another drive was formatted while reinstalling Windows and the old files are gone.',
+        'A camera or phone reported a problem with the memory card and the photos were gone after formatting.',
+      ],
+      steps: {
+        undelete:
+          'Try this first on File Allocation Table (FAT32) and Extended File Allocation Table (exFAT) USB sticks and memory cards: "Find files whose folder is gone" reads the free space and, if the cluster size did not change, brings back the old subfolders with their file names (files directly in the root folder excepted). After formatting New Technology File System (NTFS), the old file records are usually overwritten by the new master file table, so this step often finds nothing.',
+        carve: 'The most dependable way: searches the whole partition by file format without relying on the file system, but without original names.',
+        findPartitions: 'If formatting changed the partition size or file system, or Windows was reinstalled with new partitions: a deep search may find the original partition.',
+      },
+      notes: [
+        'Do not write anything more to this partition, and never save recovered files back to it.',
+        'A full format (without "Quick Format") overwrites the data with zeros, so it can hardly be recovered.',
+        'Formatting on an SSD usually tells the drive to erase the whole partition (TRIM), after which little can be recovered.',
+      ],
+    },
     unopenable: {
       name: 'Partition will not open / asks to format',
-      summary: 'Opening the partition asks you to format it, it shows up as an unrecognized file system (RAW), or it was formatted.',
+      summary: 'Opening the partition asks you to format it, it shows up as an unrecognized file system (RAW), or it opens but folders will not open or names are garbled.',
       symptoms: [
         'Windows says "You need to format the disk in drive before you can use it".',
         'Disk Management shows the partition\'s file system as RAW.',
-        'The partition was formatted by mistake (quick format).',
+        'The partition opens, but some folders will not open, names are garbled, or Windows says "The file or directory is corrupted and unreadable".',
       ],
       steps: {
-        carve: 'Available now: finds files by format without relying on the partition structure, but without original names.',
-        repairPartition: 'Diagnose the boot sector first: if it is damaged but its backup is intact, browse with the backup and save the files, with their names, to another disk.',
-        fsCheck: 'For partitions that open but show garbled content or folders that will not open: find out what is broken first, read-only.',
+        repairPartition:
+          'Diagnose the boot sector first (read-only and quick): if it is damaged but its backup is intact, browse with the backup and save the files, with their names, to another disk; if both are damaged, it can be worked out from the structures in the partition.',
+        fsCheck: 'If the boot sector is fine and the partition opens but shows garbled content or folders that will not open: find out what is broken, read-only.',
+        carve: 'If neither step helps: finds files by format without relying on the partition structure, but without original names.',
       },
       notes: [
         'Do not click "Format disk", and do not run chkdsk or other repair tools that write to the disk.',
         'Save recovered files to a different disk.',
-        'Files can often be recovered after a quick format; a full format overwrites the data with zeros.',
+        'If the disk is very slow or reports errors, make an image first as described under "Bad sectors" and recover from the image.',
       ],
     },
     lostPartition: {
@@ -154,6 +279,12 @@ const enUS: typeof zhCN = {
     limits: 'Limits:',
     catalogIntro:
       'Every feature in one place, for when you already know what you need. Features marked "In development" cannot be used yet.',
+    survey: {
+      name: 'Check this disk first',
+      summary: 'Reads the partition table and the boot sector of each partition, quickly looks for lost partitions, and tells you what it found and which feature to use.',
+      suits: 'You are not sure what the problem is, or want an overview of the disk first.',
+      limits: 'Reads only the partition table, boot sectors and a few key places, usually in seconds; it does not check for bad sectors, run a deep search or check file systems in detail, and suggests those instead.',
+    },
     undelete: {
       name: 'Recover deleted files',
       summary: 'Browse the folders on a partition, find deleted files and copy them, with their names and folders, to another disk.',
@@ -347,7 +478,7 @@ const enUS: typeof zhCN = {
       fine: 'The unreadable 1 MiB block was read again in smaller pieces; the ranges above are exact to the sector. | The {count} unreadable 1 MiB blocks were read again in smaller pieces; the ranges above are exact to the sector.',
       fineTruncated: 'After {count} unreadable 1 MiB blocks the fine reading reached its limit (too many bad areas); later unreadable areas are recorded as whole blocks or pieces. With this much damage, create an image first.',
       nextClean:
-        'Next: if the disk is still slow or reports errors, copy important files off it soon; to recover deleted files, pick the matching problem in the navigation.',
+        'Next: if the disk is still slow or reports errors, copy important files off it soon. To recover files, go straight to:',
       nextFound:
         'Next: if the data matters, use "Create a disk image" first and recover from the image, reading this disk directly as little as possible. If you must recover now, "Recover deleted files" or "Deep recovery by file type" can also read it directly; save recovered files only to another disk.',
     },
@@ -574,7 +705,7 @@ const enUS: typeof zhCN = {
       partialLeft: 'The selected parts are finished. Parts of the disk are still not imaged: choose the same image later and select other partitions to continue.',
       moreRanges: 'Showing the first {shown} of {count} ranges; the bad sector map lists all of them.',
       truncated: 'Too many unreadable ranges: only the first {count} are shown here; the bad sector map lists all of them.',
-      next: 'Next: in "Recover deleted files" or "Deep recovery by file type", choose "Image file" and enter {path} to recover from the image.',
+      next: 'The image is saved at {path}. Next, recover from the image; these buttons open with this image already selected:',
       nextBad: 'Unreadable areas are zeros in the image, so files lying in them will be incomplete.',
     },
   },
@@ -988,7 +1119,7 @@ const enUS: typeof zhCN = {
       role: 'Type',
       start: 'Start',
       size: 'Size',
-      none: 'No partition can be browsed. File Allocation Table (FAT12/16/32), Extended File Allocation Table (exFAT), New Technology File System (NTFS) and the Linux extended file systems (ext2/3/4) are supported; otherwise try deep recovery by file type.',
+      none: 'No partition can be browsed. File Allocation Table (FAT12/16/32), Extended File Allocation Table (exFAT), New Technology File System (NTFS) and the Linux extended file systems (ext2/3/4) are supported. If the partition will not open, diagnose its boot sector first; otherwise recover files by format:',
       scanHint:
         'For an NTFS partition, Next first scans the MFT (master file table) for deleted files. A large partition may take from tens of seconds to minutes; you can cancel at any time.',
       reason: {
@@ -1049,7 +1180,7 @@ const enUS: typeof zhCN = {
       liveHint:
         'This reads what is on the disk right now. While a partition is in use, recently written files may not have reached the disk yet; to recover deleted files, stop writing to this disk first.',
       stateHint:
-        '"Likely intact" only means the space it used has not been taken by another file; it does not guarantee the contents. Open the copies to check them. On an SSD with TRIM, deleted files are often already zeroed. For files you cannot find here, try deep recovery by file type.',
+        '"Likely intact" only means the space it used has not been taken by another file; it does not guarantee the contents. Open the copies to check them. On an SSD with TRIM, deleted files are often already zeroed.',
       timesUtc: 'This partition records times in Coordinated Universal Time (UTC), which may differ by some hours from the local times shown by File Explorer.',
       revealMissing: 'Folder "{name}" was not found (it may have been deleted or renamed); showing its parent instead.',
     },
@@ -1093,7 +1224,7 @@ const enUS: typeof zhCN = {
         running: 'Reading the free space for files whose folder is gone: {done} / {total} ({percent}%)',
         failed: 'Reading the free space failed: {reason}',
         summary: 'Read {bytes} of free space and found {folders} folder whose place is gone ({entries} items), listed under "Files without their folder" in the root. Its original name is gone, so it is named after its position. | Read {bytes} of free space and found {folders} folders whose place is gone ({entries} items), listed under "Files without their folder" in the root. Their original names are gone, so they are named after their positions.',
-        none: 'Read {bytes} of free space; no folders whose place is gone were found. For files that are still missing, try "Deep recovery by file type".',
+        none: 'Read {bytes} of free space; no folders whose place is gone were found.',
         unreadable: '{count} cluster could not be read. | {count} clusters could not be read.',
       },
     },
@@ -1212,7 +1343,7 @@ const enUS: typeof zhCN = {
         deep: 'Deep search.',
       },
       summary: 'Found {count} partition. | Found {count} partitions.',
-      none: 'No File Allocation Table (FAT), Extended File Allocation Table (exFAT), New Technology File System (NTFS) or Linux extended file system (ext2/3/4) partitions were found. You can still try "Recover files by type" for the files.',
+      none: 'No File Allocation Table (FAT), Extended File Allocation Table (exFAT), New Technology File System (NTFS) or Linux extended file system (ext2/3/4) partitions were found. Files can still be recovered by format:',
       table: 'Current partition table: {scheme}.',
       scheme: {
         mbr: 'MBR',
@@ -1331,7 +1462,7 @@ const enUS: typeof zhCN = {
       },
     },
     next: {
-      healthy: 'If the partition still will not open, the problem is not the boot sector: try "Recover deleted files" or "Deep recovery by file type".',
+      healthy: 'If the partition still will not open, or folders will not open, the problem is not the boot sector; try these instead:',
       backupDamaged: 'No need to act now; if needed, you can rewrite the backup from the primary boot sector.',
       primaryDamaged: 'Browse with the backup first and save your important files to another disk; then you can repair the primary boot sector from the backup (repair an image first).',
       bothDamaged: 'The boot sector can be worked out from the structures left in the partition (file allocation table, root directory, master file table): browse with the worked-out parameters first, and once you recognise and have saved your files, rebuild the boot sector (on an image first). If nothing can be worked out, use "Deep recovery by file type".',
@@ -1755,7 +1886,7 @@ const enUS: typeof zhCN = {
       unknownFilesystem: {
         title: 'File system not recognised: neither the main nor the backup boot sector is usable',
         detail: 'The partition may be unformatted, use another file system, or be damaged at the start.',
-        fix: 'For now, "Deep recovery by file type" can find files without the file system; later the boot sector can be rebuilt from inferred parameters.',
+        fix: 'In "Repair a partition that will not open", the boot sector can be worked out from the structures in the partition, browsed with and then rebuilt; if that fails, "Deep recovery by file type" finds files without the file system.',
       },
       bootUnrecognized: {
         title: 'The main boot sector is not usable; checked using the backup boot sector',
