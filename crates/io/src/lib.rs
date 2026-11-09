@@ -20,6 +20,7 @@ mod ioctl;
 mod local_time;
 mod metered;
 mod plan;
+mod privilege;
 mod process;
 mod range;
 mod raw;
@@ -64,6 +65,7 @@ pub use plan::{
     DeviceIdentity, MAX_PLAN_BYTES, MAX_WRITES, Overlay, PlanError, SectorWrite, WritePlan,
     image_identity, merge_writes,
 };
+pub use privilege::enable_held_privileges;
 pub use process::wait_for_process_exit;
 pub use range::ranges_overlap;
 pub use raw::RawImage;

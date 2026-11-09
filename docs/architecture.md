@@ -173,7 +173,7 @@ macOS 的特权辅助程序同样没有 stdio，通道在实现 macOS 版时确�
 **扫描一块物理磁盘的流程（Windows）：**
 
 1. 宿主启动引擎，得到它的进程 ID；
-2. 宿主确保代理在运行：第一次需要时提权启动（弹 UAC），之后整个会话复用；点开始（或写盘）时才提权，选中磁盘时不提前弹（2026-11-05 试过选中就提权，用户只是点一下看看也会弹窗、卡顿，撤掉）；`ShellExecuteEx("runas")` 带上主窗口的 `HWND`，UAC 直接弹到最前面（不带时 Windows 常先在任务栏里闪烁、过一阵才出来）；代理通信失败时丢掉连接，下次重新启动；
+2. 宿主确保代理在运行：第一次需要时提权启动（弹 UAC），之后整个会话复用；点开始（或写盘）时才提权，选中磁盘时不提前弹（2026-11-05 试过选中就提权，用户只是点一下看看也会弹窗、卡顿，撤掉）；`ShellExecuteEx("runas")` 带上主窗口的 `HWND`，UAC 直接弹到最前面（不带时 Windows 常先在任务栏里闪烁、过一阵才出来）；不做安全区域检查（`SEE_MASK_NOZONECHECKS`，只对启动代理这一处）：从网上下载的压缩包解压后文件带「来自网络」标记，不加时每次启动代理都会先弹「打开文件 - 安全警告：无法验证发布者」，点「取消」就成了 `elevationCancelled`；用户运行宿主时已经过了这一关，代理的路径由宿主算出、不接受外部传入；代理通信失败时丢掉连接，下次重新启动；用户在 UAC 里取消时不留连接，下次用到时（再点开始、或点设置页与底栏的「授权」「重新授权」）重新弹 UAC；
 3. 代理只读打开磁盘，把句柄复制进这个引擎；
 4. 宿主向引擎发起任务，源为 `{type: "disk", handle}`，引擎用 `WindowsDisk::adopt_handle` 认领后照常读取。
 
@@ -828,8 +828,8 @@ FAT、exFAT 依据微软公开的规范实现；NTFS 没有官方规范，依据
   | 磁盘有坏道 / 读写很慢或报错 | 坏道检测 → 制作磁盘镜像 → 在镜像上找回删除的文件或按文件类型深度恢复 |
 
 - **全部功能**：七个功能平铺成卡片，能用的在前，给已经知道要用什么的用户直达。卡片按窗口宽度自动排两到四列（每列至少 340px）。
-- **设置**（`SettingsPanel`）：整个程序的设置，选了就生效，存进 WebView 的 `localStorage`（`i18n/index.ts` 的 `saveLocale`，键 `yisi.locale`），下次打开还是这样；读不到或存的值不认识时按系统语言。目前只有界面语言，以后的全局设置都放这里，不再放顶栏。
-- **关于**：程序名与一段介绍、程序版本、恢复引擎是否可用（每次打开现查 `engine.capabilities`）；引擎版本与支持的操作折叠在「技术细节」里。版本旁的「检查新版本」与有新版本时的「下载并更新」（`useUpdateCheck`，宿主命令 `update_check`、`update_install`，做法见第 7 章「程序内更新」）；「打开下载页」（`open_releases_page`，网址写死在宿主里）留作更新失败或没有签名时的退路。界面自己不联网，安全策略的 `connect-src` 只有 IPC。
+- **设置**（`SettingsPanel`）：整个程序的设置，选了就生效，存进 WebView 的 `localStorage`（`i18n/index.ts` 的 `saveLocale`，键 `yisi.locale`），下次打开还是这样；读不到或存的值不认识时按系统语言。「权限」一节显示磁盘访问（管理员授权）的状态——还没请求、已授权、已取消、代理没能启动——没授权时带「授权」或「重新授权」（`useDiskAccess`，宿主命令 `disk_access_status`、`disk_access_authorize`）；取消或失败时底栏也出现一行提示与「重新授权」（`DiskAccessNotice`），在任何页面都能再次授权。另一节「程序文件夹」列出安装目录、程序数据 `data`、写盘前的备份 `write-backups`、打开与复制的副本 `open-cache` 的位置与用途，每个带「打开」（每次进设置页现查；还没建立的不能打开，说明改为「还没有建立」）。以后的全局设置都放这里，不再放顶栏。
+- **关于**：程序名与一段介绍、程序版本、恢复引擎是否可用（每次打开现查 `engine.capabilities`）；引擎版本与支持的操作折叠在「技术细节」里。版本旁的「检查新版本」与有新版本时的「下载并更新」（`useUpdateCheck`，全程序共用一份状态，离开关于页再回来进度还在；宿主命令 `update_check`、`update_install`，做法见第 7 章「程序内更新」）；「打开下载页」（`open_releases_page`，网址写死在宿主里）留作更新失败或没有签名时的退路。界面自己不联网，安全策略的 `connect-src` 只有 IPC。
 
 功能卡片写明功能做什么、适合的情况与局限（做不到的事、使用前提、用不上的情形，标签是「局限」而不是「不适合」，免得前提条件被读成「不适合」的情形）。还没做的功能、引擎不支持的功能（`navigation.ts` 的 `FEATURE_METHODS` 记着每个功能要用的方法，按 `engine.capabilities` 判断）与引擎起不来时的全部功能，卡片变淡、虚线边框，带「开发中」「不支持」「不能用」文字标签与原因，不只靠颜色区分；能力在第一次用到时查一次、全程序共用（`useEngineCapabilities`，关于页打开时刷新），还没查到时当作支持。引擎打不开物理磁盘的平台（能力里没有 `disk.list`）上，来源只能选镜像文件；仍然可以用 Tab 聚焦，标 `aria-disabled="true"`，读屏软件先读到原因，点击不进入。问题、功能与推荐顺序集中在 `navigation.ts`，文案在 `problems.*`、`features.*` 下（症状与注意事项是字符串数组，条数随语言可以不同）。
 
@@ -952,14 +952,15 @@ FAT、exFAT 依据微软公开的规范实现；NTFS 没有官方规范，依据
 
 ## 7. 宿主
 
-- 程序写的东西只放在程序文件夹下的 `data` 里（`engines::data_dir`），不往系统的 AppData 写：做过的镜像 `image-history.json`、写盘记录 `write-history.json` 与备份 `write-backups`、为打开存的副本 `open-cache`、界面（WebView2）的缓存 `webview`。主窗口不由配置自动创建（`tauri.conf.json` 里 `create` 为 false），启动时宿主按同一份配置建窗口、把 WebView2 的数据目录指到 `data` 下。`data` 建不出来（程序放在只读的文件夹里）时弹出中英文提示后退出，不换地方写。发布包是解压即用的文件夹，数据跟着程序走，删掉文件夹就是彻底删除。
+- 程序写的东西只放在程序文件夹下的 `data` 里（`engines::data_dir`），不往系统的 AppData 写：做过的镜像 `image-history.json`、写盘记录 `write-history.json` 与备份 `write-backups`、为打开存的副本 `open-cache`、界面（WebView2）的缓存 `webview`。主窗口不由配置自动创建（`tauri.conf.json` 里 `create` 为 false），启动时宿主按同一份配置建窗口、把 WebView2 的数据目录指到 `data` 下。`data` 建不出来（程序放在只读的文件夹里）时弹出中英文提示后退出，不换地方写。发布包是解压即用的文件夹，数据跟着程序走，删掉文件夹就是彻底删除。设置页的位置来自 `app_folders`（`folders.rs`，按种类 `program` / `data` / `writeBackups` / `openCache` 由宿主算），打开用 `app_folder_open`：只收这四种之一、不收路径，文件夹不存在时答复 `folderMissing`；交给 `explorer.exe` 打开（`shell::open_folder`），不经外壳的 `explore` 动词——有的机器上按它打开文件夹会弹「无法访问指定设备、路径或文件」。
 - 写入计划（第 4.2 节）：生成、存备份、执行、放弃、回滚与写盘记录都在宿主的 `write_plans`；镜像文件由宿主以普通权限、独占方式打开写入，整块物理盘交给磁盘代理（`BrokerSession::execute_write`，第一次需要时与读盘一样提权启动代理），代理拒绝的原因换成 `writeSystemDisk`、`writeWrongDisk`、`volumeInUse` 等错误码。
 - 管理引擎进程与代理进程的启动、心跳、退出。引擎程序与宿主程序放在同一目录；Windows 上以 `CREATE_NO_WINDOW` 启动，不弹出控制台窗口。
 - 把引擎事件合并后转给界面，界面侧不直接面对高频事件。界面只收一个事件 `job-event`，载荷是 `{jobId, kind, data}`，`kind` 为 progress、found、checkpoint、copied、imaging、partitions、reading、log、completed、failed、cancelled、unresponsive、responsive。
 - 任务 ID 由界面生成（UUID），在调用启动命令之前就记下，避免事件先于命令返回到达时被丢掉；宿主只接受字母、数字和连字符。
 - 返回给界面的错误是 `{code, detail}`：`code` 由界面翻译成当前语言，`detail` 是技术细节。引擎答复的错误码中，`SOURCE_UNAVAILABLE`、`OUTPUT_UNAVAILABLE`、`OUTPUT_ON_SOURCE` 分别转成 `sourceUnavailable`、`outputUnavailable`、`outputOnSource`，其余统一为 `engineRejected`。
 - 界面给的源（`Target`）是镜像文件、物理磁盘编号或卷的盘符，宿主按它请代理打开设备（`resolve_source`）。代理打开卷（`\\.\C:`）时对句柄发 `FSCTL_ALLOW_EXTENDED_DASD_IO`（`yisi_io::WindowsDisk::open`）：文件系统自己记的大小可能比分区短（NTFS 的备份引导扇区在分区最后一个扇区），不这样的话读到那里出错、被当成坏区（2026-11-05 走查按盘符做 NTFS 卷的镜像时发现，末尾 4 KiB 读不出）；复制给引擎的句柄同属一个文件对象，一样读得满。读取扫描用 `job_start_read_scan`（源），与其他任务一样。
-- 磁盘代理在整个会话里只启动一次（第一次需要打开物理磁盘时），之后复用；宿主退出时代理随之退出。等待 UAC 期间，其他打开请求排队，不会同时弹出多个 UAC。代理程序同样放在宿主程序旁边，`tauri dev` / `tauri build` 会先编出引擎和代理。
+- 磁盘代理在整个会话里只启动一次（第一次需要打开物理磁盘时，或用户在设置页、底栏点「授权」时），之后复用；宿主退出时代理随之退出。授权的状态（`broker::DiskAccess`：notRequested、granted、cancelled、failed、unsupported）在每次启动结果与连接断开时经 `disk-access` 事件发给界面。
+- 宿主、引擎、磁盘代理启动时都调用 `yisi_io::enable_held_privileges`，把自己令牌里已有的特权全部打开（只打开已经有的，不需要用户授权）；普通权限的进程里一般只有关机、调整时区这几项，经 UAC 以管理员运行的代理里还有备份、还原、管理卷等。要管理员的读写物理盘仍在用到时才请求。等待 UAC 期间，其他打开请求排队，不会同时弹出多个 UAC。代理程序同样放在宿主程序旁边，`tauri dev` / `tauri build` 会先编出引擎和代理。
 - 深度恢复的扫描记录（`carve_history`）：每次扫描一条（接着扫不另起），记源、格式、是否部分恢复（`keepIncomplete`）、是否两段重组（`joinFragments`）（以前的记录都按否）、实际输出目录（只扫描时为空）、检查点、找到几个文件、状态（正在扫、停下、扫完、出错），存在 `data` 里的 `carve-history.json`（读写规则同做过的镜像，最多 30 条，多出的连同文件清单删掉，不碰恢复出的文件）；找到的文件按批追加进 `carve-history\<记录 ID>.jsonl`，不整份重写，不完整的带着 `incomplete`（原因）。由任务观察者（`engines::JobObserver`，`start_job_observed`）按引擎的 `job.found`、`job.checkpoint` 与终结通知更新；程序上次没正常结束留下的「正在扫」读出来按停下算。命令：`carve_history_list`、`carve_history_open`（记录与找到的文件，之后预览、保存都按记录 ID，与扫描任务 ID 同一套规则）、`carve_history_remove`（正在扫的不能删，`carveRecordRunning`）、`job_resume_carve`（停下或出错的记录从检查点接着扫，扫完的答复 `carveNotResumable`，找不到 `carveRecordNotFound`）。
 - 制作镜像的读取参数随 `plan.tuning` 原样转给引擎。
 - Tauri 安全配置：严格 CSP；禁止加载远程内容；只开放白名单中的命令。系统文件对话框用官方的 dialog 插件，capability 只开放 `dialog:allow-open`（选择文件与文件夹）与 `dialog:allow-save`（另存为）。
@@ -972,7 +973,7 @@ FAT、exFAT 依据微软公开的规范实现；NTFS 没有官方规范，依据
 - 丢失分区搜索用 `job_start_partition_search`（源与搜法 `mode`），转成 `repair.search`；`job.partitions` 转成 kind 为 partitions 的事件。
 - 做过的镜像（`image_history`）：任务开始后把镜像位置、当时选的源、引擎答复的来源标识与容量、来源描述、时间记进 `data` 里的 `image-history.json`（先写临时文件再改名；最多 30 条，最近用的在前，路径在 Windows 上不分大小写）。`image_history_list` 读记录、经 `image.describe` 给出各自现在的状态；`image_history_remove` 只删记录；`image_reveal` 在文件夹中显示镜像，只认列表里记着的路径（否则 `imageRecordNotFound`）；`image_history_relocate` 要求新位置的状态是 ok、来源标识与容量与记录一致才改（否则 `imageRelocateInvalid`、`imageRelocateMismatch`）。记不下来不影响做镜像，只是下次不能从列表里选。
 - 复制出的文件用 `copied_open`、`copied_reveal` 打开或在文件夹中显示：只接受任务 ID 加引擎报告的相对路径，每一级都是普通名字（不含 `:`），最后一级不以 `.part` 结尾，解析（含联接与符号链接）后必须仍在该任务的输出目录之内（与恢复出的文件同一个函数）。找回的文件来路不明，`.exe`、`.bat`、`.cmd`、`.ps1`、`.vbs`、`.js`、`.hta`、`.msi`、`.lnk`、`.url`、`.reg`、`.scr` 等可执行、脚本或会改系统设置的类型不交给系统打开（`executableBlocked`），只能在文件夹中显示。
-- 程序内更新（`update.rs`）：只在用户点「检查新版本」「下载并更新」时联网，不自动检查、不在后台下载。
+- 程序内更新（`update.rs`）：打开程序 5 秒后界面自动查一次（`useUpdateCheck` 的 `autoCheck`，距上次成功检查不到 24 小时不查，时间记在 localStorage 的 `yisi.updateCheckedAt`；查不到时不提示），有新版本时在导航页弹出提示（`UpdatePrompt`，功能页里可能有任务在跑，回到导航页再弹）：「立即更新」进入关于页并开始下载安装，「以后再说」关掉；用户也可以随时在关于页手动检查。下载与安装只在用户点了之后才做，不在后台下载。
   - 发布：Release 里有压缩包 `yisi-disk-tools-v<版本>-windows-x64.zip`（GitHub 的资产名不能带中文）和签名清单 `.zip.sig`。清单是几行文本（格式行、版本、文件名、大小、SHA256），最后一行是 ECDSA P-256 / SHA-256 签名（r、s 各 32 字节的十六进制），签名覆盖它之前的全部字节。私钥只在发版的机器上，程序里内置公钥（`PUBLIC_KEY`）。
   - 安装：问 `releases/latest` → 下载清单，签名对、文件名与版本与发布一致、版本比当前新才继续（防止把旧的已签名版本当新版本发来）→ 下载压缩包，大小与 SHA256 必须与清单一致，GitHub 给的摘要也要一致 → 解压，只收顶层文件夹 `yisi-磁盘工具-v<版本>-windows-x64` 下的六个已知文件（三个程序必须有；本地头与中央目录的名字必须相同；核对 CRC-32），别的名字、子目录、`..` 一律拒绝 → 写到 `data/update/v<版本>` → 程序文件逐个改名为 `.old`（运行中的程序也能改名）再换上新的，任何一步失败都改回去。有任务在运行时（`Engines::is_busy`）不更新。
   - 进度：宿主发 `update-progress` 事件（`UpdateProgress`），界面分两行显示：① 下载新版本（字节数，约每 1% 一次；总量取签名清单里的大小）、② 安装新版本（`verify` 核对签名与摘要 → `extract` 解压 n 个文件 → `replace` 换上 n 个文件，进度条按 1 + 2n 件算）；① 完成才进入 ②，完成的一步打勾，失败时停在哪一步看得出来。

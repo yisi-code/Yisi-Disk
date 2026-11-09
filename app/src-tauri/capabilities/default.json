@@ -5,6 +5,10 @@
   "windows": ["main"],
   "permissions": [
     "allow-app-info",
+    "allow-app-folders",
+    "allow-app-folder-open",
+    "allow-disk-access-status",
+    "allow-disk-access-authorize",
     "allow-open-releases-page",
     "allow-update-check",
     "allow-update-install",

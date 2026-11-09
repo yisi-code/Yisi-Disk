@@ -23,6 +23,11 @@ fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "磁盘代理启动");
+    // 已经由用户在 UAC 里授权为管理员：启动时把令牌里有的特权（备份、还原、管理卷等）全部打开
+    match yisi_io::enable_held_privileges() {
+        Ok(names) => tracing::info!(?names, "已启用特权"),
+        Err(error) => tracing::warn!(%error, "启用特权失败"),
+    }
     let args = parse_args(std::env::args().skip(1))?;
     run(args)
 }
