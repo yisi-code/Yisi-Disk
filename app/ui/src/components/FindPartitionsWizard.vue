@@ -3,6 +3,7 @@ import { computed, onMounted, ref, useId, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import FoundPartitionItem from './FoundPartitionItem.vue'
 import DeletedScanProgress from './DeletedScanProgress.vue'
+import FeatureJump from './FeatureJump.vue'
 import PartitionFiles from './PartitionFiles.vue'
 import SourcePicker from './SourcePicker.vue'
 import WizardSteps from './WizardSteps.vue'
@@ -10,6 +11,7 @@ import JobControls from './JobControls.vue'
 import ReadHealthHint from './ReadHealthHint.vue'
 import WritePlanConfirm from './WritePlanConfirm.vue'
 import { useBrowse } from '../composables/useBrowse'
+import { takeFeatureHandoff, useFeatureJump } from '../composables/useFeatureJump'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { usePartitionText } from '../composables/usePartitionText'
 import { usePartitionSearch } from '../composables/usePartitionSearch'
@@ -44,6 +46,7 @@ const domPrefix = useId()
 const titleElement = ref<HTMLHeadingElement | null>(null)
 const step = ref<WizardStep>('source')
 const { sourceKind, imagePath, device, target } = useSourceSelection()
+useFeatureJump(handleExit)
 /** 下一次搜索怎么搜：来源这一步选，结果页的「深度搜索」改成 deep */
 const searchMode = ref<SearchMode>('quick')
 /** 选中的候选分区在结果里的下标 */
@@ -204,6 +207,16 @@ watch(selectedIndex, () => {
 
 onMounted(() => {
   titleElement.value?.focus()
+  // 从别的功能转过来：快速搜索几秒就完，直接搜；要深度搜索的只先选好，等用户点开始（要读一遍整块盘）
+  const handoff = takeFeatureHandoff('findPartitions')
+  if (handoff === null) {
+    return
+  }
+  if (handoff.searchMode === 'deep') {
+    searchMode.value = 'deep'
+  } else {
+    void handleSubmit()
+  }
 })
 
 async function handleExit() {
@@ -548,7 +561,10 @@ async function openSelected() {
           {{ formatHostError(browse.failure.value) }}
         </p>
 
-        <p v-if="candidates.length === 0" class="wizard__note">{{ t('findPartitions.results.none') }}</p>
+        <template v-if="candidates.length === 0">
+          <p class="wizard__note">{{ t('findPartitions.results.none') }}</p>
+          <FeatureJump :features="['carve']" :target="search.target.value" />
+        </template>
         <div v-else class="find-partitions__results wizard__fill">
           <section class="wizard__pane" :aria-labelledby="`${domPrefix}-list`">
             <h3 :id="`${domPrefix}-list`" class="wizard__section-title find-partitions__title">

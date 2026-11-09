@@ -13,6 +13,7 @@ import FailureList from './FailureList.vue'
 import ReadHealthHint from './ReadHealthHint.vue'
 import { useCarve } from '../composables/useCarve'
 import { useCopy } from '../composables/useCopy'
+import { takeFeatureHandoff } from '../composables/useFeatureJump'
 import { useFileTypeName } from '../composables/useFileTypeName'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { useHostDialog } from '../composables/useHostDialog'
@@ -349,6 +350,10 @@ onMounted(() => {
   titleElement.value?.focus()
   void loadFileTypes()
   void loadHistory()
+  // 从别的功能转过来：源已经选好（同一个源），直接到选格式这一步
+  if (takeFeatureHandoff('carve') !== null && target.value !== null) {
+    step.value = 'formats'
+  }
 })
 
 function handleExit() {

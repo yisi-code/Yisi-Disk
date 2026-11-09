@@ -178,6 +178,14 @@
   gap: var(--space-sm);
 }
 
+/* 一排操作按钮（例如转到别的功能），前面可以有一句引导；窄时换行 */
+.wizard__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
 .wizard__error {
   margin: 0;
   color: var(--color-danger);
@@ -373,12 +381,20 @@
   font-weight: 600;
 }
 
+/* 结果之后的「下一步」：一句说明，下面可以跟一排转到别的功能的按钮 */
 .tool__next {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
   margin: 0;
   padding: var(--space-sm) var(--space-md);
   border-left: 4px solid var(--color-warning);
   background: var(--color-bg);
   border-radius: var(--radius-control);
+}
+
+.tool__next > p {
+  margin: 0;
 }
 
 /* 树列表（分区文件的目录树、深度恢复的结果树）共用的外观；行距与缩进各组件自己写 */

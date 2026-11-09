@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import FeatureJump from './FeatureJump.vue'
 import PartitionFiles from './PartitionFiles.vue'
 import SourcePicker from './SourcePicker.vue'
 import WizardSteps from './WizardSteps.vue'
 import WriteHistoryList from './WriteHistoryList.vue'
 import WritePlanConfirm from './WritePlanConfirm.vue'
 import { useBrowse } from '../composables/useBrowse'
+import { takeFeatureHandoff, useFeatureJump } from '../composables/useFeatureJump'
 import { useHostErrorText } from '../composables/useHostErrorText'
 import { usePositionText } from '../composables/usePositionText'
 import { usePartitionText } from '../composables/usePartitionText'
@@ -22,6 +24,7 @@ import {
   type BootCopyReport,
   type BootDiagnosis,
   type BootFix,
+  type BootVerdict,
   type BootIssue,
   type HostError,
   type JobTarget,
@@ -30,9 +33,17 @@ import {
   type WriteRecord,
 } from '../services/host'
 import { formatBytes, formatCount, formatHex } from '../utils/format'
+import type { FeatureKey } from '../navigation'
 
 const STEPS = ['source', 'diagnose', 'result'] as const
 type WizardStep = (typeof STEPS)[number]
+
+/** 诊断结论之后可以转去的功能：引导扇区正常却打不开时问题在别处；推算不出引导扇区时按文件格式找回 */
+const NEXT_FEATURES: Partial<Record<BootVerdict, FeatureKey[]>> = {
+  healthy: ['undelete', 'fsCheck', 'carve'],
+  bothDamaged: ['carve'],
+  unrecognized: ['carve'],
+}
 
 const emit = defineEmits<{ exit: [] }>()
 
@@ -56,6 +67,7 @@ const { writeActionText, writeOutcomeText, writeBlockedText } = useWritePlanText
 const titleElement = ref<HTMLHeadingElement | null>(null)
 const step = ref<WizardStep>('source')
 const { sourceKind, imagePath, device, target } = useSourceSelection()
+useFeatureJump(handleExit)
 const diagnosis = shallowRef<BootDiagnosis | null>(null)
 /** 诊断时的源：用备份浏览时打开同一个源 */
 const diagnosedTarget = shallowRef<JobTarget | null>(null)
@@ -131,6 +143,10 @@ watch(
 
 onMounted(() => {
   titleElement.value?.focus()
+  // 从别的功能转过来：源已经选好，直接诊断（只读引导扇区，很快）
+  if (takeFeatureHandoff('repairPartition') !== null && target.value !== null) {
+    void runDiagnosis()
+  }
 })
 
 async function handleExit() {
@@ -534,7 +550,7 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
         <ul v-if="diagnosis.notes.length" class="wizard__list">
           <li v-for="note in diagnosis.notes" :key="note">{{ tableNote(note) }}</li>
         </ul>
-        <div v-if="gptDamaged" class="repair-wizard__actions">
+        <div v-if="gptDamaged" class="wizard__actions">
           <button
             v-if="canWrite"
             class="wizard__button wizard__button--secondary"
@@ -631,7 +647,7 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
                 {{ tableIssueText(partition, issue) }}
               </li>
             </ul>
-            <div v-if="canWrite && hasTypeMismatch(partition)" class="repair-wizard__actions">
+            <div v-if="canWrite && hasTypeMismatch(partition)" class="wizard__actions">
               <button
                 class="wizard__button wizard__button--secondary"
                 type="button"
@@ -647,10 +663,17 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
           <p v-if="te(`repair.next.${partition.verdict}`)" class="wizard__hint">
             {{ t(`repair.next.${partition.verdict}`) }}
           </p>
+          <FeatureJump
+            v-if="NEXT_FEATURES[partition.verdict]"
+            :features="NEXT_FEATURES[partition.verdict] ?? []"
+            :target="diagnosedTarget"
+            :partition="{ number: partition.number, offset: partition.offset, length: partition.length }"
+            :disabled="isBusy"
+          />
 
           <div
             v-if="canBrowseBackup(partition) || canRebuild(partition) || (canWrite && fixDirection(partition))"
-            class="repair-wizard__actions"
+            class="wizard__actions"
           >
             <button
               v-if="canBrowseBackup(partition)"
@@ -753,12 +776,6 @@ function canBrowseBackup(partition: PartitionBoot): boolean {
 .repair-wizard__subtitle {
   margin: 0;
   font-weight: 600;
-}
-
-.repair-wizard__actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
 }
 
 </style>
